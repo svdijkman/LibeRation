@@ -1,0 +1,36 @@
+Package: LibeRation
+Title: Nonlinear Mixed-Effects Modelling
+Version: 0.1.0
+Authors@R: 
+    person("Sven C.", "van Dijkman", email = "svdijkman@users.noreply.github.com", role = c("aut", "cre"))
+Description: NONMEM-style population PK/PD estimation with FO, FOCE, FOCEI,
+    SAEM, Laplace, IMP, and full Bayesian MCMC. Supports configurable
+    residual and omega structures, covariates, GOF tables, bootstrap SE,
+    NONMEM control import, and project workflows. Uses LibeRtAD for AD.
+License: MIT + file LICENSE
+URL: https://github.com/svdijkman/LibeRation
+BugReports: https://github.com/svdijkman/LibeRation/issues
+Encoding: UTF-8
+Roxygen: list(markdown = TRUE, r6 = FALSE)
+Imports:
+    LibeRtAD (>= 0.3.0),
+    R6,
+    Rcpp,
+    stats,
+    data.table
+LinkingTo: Rcpp
+Suggests:
+    testthat (>= 3.0.0),
+    numDeriv,
+    statmod,
+    devtools,
+    pkgload,
+    callr,
+    shiny,
+    DT,
+    ggplot2,
+    knitr,
+    rmarkdown
+Config/testthat/edition: 3
+Config/roxygen2/version: 8.0.0
+VignetteBuilder: knitr

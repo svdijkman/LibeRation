@@ -1,0 +1,5 @@
+pkgload::load_all("C:/Users/svdijkman.DESKTOP-4OG10M4/Desktop/AD/LibeRation", compile = FALSE)
+p <- nm_ctl_template(2L, 2L)
+d <- nm_bench_mixed_design(2L, 2L, n_per = 1, seed = 2024L)
+r <- nm_bench_simulate_rcppnm(p, d, seed = 2024L)
+cat("adv2_trans2 ok\n")

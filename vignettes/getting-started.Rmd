@@ -1,0 +1,141 @@
+---
+title: "Getting Started with LibeRation"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Getting Started with LibeRation}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>"
+)
+```
+
+LibeRation fits NONMEM-style population PK/PD models using FO, FOCE, FOCEI,
+SAEM, Laplace, IMP, and Bayesian MCMC. This vignette walks through a minimal
+estimation and goodness-of-fit workflow on synthetic theophylline data.
+
+```{r load}
+library(LibeRation)
+```
+
+## Synthetic data
+
+Built-in examples mirror common teaching datasets:
+
+```{r catalog}
+head(nm_synthetic_catalog()$theo, 3)
+```
+
+Generate a small oral two-compartment dataset (ADVAN 4, TRANS 4):
+
+```{r synth}
+sim <- nm_synthetic_theo(n_sub = 8L, seed = 1L)
+str(sim$model, max.level = 1)
+nrow(sim$data$data)
+```
+
+## First-order estimation
+
+Start with a fast FO fit using the C++ PK engine:
+
+```{r fo-fit}
+fit <- nm_est(
+  sim$model,
+  sim$data,
+  method = "FO",
+  grad = "cpp",
+  pk_engine = "cpp",
+  control = list(
+    maxit = 40L,
+    compute_inference = FALSE,
+    n_cores = 1L
+  )
+)
+fit$method
+fit$objective
+head(fit$theta, 3)
+```
+
+## Goodness-of-fit
+
+Population and individual predictions, residuals, and ETAB summaries:
+
+```{r gof}
+pred <- predict(fit, type = "ipred")
+head(pred[pred$MDV == 0L, c("ID", "TIME", "DV", "IPRED", "IWRES")])
+
+etab <- nm_etab(fit)
+head(etab)
+```
+
+## Residual structure configuration
+
+Likelihood/residual models are configured with `nm_lik_config()` and attached
+to the model:
+
+```{r lik}
+cfg <- nm_lik_config(error = "propadd", omega = "block2")
+cfg
+```
+
+## Control streams
+
+LibeRation can parse and compose NONMEM control streams for the Shiny editor
+and workspace workflow:
+
+```{r ctl}
+parts <- nm_ctl_template(
+  advan = 4L,
+  trans = 4L,
+  data_file = "data/theo.csv",
+  problem = "THEO example"
+)
+ctl <- nm_ctl_compose(parts)
+grep("\\$PK|\\$THETA|\\$OMEGA", ctl, value = TRUE)
+```
+
+Parsed streams round-trip through `nm_ctl_parse()`:
+
+```{r ctl-roundtrip}
+parts2 <- nm_ctl_parse(ctl)
+nrow(parts2$thetas)
+parts2$advan
+```
+
+## Project workspace
+
+For Pirana-style project management, initialize a workspace directory:
+
+```{r workspace, eval = FALSE}
+ws <- tempfile("LibeRation_ws")
+nm_workspace_init(ws, create_demo_project = TRUE)
+nm_workspace_list_projects(ws)
+# liberation_shiny(workspace = ws)
+```
+
+## Background jobs
+
+Long runs can be submitted to a background R process (requires **callr**):
+
+```{r jobs, eval = FALSE}
+job <- nm_job_submit(
+  sim$model, sim$data,
+  method = "FOCE",
+  grad = "cpp",
+  pk_engine = "cpp",
+  control = list(maxit = 100L)
+)
+job$process$wait()
+nm_job_result(job$id)
+```
+
+## Next steps
+
+- Estimation methods: `?nm_est`, `?nm_focei_setup`, `?nm_cov_step`
+- Simulation: `?nm_simulate`, `?nm_synthetic_catalog`
+- GUI: `?liberation_shiny`
+- Automatic differentiation engine: **LibeRtAD** (`?LibeRtAD`)

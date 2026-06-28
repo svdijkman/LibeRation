@@ -1,0 +1,22 @@
+^.*\.Rproj$
+^\.Rproj\.user$
+^\.git$
+^\.github$
+^docs/
+^bootstrap_test_out\.txt$
+^tests/_tmp_.*\.R$
+^test-run\.log$
+^.*\.tar\.gz$
+^cran-comments\.md$
+
+# NONMEM benchmark dev tree (scripts + run outputs); not used at install/runtime.
+# Benchmark API lives in R/nm-nonmem-bench.R; Shiny uses inst/shiny only.
+^inst/nonmem_bench/
+
+# Shiny dev/test helpers (not part of the app).
+^inst/shiny/_test_.*\.R$
+
+# Compiled objects / IDE clutter (should not be in tarball).
+^src/.*\.(o|obj|dll|so|dylib)$
+^src/.*\.(a|lib)$
+^src/Makevars\.user$

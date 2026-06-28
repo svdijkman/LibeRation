@@ -1,0 +1,32 @@
+.Rproj.user
+*.Rproj
+*.tar.gz
+cran-comments.md
+LICENSE.md
+*.o
+*.obj
+*.dll
+*.so
+*.dylib
+src/*.a
+src/*.lib
+src/Makevars.user
+
+# Local test / debug output
+bootstrap_test_out.txt
+test-run.log
+tests/_tmp_*.R
+
+# NONMEM benchmark run artifacts (keep scripts if needed; never commit outputs)
+inst/nonmem_bench/all_run/
+inst/nonmem_bench/all_run_v*/
+inst/nonmem_bench/sim_run/
+inst/nonmem_bench/_est_adv1_work/
+inst/nonmem_bench/pilot_run/
+inst/nonmem_bench/**/est
+inst/nonmem_bench/**/est.*
+inst/nonmem_bench/**/sim_*
+inst/nonmem_bench/**/FDATA
+inst/nonmem_bench/**/FCON
+inst/nonmem_bench/**/FSUBS
+inst/nonmem_bench/**/trash.*

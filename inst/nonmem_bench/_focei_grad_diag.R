@@ -1,0 +1,26 @@
+pkgload::load_all("C:/Users/svdijkman.DESKTOP-4OG10M4/Desktop/AD/LibeRation", compile = FALSE, quiet = TRUE)
+wd <- list.files(tempdir(), pattern = "^adv1_est_", full.names = TRUE)
+wd <- wd[length(wd)]
+dat <- read.csv(file.path(wd, "data.csv"))
+parts <- LibeRation:::.nm_bench_parts_for_mode(nm_ctl_template(1L, 1L), "est")
+imp <- nm_read_nonmem(file.path(wd, "est.ctl"), data_path = file.path(wd, "data.csv"))
+imp$model$INPUT <- parts$input_cols
+model <- imp$model
+ds <- structure(list(data = dat), class = "nm_dataset")
+ext <- nm_bench_read_ext(file.path(wd, "est.ext"))
+par0 <- .nm_init_par(model)
+cat("par0:", par0, "\n")
+datp <- .nm_prepare_data(ds, model$INPUT, model)
+eta0 <- .nm_fit_all_eta_modes(model, datp, ext$theta, ext$omega, ext$sigma, NULL, "cpp", list())
+obj_nm_par <- .nm_focei_objective(model, ds, ext$theta, ext$omega, ext$sigma, eta0, "cpp")
+p0 <- .nm_unpack(model, par0)
+eta_init <- .nm_fit_all_eta_modes(model, datp, p0$theta, p0$omega, p0$sigma, NULL, "cpp", list())
+obj_init <- .nm_focei_objective(model, ds, p0$theta, p0$omega, p0$sigma, eta_init, "cpp")
+cat("obj init:", obj_init, " obj NM par+refit eta:", obj_nm_par, " NM ext:", ext$obj, "\n")
+g <- .nm_num_grad(function(p) {
+  pp <- .nm_unpack(model, p)
+  em <- .nm_fit_all_eta_modes(model, datp, pp$theta, pp$omega, pp$sigma, NULL, "cpp", list())
+  .nm_focei_objective(model, ds, pp$theta, pp$omega, pp$sigma, em, "cpp")
+}, par0)
+names(g) <- .nm_par_labels(model)
+cat("grad at init:\n"); print(g)
