@@ -22,6 +22,14 @@
 #'
 #' @section Background jobs:
 #' * [nm_job_submit()], [nm_job_status()], [nm_job_result()] (requires **callr**)
+#' * Remote clusters via **LibeRties**: [nm_remote_server_add()],
+#'   [nm_remote_job_list()], `nm_job_submit(..., server = )`
+#'
+#' @section Diagnostics (0.4):
+#' * VPC / pcVPC: [nm_vpc()], [nm_pcvpc()], [nm_vpc_plot()]
+#' * Stepwise covariate modelling: [nm_scm()], [nm_forest_plot()]
+#' * Likelihood profiling: [nm_profile_likelihood()]
+#' * Engine QA: [nm_check_pk_engines()], [nm_time_profile()]
 #'
 #' @section Package options:
 #' * `LibeRation.workspace` — workspace root directory

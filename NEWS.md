@@ -1,3 +1,8 @@
+## LibeRation 0.4.1
+
+* Regenerated manuals for VPC, SCM, likelihood profiling, remote servers, table I/O,
+  and profiling APIs; expanded getting-started vignette and package overview.
+
 ## LibeRation 0.4.0
 
 * Shiny client GUI (Pirana-style workspace, ribbon, dark mode), remote jobs via LibeRties,

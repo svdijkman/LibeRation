@@ -133,9 +133,64 @@ job$process$wait()
 nm_job_result(job$id)
 ```
 
+## Stepwise covariate modelling
+
+After a base fit, run forward/backward SCM on covariate candidates (requires
+a warm-started parent fit for valid nested dOFV):
+
+```{r scm, eval = FALSE}
+scm <- nm_scm(
+  fit,
+  covariates = c("WT", "AGE", "SEX"),
+  forward_p = 0.05,
+  backward_p = 0.01
+)
+scm$selected
+nm_forest_plot(scm)
+```
+
+## VPC and pcVPC
+
+Visual predictive checks use simulation from the fitted model:
+
+```{r vpc, eval = FALSE}
+vpc <- nm_vpc(fit, n_sim = 200, bins = 8)
+nm_vpc_plot(vpc)
+pcvpc <- nm_pcvpc(fit, n_sim = 200)
+```
+
+## Remote jobs (LibeRties)
+
+Submit estimation to a LibeRties scheduler (see **LibeRties** vignette):
+
+```{r remote, eval = FALSE}
+nm_remote_server_add(
+  "cluster", "http://hpc:8080", "alice",
+  token = Sys.getenv("LIBERTIES_TOKEN")
+)
+job <- nm_job_submit(
+  sim$model, sim$data,
+  method = "FOCE",
+  server = "cluster"
+)
+nm_job_status(job$id)
+fit_remote <- nm_job_result(job$id)
+```
+
+## Shiny GUI
+
+Launch the Pirana-style client (workspace, control editor, jobs tab):
+
+```{r shiny, eval = FALSE}
+liberation_shiny()
+# options(LibeRation.workspace = "path/to/projects")
+```
+
 ## Next steps
 
 - Estimation methods: `?nm_est`, `?nm_focei_setup`, `?nm_cov_step`
+- Diagnostics: `?nm_scm`, `?nm_vpc`, `?nm_profile_likelihood`
 - Simulation: `?nm_simulate`, `?nm_synthetic_catalog`
 - GUI: `?liberation_shiny`
+- Remote scheduler: **LibeRties** (`?LibeRties`)
 - Automatic differentiation engine: **LibeRtAD** (`?LibeRtAD`)

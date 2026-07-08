@@ -1,6 +1,6 @@
 Package: LibeRation
 Title: Nonlinear Mixed-Effects Modelling
-Version: 0.4.0
+Version: 0.4.1
 Authors@R: 
     person("Sven C.", "van Dijkman", email = "svdijkman@users.noreply.github.com", role = c("aut", "cre"))
 Description: NONMEM-style population PK/PD estimation with FO, FOCE, FOCEI,

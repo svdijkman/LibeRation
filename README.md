@@ -58,7 +58,9 @@ nm_workspace_create_project("my_study", template = "theo")
 | GOF | `predict()`, `nm_etab()`, `nm_add_cwres()`, `nm_add_npc_npde()` |
 | Simulation | `nm_simulate()`, `nm_synthetic_*()` |
 | Workspace | `nm_workspace_*()` |
-| Jobs | `nm_job_submit()`, `nm_job_result()` |
+| Jobs | `nm_job_submit()`, `nm_job_result()`, `nm_remote_server_*()` |
+| Diagnostics | `nm_scm()`, `nm_vpc()`, `nm_pcvpc()`, `nm_profile_likelihood()` |
+| Tables | `nm_write_table()`, `nm_read_table()` |
 
 ## Documentation
 
