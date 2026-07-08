@@ -49,6 +49,8 @@ nm_model(
 
 \item{OMEGAS}{Data frame with columns \code{OMEGA}, \code{Value}.}
 
+\item{SIGMAS}{Data frame with columns \code{SIGMA}, \code{Value}.}
+
 \item{COVARIATES}{Optional character vector of covariate column names in the dataset.}
 
 \item{USE_ODE}{Use ODE solver (ADVAN 6/13) when \code{TRUE}.}

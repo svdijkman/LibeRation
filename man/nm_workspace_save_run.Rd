@@ -11,7 +11,8 @@ nm_workspace_save_run(
   fit,
   root = nm_workspace_root(),
   label = NULL,
-  job_id = NULL
+  job_id = NULL,
+  run_info = NULL
 )
 }
 \description{

@@ -7,6 +7,10 @@
 .nm_ipred_align(subj, subj_ev, ipred_ev)
 }
 \description{
-Map ipred from an expanded event table back to the original subject rows.
+When several rows share the same (TIME, EVID, CMT) key (duplicate/replicate
+timepoints), a plain \code{match()} maps every duplicate original row to the
+\emph{first} matching event row. That is fixed here by matching positionally:
+the k-th original occurrence of a key maps to the k-th expanded occurrence
+(falling back to the last available occurrence).
 }
 \keyword{internal}

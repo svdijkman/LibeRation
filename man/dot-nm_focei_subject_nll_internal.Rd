@@ -11,7 +11,8 @@
   omega,
   sigma,
   eta,
-  pk_engine = "auto"
+  pk_engine = "auto",
+  interaction = TRUE
 )
 }
 \description{

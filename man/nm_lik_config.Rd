@@ -10,7 +10,9 @@ nm_lik_config(
   omega = c("diag", "block2"),
   sigma_corr = c("indep", "ar1"),
   iov = 0L,
-  ar1_rho = 0
+  ar1_rho = 0,
+  blq_method = c("none", "m3", "m4"),
+  lloq = NA_real_
 )
 
 \method{print}{nm_lik_config}(x, ...)
@@ -29,6 +31,19 @@ nm_lik_config(
 
 \item{ar1_rho}{AR(1) correlation for residual errors when \code{sigma_corr = "ar1"}.}
 
+\item{blq_method}{Below-limit-of-quantification (censoring) likelihood:
+\code{"none"} (default; standard density for all observations),
+\code{"m3"} (Beal M3: censored observations contribute
+\eqn{\log \Phi((LLOQ - f)/\sqrt{R})}), or \code{"m4"} (Beal M4: M3
+conditioned on \eqn{y > 0}). See \code{\link{nm_write_table}} and the BLQ
+vignette. Requires an \code{LLOQ} value (per-row \code{LLOQ} column or the
+\code{lloq} argument) and a censoring indicator (\code{BLQ}/\code{CENS}
+column, or \code{DV < LLOQ}).}
+
+\item{lloq}{Optional scalar lower limit of quantification used when the data
+carry no per-row \code{LLOQ} column. \code{NA} (default) means "take LLOQ
+from the data".}
+
 \item{x}{An \code{nm_lik_config} object.}
 
 \item{...}{Unused.}
@@ -41,5 +56,6 @@ Model likelihood / residual configuration
 }
 \examples{
 nm_lik_config(error = "propadd", omega = "diag")
+nm_lik_config(error = "prop", blq_method = "m3", lloq = 0.1)
 print(nm_lik_config())
 }

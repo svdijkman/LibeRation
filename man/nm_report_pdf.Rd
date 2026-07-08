@@ -7,9 +7,9 @@
 nm_report_pdf(
   fit,
   output_path,
-  sections = list(summary = TRUE, parameters = TRUE, gof_time = TRUE, gof_ipred_time =
-    TRUE, gof_scatter = TRUE, gof_residuals = TRUE, diag_shrinkage = TRUE, diag_eta =
-    TRUE, narrative_stub = TRUE),
+  sections = list(summary = TRUE, run_info = TRUE, parameters = TRUE, gof_time = TRUE,
+    gof_ipred_time = TRUE, gof_scatter = TRUE, gof_residuals = TRUE, diag_shrinkage =
+    TRUE, diag_eta = TRUE, narrative_stub = TRUE),
   project_meta = list()
 )
 }

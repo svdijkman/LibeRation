@@ -13,7 +13,7 @@ nm_ctl_canonical(ctl_text)
 Normalized control text.
 }
 \description{
-Canonical control text for stable dirty-state comparison
+Canonical control stream text for comparison
 }
 \examples{
 parts <- nm_ctl_template(2L, 1L)

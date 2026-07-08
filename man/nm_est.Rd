@@ -7,7 +7,7 @@
 nm_est(
   model,
   data,
-  method = c("FO", "FOCE", "FOCEI", "SAEM", "LAPLACE", "IMP", "BAYES"),
+  method = c("FO", "FOCE", "FOCEI", "SAEM", "LAPLACE", "IMP", "BAYES", "POSTHOC"),
   start = NULL,
   backend = c("cpp", "R"),
   grad = c("auto", "ad", "numeric", "cpp"),

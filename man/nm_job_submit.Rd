@@ -11,6 +11,12 @@ nm_job_submit(
   method = "FO",
   label = NULL,
   job_root = nm_job_root(),
+  server = NULL,
+  data_ref = NULL,
+  workspace_project = NULL,
+  workspace_version_id = NULL,
+  est_run_id = NULL,
+  workspace_root = NULL,
   ...
 )
 
@@ -27,6 +33,10 @@ nm_job_submit(
 \item{label}{Optional short label for the job queue UI.}
 
 \item{job_root}{Job storage directory; defaults to \code{\link{nm_job_root}}.}
+
+\item{server}{Remote server id from \code{\link{nm_remote_server_list}}; \code{NULL} runs locally.}
+
+\item{data_ref}{Optional list with \code{dataset_id} and \code{md5} for cluster-hosted data.}
 
 \item{...}{Unused.}
 

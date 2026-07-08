@@ -4,7 +4,11 @@
 \alias{nm_job_watch_signature}
 \title{Watch signature for job directory changes (for Shiny auto-refresh)}
 \usage{
-nm_job_watch_signature(job_root = nm_job_root())
+nm_job_watch_signature(
+  job_root = nm_job_root(),
+  light = FALSE,
+  local_only = FALSE
+)
 }
 \arguments{
 \item{job_root}{Job storage directory.}

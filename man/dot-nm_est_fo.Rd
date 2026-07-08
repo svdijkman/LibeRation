@@ -2,7 +2,7 @@
 % Please edit documentation in R/nm-est-methods.R
 \name{.nm_est_fo}
 \alias{.nm_est_fo}
-\title{First-order (FO) estimation}
+\title{First-order (FO) estimation (true NONMEM FO marginal likelihood)}
 \usage{
 .nm_est_fo(
   model,
@@ -16,7 +16,15 @@
 )
 }
 \description{
-Two-step NONMEM-style FO: (1) THETA and SIGMA at eta = 0; (2) fit subject
-etas then OMEGA from the random-effects prior \eqn{\sum_i \eta_i^{\top} \Omega^{-1} \eta_i}.
+Minimises the FO marginal objective jointly over THETA, OMEGA, and SIGMA.
+For each subject the marginal -2LL is \eqn{\log|V_i| + r_i^{\top} V_i^{-1} r_i}
+with \eqn{V_i = R_i + G_i \Omega G_i^{\top}}, \eqn{G_i = \partial f_i/\partial\eta}
+at \eqn{\eta = 0}, and \eqn{R_i} the residual variance at \eqn{\eta = 0}. No
+etas are fitted for the objective; empirical-Bayes etas are computed only for
+diagnostics (\code{fit$eta}).
+}
+\details{
+Set \code{control$fo_objective = "twostep"} to fall back to the legacy
+(non-NONMEM) two-step scheme.
 }
 \keyword{internal}

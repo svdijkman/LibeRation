@@ -4,7 +4,15 @@
 \alias{.nm_focei_sensitivity_grad}
 \title{Gradient of FOCEI at fixed conditional eta modes (total grad when eta is at mode).}
 \usage{
-.nm_focei_sensitivity_grad(model, data, par, eta_mat, pk_engine)
+.nm_focei_sensitivity_grad(
+  model,
+  data,
+  par,
+  eta_mat,
+  pk_engine,
+  backend = "cpp",
+  grad = "auto"
+)
 }
 \description{
 Gradient of FOCEI at fixed conditional eta modes (total grad when eta is at mode).

@@ -42,6 +42,18 @@ LibeRtAD-powered gradients are used when available.
 
 \itemize{
 \item \code{\link[=nm_job_submit]{nm_job_submit()}}, \code{\link[=nm_job_status]{nm_job_status()}}, \code{\link[=nm_job_result]{nm_job_result()}} (requires \strong{callr})
+\item Remote clusters via \strong{LibeRties}: \code{\link[=nm_remote_server_add]{nm_remote_server_add()}},
+\code{\link[=nm_remote_job_list]{nm_remote_job_list()}}, \code{nm_job_submit(..., server = )}
+}
+}
+
+\section{Diagnostics (0.4)}{
+
+\itemize{
+\item VPC / pcVPC: \code{\link[=nm_vpc]{nm_vpc()}}, \code{\link[=nm_pcvpc]{nm_pcvpc()}}, \code{\link[=nm_vpc_plot]{nm_vpc_plot()}}
+\item Stepwise covariate modelling: \code{\link[=nm_scm]{nm_scm()}}, \code{\link[=nm_forest_plot]{nm_forest_plot()}}
+\item Likelihood profiling: \code{\link[=nm_profile_likelihood]{nm_profile_likelihood()}}
+\item Engine QA: \code{\link[=nm_check_pk_engines]{nm_check_pk_engines()}}, \code{\link[=nm_time_profile]{nm_time_profile()}}
 }
 }
 

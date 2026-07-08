@@ -4,7 +4,12 @@
 \alias{nm_job_list}
 \title{List jobs in the job root}
 \usage{
-nm_job_list(job_root = nm_job_root())
+nm_job_list(
+  job_root = nm_job_root(),
+  local_only = FALSE,
+  remote_only = FALSE,
+  sync_active = TRUE
+)
 }
 \arguments{
 \item{job_root}{Job storage directory.}

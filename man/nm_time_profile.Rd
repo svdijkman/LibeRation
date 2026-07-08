@@ -2,22 +2,28 @@
 % Please edit documentation in R/nm-profiling.R
 \name{print.nm_profile}
 \alias{print.nm_profile}
-\alias{profile.nm_fit}
-\title{Summarise profiling data attached to a fit}
+\alias{nm_time_profile}
+\title{Summarise runtime (timing) profiling data attached to a fit}
 \usage{
 \method{print}{nm_profile}(x, ...)
 
-\method{profile}{nm_fit}(object, ...)
+nm_time_profile(fit, ...)
 }
 \arguments{
-\item{x}{A profiling summary data frame.}
+\item{x}{A timing-profile summary data frame.}
 
 \item{...}{Unused.}
 
-\item{object}{An \code{nm_fit} object.}
+\item{fit}{An \code{nm_fit} object.}
+}
+\value{
+An \code{nm_profile} object (a data frame), or \code{NULL}.
 }
 \description{
-Summarise profiling data attached to a fit
+Returns the wall-clock timing counters collected during estimation when
+\code{options(LibeRation.profile = TRUE)} was set. This is the runtime
+\emph{timing} profiler; for likelihood-based parameter profiling see
+\code{\link{nm_profile_likelihood}}.
 }
 \examples{
 \dontrun{
@@ -26,7 +32,7 @@ sim <- nm_synthetic_theo(n_sub = 2L)
 fit <- nm_est(sim$model, sim$data, method = "FO",
               control = list(maxit = 3L, compute_inference = FALSE))
 options(LibeRation.profile = FALSE)
-if (!is.null(fit$profile)) print(profile(fit))
+if (!is.null(fit$profile)) print(nm_time_profile(fit))
 }
 \dontrun{
 options(LibeRation.profile = TRUE)
@@ -34,6 +40,6 @@ sim <- nm_synthetic_theo(n_sub = 2L)
 fit <- nm_est(sim$model, sim$data, method = "FO",
               control = list(maxit = 3L, compute_inference = FALSE))
 options(LibeRation.profile = FALSE)
-profile(fit)
+nm_time_profile(fit)
 }
 }

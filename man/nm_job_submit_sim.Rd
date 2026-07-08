@@ -28,7 +28,9 @@ nm_job_submit_sim(
   diag_refit_eta = TRUE,
   diag_only = FALSE,
   workspace_root = nm_workspace_root(),
-  job_root = nm_job_root()
+  job_root = nm_job_root(),
+  server = NULL,
+  fit = NULL
 )
 }
 \arguments{

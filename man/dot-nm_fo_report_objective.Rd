@@ -2,11 +2,13 @@
 % Please edit documentation in R/nm-fo.R
 \name{.nm_fo_report_objective}
 \alias{.nm_fo_report_objective}
-\title{FO omega step: \eqn{\sum_i \eta_i^{\top} \Omega^{-1} \eta_i + \log|\Omega|} with fixed etas}
+\title{FO reported objective = true NONMEM FO marginal -2LL.}
 \usage{
-.nm_fo_report_objective(model, data, par, eta_mat, pk_engine = "auto")
+.nm_fo_report_objective(model, data, par, eta_mat = NULL, pk_engine = "auto")
 }
 \description{
-FO omega step: \eqn{\sum_i \eta_i^{\top} \Omega^{-1} \eta_i + \log|\Omega|} with fixed etas
+The \code{eta_mat} argument is retained for call-site compatibility but is
+unused: the FO marginal likelihood integrates the random effects out
+analytically and does not condition on fitted etas.
 }
 \keyword{internal}
