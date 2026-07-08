@@ -66,6 +66,89 @@ skip_nonmem <- function() {
   }
 }
 
+# --- NONMEM-free fidelity benchmarks (one per estimation method) ------------
+
+test_that("FO marginal benchmark: C++ matches reference R implementation", {
+  skip_if_not_installed("data.table")
+  chk <- nm_bench_fo_marginal_check(id = "warf", n_sub = 8L, seed = 3L)
+  expect_true(is.finite(chk$cpp))
+  expect_true(is.finite(chk$r))
+  expect_true(chk$ok, info = sprintf("cpp=%.6f r=%.6f diff=%.2e", chk$cpp, chk$r, chk$diff))
+})
+
+test_that("FOCEI interaction benchmark: engaged for prop, no-op for add", {
+  skip_if_not_installed("data.table")
+  chk <- nm_bench_focei_interaction_check(n_sub = 20L, seed = 11L)
+  expect_true(chk$prop_engaged,
+    info = sprintf("prop on=%.4f off=%.4f", chk$prop_on, chk$prop_off))
+  expect_true(chk$add_noop,
+    info = sprintf("add on=%.6f off=%.6f", chk$add_on, chk$add_off))
+  expect_true(chk$r_cpp_ok,
+    info = sprintf("R vs cpp FOCEI diff=%.2e", chk$r_cpp_diff))
+})
+
+test_that("FO benchmark: finite marginal OFV and structural theta recovery", {
+  skip_if_not_installed("data.table")
+  rec <- nm_bench_method_recovery(
+    id = "warf", method = "FO", n_sub = 20L, seed = 5L, rtol = 0.6
+  )
+  expect_true(rec$obj_finite)
+  expect_true(rec$theta_ok,
+    info = sprintf("max theta rel err = %.3f", rec$max_theta_rel))
+})
+
+test_that("LAPLACE benchmark: theta recovery and FOCEI/LAPLACE agreement", {
+  skip_if_not_installed("data.table")
+  rec <- nm_bench_method_recovery(
+    id = "iv1", method = "LAPLACE", n_sub = 20L, seed = 5L, rtol = 0.6,
+    n_quad = 5L
+  )
+  expect_true(rec$obj_finite)
+  expect_true(rec$theta_ok,
+    info = sprintf("max theta rel err = %.3f", rec$max_theta_rel))
+
+  cross <- nm_bench_cross_method(
+    id = "iv1", methods = c("FOCEI", "LAPLACE"), n_sub = 20L, seed = 5L,
+    theta_rtol = 0.15, max_outer = 4L, n_quad = 5L
+  )
+  expect_true(all(is.finite(cross$objective)))
+  expect_true(cross$theta_agree,
+    info = sprintf("FOCEI vs LAPLACE max theta rel = %.3f", cross$max_theta_rel))
+})
+
+test_that("SAEM benchmark: finite objective and structural theta recovery", {
+  skip_if_not_installed("data.table")
+  rec <- nm_bench_method_recovery(
+    id = "warf", method = "SAEM", n_sub = 20L, seed = 5L, rtol = 0.6,
+    n_iter = 60L, n_burn = 20L
+  )
+  expect_true(rec$obj_finite)
+  expect_true(rec$theta_ok,
+    info = sprintf("max theta rel err = %.3f", rec$max_theta_rel))
+})
+
+test_that("IMP benchmark: finite objective and structural theta recovery", {
+  skip_if_not_installed("data.table")
+  rec <- nm_bench_method_recovery(
+    id = "warf", method = "IMP", n_sub = 20L, seed = 5L, rtol = 0.6,
+    n_imp = 30L, n_quad = 5L
+  )
+  expect_true(rec$obj_finite)
+  expect_true(rec$theta_ok,
+    info = sprintf("max theta rel err = %.3f", rec$max_theta_rel))
+})
+
+test_that("BAYES benchmark: posterior-mean structural theta recovery", {
+  skip_if_not_installed("data.table")
+  rec <- nm_bench_method_recovery(
+    id = "warf", method = "BAYES", n_sub = 20L, seed = 5L, rtol = 0.6,
+    n_burn = 60L, n_sample = 120L
+  )
+  expect_true(rec$obj_finite)
+  expect_true(rec$theta_ok,
+    info = sprintf("max theta rel err = %.3f", rec$max_theta_rel))
+})
+
 test_that("nm_bench_pilot LibeRation arm runs without NONMEM", {
   skip_if_not_installed("data.table")
   res <- nm_bench_pilot(

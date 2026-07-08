@@ -38,13 +38,28 @@
   nll <- .nm_zero_like(theta, omega, sigma, eta, f, dv)
   cfg <- .nm_lik_config(model)
   dvid <- if ("DVID" %in% names(pred$subj_ev)) pred$subj_ev$DVID[pred$obs_idx] else NULL
-  nll <- .ad_add(nll, .nm_residual_nll(
-    dv, f, sigma,
-    error = cfg$error,
-    dvid = dvid,
-    ar1_rho = cfg$ar1_rho %||% 0,
-    sigma_corr = cfg$sigma_corr %||% "indep"
-  ))
+  use_blq <- .nm_blq_active(cfg) && !.nm_any_ad(theta, omega, sigma, eta, f, dv)
+  if (use_blq) {
+    binfo <- .nm_blq_obs_info(pred$subj_ev, pred$obs_idx, cfg)
+    nll <- .ad_add(nll, .nm_residual_nll_blq(
+      dv, f, sigma,
+      error = cfg$error,
+      lloq = binfo$lloq,
+      cens = binfo$cens,
+      blq_method = cfg$blq_method %||% "m3",
+      dvid = dvid,
+      ar1_rho = cfg$ar1_rho %||% 0,
+      sigma_corr = cfg$sigma_corr %||% "indep"
+    ))
+  } else {
+    nll <- .ad_add(nll, .nm_residual_nll(
+      dv, f, sigma,
+      error = cfg$error,
+      dvid = dvid,
+      ar1_rho = cfg$ar1_rho %||% 0,
+      sigma_corr = cfg$sigma_corr %||% "indep"
+    ))
+  }
   if (include_omega_prior) {
     nll <- .ad_add(nll, .nm_omega_prior(eta, omega))
   }
@@ -61,7 +76,11 @@
                              include_omega_prior = TRUE,
                              pk_engine = "auto") {
   pk_engine <- .nm_resolve_pk_engine(pk_engine, model, theta, omega, sigma, eta)
-  if (pk_engine == "cpp" && !.nm_any_ad(theta, omega, sigma, eta)) {
+  # The monolithic C++ likelihood does not implement BLQ (M3/M4); fall back to
+  # the per-subject R path (which still uses the C++ PK solver for predictions)
+  # so censored observations are handled correctly.
+  if (pk_engine == "cpp" && !.nm_any_ad(theta, omega, sigma, eta) &&
+      !.nm_model_needs_r_lik(model)) {
     return(.nm_nll_cpp(
       model, data, theta, omega, sigma, eta, include_omega_prior
     ))

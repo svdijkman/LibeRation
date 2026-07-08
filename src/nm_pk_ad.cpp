@@ -500,4 +500,40 @@ void reverse_pk_bolus1(Environment myvar, SEXP mygrad) {
   ad_add_grad_sidecar(parents[1], NumericVector::create(gv));
 }
 
+void replay_pk_oral2_trans4(Environment node) {
+  List meta = node["meta"];
+  List parents = node["parents"];
+  Environment tmp = pk_oral2_trans4_block_var(
+    meta["time"], meta["amt"], meta["f1"], meta["evid"],
+    parents[0], parents[1], parents[2], parents[3], parents[4], parents[5],
+    as<int>(meta["obs_cmp"])
+  );
+  node.assign("value", tmp["value"]);
+  node.assign("meta", tmp["meta"]);
+}
+
+void replay_pk_oral1(Environment node) {
+  List meta = node["meta"];
+  List parents = node["parents"];
+  Environment tmp = pk_oral1_block_var(
+    meta["time"], meta["amt"], meta["f1"], meta["evid"],
+    parents[0], parents[1], parents[2],
+    as<int>(meta["obs_cmp"])
+  );
+  node.assign("value", tmp["value"]);
+  node.assign("meta", tmp["meta"]);
+}
+
+void replay_pk_bolus1(Environment node) {
+  List meta = node["meta"];
+  List parents = node["parents"];
+  Environment tmp = pk_bolus1_block_var(
+    meta["time"], meta["amt"], meta["evid"],
+    parents[0], parents[1],
+    as<int>(meta["obs_cmp"])
+  );
+  node.assign("value", tmp["value"]);
+  node.assign("meta", tmp["meta"]);
+}
+
 }  // namespace nm_pk_ad

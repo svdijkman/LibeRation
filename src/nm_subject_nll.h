@@ -61,6 +61,23 @@ inline double residual_var(
   }
 }
 
+// Standard normal CDF clamped away from 0/1 for stable logs.
+inline double blq_phi(double z) {
+  double p = 0.5 * std::erfc(-z * 0.7071067811865476);
+  if (p < 1e-300) p = 1e-300;
+  if (p > 1.0 - 1e-16) p = 1.0 - 1e-16;
+  return p;
+}
+
+// Residual -2 log-likelihood for a subject.
+//
+// When the below-limit-of-quantification (BLQ) method is active
+// (nm_lik::config().blq_method != BLQ_NONE) AND per-observation `lloq` and
+// `cens` vectors of matching length are supplied, censored observations
+// (cens[i] == 1 with a finite lloq[i]) contribute the Beal M3/M4 log-probability
+// of being below the limit instead of the point density. If `lloq`/`cens` are
+// not supplied the behaviour is identical to the standard likelihood, so
+// existing callers are unaffected.
 inline double residual_nll(
     const Rcpp::NumericVector& dv,
     const Rcpp::NumericVector& f,
@@ -68,7 +85,9 @@ inline double residual_nll(
     double s2,
     int error_type,
     const Rcpp::IntegerVector& dvid = Rcpp::IntegerVector(),
-    const Rcpp::NumericVector& sigma = Rcpp::NumericVector()) {
+    const Rcpp::NumericVector& sigma = Rcpp::NumericVector(),
+    const Rcpp::NumericVector& lloq = Rcpp::NumericVector(),
+    const Rcpp::IntegerVector& cens = Rcpp::IntegerVector()) {
   const int n = dv.size();
   if (n == 0) return 0.0;
   auto sigma_at = [&](int i) -> std::pair<double, double> {
@@ -80,6 +99,47 @@ inline double residual_nll(
     }
     return {s1, s2};
   };
+  const int blq = nm_lik::config().blq_method;
+  const bool use_blq = (blq != nm_lik::BLQ_NONE) &&
+                       (lloq.size() == n) && (cens.size() == n);
+  if (use_blq) {
+    const bool is_log = (error_type == nm_lik::ERR_LOG);
+    double nll = 0.0;
+    for (int i = 0; i < n; ++i) {
+      const double yhat = f[i];
+      const auto sg = sigma_at(i);
+      const double var = residual_var(yhat, sg.first, sg.second, error_type);
+      const double sd = std::sqrt(std::max(var, 1e-15));
+      const bool censored = (cens[i] == 1) && R_finite(lloq[i]);
+      if (censored) {
+        double prob;
+        if (is_log) {
+          const double lf = std::log(std::max(yhat, 1e-8));
+          const double llq = std::log(std::max(lloq[i], 1e-8));
+          prob = blq_phi((llq - lf) / sd);
+        } else {
+          const double p_lloq = blq_phi((lloq[i] - yhat) / sd);
+          if (blq == nm_lik::BLQ_M4) {
+            const double p_zero = blq_phi((0.0 - yhat) / sd);
+            prob = (p_lloq - p_zero) / std::max(1.0 - p_zero, 1e-300);
+          } else {
+            prob = p_lloq;
+          }
+        }
+        if (prob < 1e-300) prob = 1e-300;
+        if (prob > 1.0) prob = 1.0;
+        nll += -2.0 * std::log(prob);
+      } else {
+        double resid = dv[i] - yhat;
+        if (is_log) {
+          resid = std::log(std::max(dv[i], 1e-8)) -
+                  std::log(std::max(yhat, 1e-8));
+        }
+        nll += std::log(var) + resid * resid / var;
+      }
+    }
+    return nll;
+  }
   if (nm_lik::config().sigma_corr == nm_lik::SIGMA_AR1 && n > 1) {
     const double rho = nm_lik::config().ar1_rho;
     Rcpp::NumericVector r(n);
@@ -194,7 +254,9 @@ inline double omega_prior_nll_block2(
     Rcpp::NumericVector om_rest(eta.size() - 2);
     for (int i = 2; i < eta.size(); ++i) {
       eta_rest[i - 2] = eta[i];
-      om_rest[i - 2] = (omega.size() > i) ? omega[i] : v1;
+      // block2 packing: omega[0..2] = (var1, var2, cov12); diagonal remainder
+      // for eta3.. starts at omega[3], i.e. omega[i + 1] for eta index i >= 2.
+      om_rest[i - 2] = (omega.size() > i + 1) ? omega[i + 1] : v1;
     }
     nll += omega_prior_nll_diag(eta_rest, om_rest);
   }

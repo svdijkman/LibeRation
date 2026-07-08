@@ -156,13 +156,37 @@
 }
 
 #' @keywords internal
-.nm_parallel_start_cluster <- function(n_cores) {
-  ad_root <- .nm_pkg_root("LibeRtAD")
-  nm_root <- .nm_pkg_root("LibeRation")
-  if (is.null(ad_root) || is.null(nm_root)) {
+.nm_parallel_dev_roots <- function() {
+  dev_env <- getOption("LibeRation.job_dev_env", NULL)
+  if (is.null(dev_env) || !identical(dev_env$mode, "dev")) {
     return(NULL)
   }
-  use_load_all <- !.nm_pkg_is_installed("LibeRtAD") || !.nm_pkg_is_installed("LibeRation")
+  ad <- dev_env$ad_root %||% ""
+  nm <- dev_env$nm_root %||% ""
+  if (!nzchar(ad) || !nzchar(nm) || !dir.exists(ad) || !dir.exists(nm)) {
+    return(NULL)
+  }
+  list(
+    ad_root = normalizePath(ad, winslash = "/", mustWork = FALSE),
+    nm_root = normalizePath(nm, winslash = "/", mustWork = FALSE)
+  )
+}
+
+#' @keywords internal
+.nm_parallel_start_cluster <- function(n_cores) {
+  dev_roots <- .nm_parallel_dev_roots()
+  if (!is.null(dev_roots)) {
+    ad_root <- dev_roots$ad_root
+    nm_root <- dev_roots$nm_root
+    use_load_all <- TRUE
+  } else {
+    ad_root <- .nm_pkg_root("LibeRtAD")
+    nm_root <- .nm_pkg_root("LibeRation")
+    if (is.null(ad_root) || is.null(nm_root)) {
+      return(NULL)
+    }
+    use_load_all <- !.nm_pkg_is_installed("LibeRtAD") || !.nm_pkg_is_installed("LibeRation")
+  }
   cl <- parallel::makePSOCKcluster(n_cores)
   if (use_load_all) {
     if (!requireNamespace("pkgload", quietly = TRUE)) {
@@ -171,11 +195,11 @@
     }
     parallel::clusterExport(cl, c("ad_root", "nm_root"), envir = environment())
     errs <- parallel::clusterEvalQ(cl, {
-      suppressPackageStartupMessages({
-        library(LibeRtAD)
-        pkgload::load_all(ad_root, quiet = TRUE, export_all = TRUE, compile = FALSE)
-        pkgload::load_all(nm_root, quiet = TRUE, export_all = TRUE, compile = FALSE)
-      })
+      if (!requireNamespace("pkgload", quietly = TRUE)) {
+        stop("Package 'pkgload' is required for parallel dev jobs.", call. = FALSE)
+      }
+      pkgload::load_all(ad_root, quiet = TRUE, compile = TRUE, recompile = FALSE)
+      pkgload::load_all(nm_root, quiet = TRUE, recompile = FALSE)
       TRUE
     })
     if (length(errs) != n_cores || !all(vapply(errs, isTRUE, logical(1L)))) {
@@ -297,30 +321,51 @@
       return(lapply(X, FUN))
     }
     on.exit(parallel::stopCluster(cl), add = TRUE)
-    parallel::parLapplyLB(cl, X, FUN)
+    res <- tryCatch(
+      parallel::parLapplyLB(cl, X, FUN),
+      error = function(e) e
+    )
+    if (inherits(res, "error")) {
+      warning(
+        "Parallel evaluation failed (", conditionMessage(res), "); running sequentially.",
+        call. = FALSE
+      )
+      return(lapply(X, FUN))
+    }
+    res
   } else {
-    parallel::mclapply(X, FUN, mc.cores = n_cores)
+    res <- tryCatch(
+      parallel::mclapply(X, FUN, mc.cores = n_cores),
+      error = function(e) e
+    )
+    if (inherits(res, "error")) {
+      warning(
+        "Parallel evaluation failed (", conditionMessage(res), "); running sequentially.",
+        call. = FALSE
+      )
+      return(lapply(X, FUN))
+    }
+    res
   }
 }
 
 #' @keywords internal
 .nm_print_grad <- function(step, grad, prefix = "") {
-  if (!nzchar(prefix)) {
-    cat("Gradient evaluation ", step, ":\n", sep = "")
+  txt <- .nm_format_grad_log(step, grad, prefix = prefix)
+  env <- .nm_job_progress_env()
+  if (!is.null(env)) {
+    .nm_job_progress_log(txt)
   } else {
-    cat(prefix, " gradient evaluation ", step, ":\n", sep = "")
-  }
-  nm <- names(grad)
-  for (i in seq_along(grad)) {
-    cat(sprintf("  %-8s % .6g\n", nm[i], grad[i]))
+    cat(txt, "\n", sep = "")
   }
   invisible(grad)
 }
 
 #' @keywords internal
 .nm_wrap_grad_trace <- function(gr_fn, print_every, grad_names, prefix = "") {
-  if (print_every <= 0L) {
-    return(gr_fn)
+  print_every <- as.integer(print_every[1L])
+  if (print_every < 0L) {
+    print_every <- 0L
   }
   state <- new.env(parent = emptyenv())
   state$count <- 0L
@@ -329,15 +374,30 @@
   state$grad_names <- grad_names
   state$prefix <- prefix
   function(x) {
+    step <- state$count + 1L
+    if (state$print_every > 0L && step %% state$print_every == 0L) {
+      prefix_txt <- if (nzchar(state$prefix)) {
+        paste0(state$prefix, " gradient evaluation ", step, " started")
+      } else {
+        paste0("Gradient evaluation ", step, " started")
+      }
+      .nm_job_progress_event(
+        "gradient_start",
+        list(step = step, prefix = state$prefix),
+        log_msg = prefix_txt
+      )
+    } else {
+      .nm_job_progress_touch()
+    }
     g <- state$gr_fn(x)
     state$count <- state$count + 1L
-    if (state$count %% state$print_every == 0L) {
-      .nm_print_grad(
-        state$count,
-        stats::setNames(as.numeric(g), state$grad_names),
-        prefix = state$prefix
-      )
-    }
+    g_out <- stats::setNames(as.numeric(g), state$grad_names)
+    .nm_job_progress_grad(
+      state$count,
+      g_out,
+      prefix = state$prefix,
+      print_every = state$print_every
+    )
     g
   }
 }

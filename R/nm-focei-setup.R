@@ -150,12 +150,31 @@ nm_focei_setup <- function(model, data, pk_engine = "auto") {
 
 #' Gradient of FOCEI at fixed conditional eta modes (total grad when eta is at mode).
 #' @keywords internal
-.nm_focei_sensitivity_grad <- function(model, data, par, eta_mat, pk_engine) {
+.nm_focei_sensitivity_grad <- function(model, data, par, eta_mat, pk_engine,
+                                       backend = "cpp", grad = "auto") {
+  labels <- .nm_par_labels(model)
   fn <- function(p) {
     pp <- .nm_unpack(model, .nm_apply_fix(model, p))
     .nm_focei_objective(
       model, data, pp$theta, pp$omega, pp$sigma, eta_mat, pk_engine
     )
   }
-  stats::setNames(.nm_num_grad(fn, par), .nm_par_labels(model))
+  if (.nm_grad_uses_ad(grad) && .nm_ad_pk_supported(model)) {
+    focei_ad <- .nm_build_focei_objective(
+      model, data, eta_mat, pk_engine = pk_engine
+    )
+    at <- stats::setNames(as.list(par), labels)
+    tape_key <- .nm_ad_tape_key(model, data, eta_mat, "focei")
+    .nm_set_cpp_pk_ad(model, backend)
+    g <- tryCatch(
+      .nm_ad_eval_cached(
+        focei_ad$fn, at, labels, backend, need_grad = TRUE, tape_key = tape_key
+      ),
+      error = function(e) NULL
+    )
+    if (!is.null(g) && all(is.finite(unname(g[labels])))) {
+      return(stats::setNames(unname(g[labels]), labels))
+    }
+  }
+  stats::setNames(.nm_num_grad(fn, par), labels)
 }

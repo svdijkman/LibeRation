@@ -29,6 +29,20 @@ if (!requireNamespace("DT", quietly = TRUE)) {
 
 library(shiny, warn.conflicts = FALSE)
 
+if (!isTRUE(getOption("LibeRation.codeEditor.handler_registered", FALSE))) {
+  shiny::registerInputHandler(
+    "liberation.codeEditor",
+    function(data, shinysession, name) {
+      if (is.null(data)) {
+        return("")
+      }
+      as.character(data)
+    },
+    force = TRUE
+  )
+  options(LibeRation.codeEditor.handler_registered = TRUE)
+}
+
 .valid_id <- function(x) {
   is.character(x) && length(x) == 1L && !is.na(x) && nzchar(x)
 }
@@ -1328,11 +1342,15 @@ if (is.null(getOption("LibeRation.workspace"))) {
   tagList(header, tags$div(class = "version-tree project-tree", rows))
 }
 
-.shiny_run_estimation_modal <- function() {
+.shiny_run_estimation_modal <- function(server_choices = c("Local" = "")) {
   modalDialog(
     title = "Run estimation",
     size = "l",
     fluidRow(
+      column(
+        4L,
+        selectInput("job_server", "Run on", choices = server_choices, width = "100%")
+      ),
       column(
         3L,
         selectInput(
@@ -1343,7 +1361,18 @@ if (is.null(getOption("LibeRation.workspace"))) {
       ),
       column(3L, selectInput("grad", "Gradient", c("auto", "numeric", "ad", "cpp"), width = "100%")),
       column(3L, selectInput("pk_engine", "PK engine", c("auto", "cpp", "R"), width = "100%")),
-      column(3L, numericInput("maxit", "maxit", value = 30L, min = 5L, step = 5L, width = "100%"))
+      column(3L, numericInput("maxit", "maxit", value = 30L, min = 5L, step = 5L, width = "100%")),
+      column(
+        3L,
+        numericInput(
+          "print_grad_every",
+          "Print gradient (every N evals, 0=off)",
+          value = 1L,
+          min = 0L,
+          step = 1L,
+          width = "100%"
+        )
+      )
     ),
     fluidRow(
       column(
@@ -1772,11 +1801,55 @@ if (is.null(getOption("LibeRation.workspace"))) {
 }
 
 .shiny_param_table_for_fit <- function(model, fit) {
-  compute_se <- is.null(fit$par_se)
   if (is.null(fit$model) && !is.null(model)) {
     fit$model <- model
   }
-  LibeRation::nm_fit_param_table(model, fit, compute_se = compute_se)
+  LibeRation::nm_fit_param_table(model, fit, compute_se = FALSE)
+}
+
+.shiny_run_info_ui <- function(run_info) {
+  if (is.null(run_info) || length(run_info) == 0L) {
+    return(tags$p(
+      class = "text-muted",
+      style = "font-size: 12px;",
+      "No run metadata recorded for this estimation run."
+    ))
+  }
+  df <- LibeRation:::.nm_run_info_as_rows(run_info)
+  if (nrow(df) == 0L) {
+    return(tags$p(
+      class = "text-muted",
+      style = "font-size: 12px;",
+      "No run metadata recorded for this estimation run."
+    ))
+  }
+  header <- tags$tr(tags$th("Field"), tags$th("Value"))
+  body_rows <- lapply(seq_len(nrow(df)), function(i) {
+    tags$tr(
+      tags$td(df$field[[i]]),
+      tags$td(df$value[[i]])
+    )
+  })
+  tags$table(
+    class = "job-detail-table right-param-table",
+    tags$thead(header),
+    tags$tbody(body_rows)
+  )
+}
+
+.shiny_job_should_sync_status <- function(id, meta_disk, state) {
+  if (!is.null(state$active_job_id) && identical(id, state$active_job_id)) {
+    return(TRUE)
+  }
+  if (is.null(meta_disk)) {
+    return(TRUE)
+  }
+  if (meta_disk$status %in% c("success", "cancelled")) {
+    return(FALSE)
+  }
+  selected <- !is.null(state$selected_job) && identical(id, state$selected_job)
+  expanded <- id %in% (state$expanded_jobs %||% character())
+  selected || expanded || identical(meta_disk$status, "error")
 }
 
 .shiny_append_bootstrap_se <- function(display, fit) {
@@ -1850,7 +1923,154 @@ if (is.null(getOption("LibeRation.workspace"))) {
   )
 }
 
-.shiny_jobs_tree_ui <- function(df, selected_job, expanded_jobs, job_root) {
+.shiny_jobs_queue_context <- function(queue, job_root) {
+  if (is.null(queue) || !nzchar(queue) || identical(queue, "local")) {
+    list(mode = "local", job_root = job_root, server_id = NULL)
+  } else {
+    list(mode = "remote", job_root = job_root, server_id = as.character(queue))
+  }
+}
+
+.shiny_jobs_queue_choices <- function() {
+  choices <- c("Local" = "local")
+  if (!requireNamespace("jsonlite", quietly = TRUE) ||
+      !requireNamespace("curl", quietly = TRUE)) {
+    return(choices)
+  }
+  df <- tryCatch(nm_remote_server_list(), error = function(e) NULL)
+  if (!is.null(df) && nrow(df) > 0L) {
+    choices <- c(
+      choices,
+      stats::setNames(
+        df$id,
+        paste0(df$name, " (", df$base_url, ")")
+      )
+    )
+  }
+  choices
+}
+
+.shiny_jobs_for_queue <- function(ctx) {
+  if (identical(ctx$mode, "remote")) {
+    df <- tryCatch(
+      nm_remote_job_list(ctx$server_id),
+      error = function(e) {
+        out <- nm_job_list(ctx$job_root, remote_only = TRUE, sync_active = FALSE)
+        if (nrow(out) == 0L) {
+          out <- nm_job_list(ctx$job_root)[0, , drop = FALSE]
+        }
+        attr(out, "error") <- conditionMessage(e)
+        out
+      }
+    )
+    if (is.null(attr(df, "error"))) {
+      LibeRation:::.nm_job_sync_remote_stubs(ctx$server_id, df, ctx$job_root)
+    }
+    return(df)
+  }
+  nm_job_list(ctx$job_root, local_only = TRUE)
+}
+
+.shiny_resolve_remote_job_id <- function(job_id, ctx) {
+  if (!identical(ctx$mode, "remote")) {
+    return(job_id)
+  }
+  if (grepl("^remote_", job_id)) {
+    meta <- LibeRation:::.nm_job_read_meta(job_id, ctx$job_root)
+    if (!is.null(meta) && isTRUE(meta$remote) && nzchar(meta$remote_job_id %||% "")) {
+      return(meta$remote_job_id)
+    }
+    return(sub("^remote_", "", job_id, fixed = TRUE))
+  }
+  job_id
+}
+
+.shiny_remote_stub_id <- function(job_id, ctx) {
+  rid <- .shiny_resolve_remote_job_id(job_id, ctx)
+  stub_id <- paste0("remote_", rid)
+  if (file.exists(LibeRation:::.nm_job_meta_path(stub_id, ctx$job_root))) {
+    return(stub_id)
+  }
+  NULL
+}
+
+.shiny_job_ctx_status <- function(job_id, ctx) {
+  if (identical(ctx$mode, "remote")) {
+    stub <- .shiny_remote_stub_id(job_id, ctx)
+    if (!is.null(stub)) {
+      return(nm_job_status(stub, ctx$job_root))
+    }
+    rid <- .shiny_resolve_remote_job_id(job_id, ctx)
+    LibeRation:::.nm_remote_job_status(ctx$server_id, rid)
+  } else {
+    nm_job_status(job_id, ctx$job_root)
+  }
+}
+
+.shiny_job_ctx_log <- function(job_id, ctx, tail = 60L) {
+  if (identical(ctx$mode, "remote")) {
+    stub <- .shiny_remote_stub_id(job_id, ctx)
+    if (!is.null(stub)) {
+      return(nm_job_log(stub, tail = tail, job_root = ctx$job_root))
+    }
+    rid <- .shiny_resolve_remote_job_id(job_id, ctx)
+    LibeRation:::.nm_remote_job_log(ctx$server_id, rid, tail = tail)
+  } else {
+    nm_job_log(job_id, tail = tail, job_root = ctx$job_root)
+  }
+}
+
+.shiny_job_ctx_result <- function(job_id, ctx) {
+  if (identical(ctx$mode, "remote")) {
+    stub <- .shiny_remote_stub_id(job_id, ctx)
+    if (!is.null(stub)) {
+      return(nm_job_result(stub, ctx$job_root))
+    }
+    rid <- .shiny_resolve_remote_job_id(job_id, ctx)
+    LibeRation:::.nm_remote_job_result(ctx$server_id, rid)
+  } else {
+    nm_job_result(job_id, ctx$job_root)
+  }
+}
+
+.shiny_job_cache_key <- function(job_id, ctx) {
+  if (identical(ctx$mode, "remote")) {
+    rid <- .shiny_resolve_remote_job_id(job_id, ctx)
+    paste0("remote:", ctx$server_id, ":", rid)
+  } else {
+    paste0("local:", job_id)
+  }
+}
+
+.shiny_job_matches_active <- function(id, st_full, state) {
+  if (!is.null(state$active_job_id) && identical(id, state$active_job_id)) {
+    return(TRUE)
+  }
+  if (!is.null(state$selected_job)) {
+    if (identical(id, state$selected_job)) {
+      return(TRUE)
+    }
+    if (isTRUE(st_full$remote)) {
+      rid <- st_full$remote_job_id
+      if (identical(state$selected_job, rid) &&
+          identical(id, paste0("remote_", rid))) {
+        return(TRUE)
+      }
+    }
+  }
+  FALSE
+}
+
+.shiny_jobs_tree_ui <- function(df, selected_job, expanded_jobs, job_ctx,
+                                result_cache = list()) {
+  if (!is.null(attr(df, "error"))) {
+    return(tags$p(
+      class = "text-muted",
+      style = "font-size: 11px; padding: 6px; color: #c0392b;",
+      "Could not load jobs: ",
+      htmltools::htmlEscape(attr(df, "error"))
+    ))
+  }
   if (nrow(df) == 0L) {
     return(tags$p(
       class = "text-muted",
@@ -1894,9 +2114,16 @@ if (is.null(getOption("LibeRation.workspace"))) {
     finished <- .shiny_format_job_time(df$finished[[i]])
     duration_lbl <- .shiny_job_duration_label(df$started[[i]], df$finished[[i]], status)
     detail <- if (can_expand && expanded) {
+      cache_key <- .shiny_job_cache_key(jid, job_ctx)
+      cached <- result_cache[[cache_key]]
       if (identical(status, "error")) {
-        st_full <- tryCatch(nm_job_status(jid, job_root), error = function(e) NULL)
-        err_txt <- if (!is.null(st_full$error)) as.character(st_full$error) else ""
+        err_txt <- if (!is.null(cached) && identical(cached$kind, "error")) {
+          cached$text %||% ""
+        } else if ("error" %in% names(df)) {
+          as.character(df$error[[i]] %||% "")
+        } else {
+          ""
+        }
         if (!nzchar(trimws(err_txt))) {
           err_txt <- "Estimation failed (see worker log)."
         }
@@ -1908,29 +2135,35 @@ if (is.null(getOption("LibeRation.workspace"))) {
             htmltools::htmlEscape(err_txt)
           )
         )
-      } else {
-      fit <- tryCatch(nm_job_result(jid, job_root), error = function(e) NULL)
-      if (is.null(fit)) {
+      } else if (is.null(cached)) {
+        tags$div(
+          class = "job-detail-panel",
+          tags$p(class = "text-muted", style = "font-size: 11px;", "Loading result…")
+        )
+      } else if (identical(cached$kind, "fit") && is.null(cached$fit)) {
         tags$div(class = "job-detail-panel", tags$p(class = "text-muted", "Could not load fit result."))
       } else {
+      fit <- cached$fit
+      pt <- cached$param_table
+      if (is.null(pt) && !is.null(fit)) {
         pt <- tryCatch(
           .shiny_param_table_for_fit(fit$model, fit),
           error = function(e) NULL
         )
-        tags$div(
-          class = "job-detail-panel",
-          tags$p(
-            style = "font-size: 11px; margin: 4px 0 6px;",
-            strong(.shiny_fit_metric_label(fit), ":"),
-            .shiny_fit_metric_value(fit)
-          ),
-          if (!is.null(pt)) {
-            .shiny_job_param_detail_table(pt, fit = fit, include_gradient = FALSE)
-          } else {
-            tags$p(class = "text-muted", "Parameter details unavailable.")
-          }
-        )
       }
+      tags$div(
+        class = "job-detail-panel",
+        tags$p(
+          style = "font-size: 11px; margin: 4px 0 6px;",
+          strong(.shiny_fit_metric_label(fit), ":"),
+          .shiny_fit_metric_value(fit)
+        ),
+        if (!is.null(pt)) {
+          .shiny_job_param_detail_table(pt, fit = fit, include_gradient = FALSE)
+        } else {
+          tags$p(class = "text-muted", "Parameter details unavailable.")
+        }
+      )
       }
     } else {
       NULL
@@ -1949,7 +2182,10 @@ if (is.null(getOption("LibeRation.workspace"))) {
         },
         tags$span(class = "job-id", jid),
         tags$span(class = "job-label", label),
-        tags$span(class = paste("job-status", paste0("job-status-", status)), status),
+        tags$span(
+          class = paste("job-status", paste0("job-status-", status)),
+          .shiny_job_status_label(status)
+        ),
         tags$span(class = "job-type", type_lbl),
         tags$span(class = "job-meta", meta),
         tags$span(
@@ -2044,7 +2280,7 @@ if (is.null(getOption("LibeRation.workspace"))) {
   if (is.na(nc) || nc < 2L) {
     1L
   } else {
-    max(1L, nc - 1L)
+    max(1L, min(nc - 1L, 4L))
   }
 }
 
@@ -2162,11 +2398,76 @@ if (is.null(getOption("LibeRation.workspace"))) {
   as.data.frame(ds$data)
 }
 
+.shiny_save_remote_est_result <- function(job_id, meta, ws_root, job_root) {
+  if (is.null(meta) || !isTRUE(meta$remote) || isTRUE(meta$workspace_saved)) {
+    return(FALSE)
+  }
+  proj <- meta$workspace_project %||% ""
+  ver <- meta$workspace_version_id %||% ""
+  est_run <- meta$est_run_id %||% ""
+  if (!nzchar(proj) || !nzchar(ver) || !nzchar(est_run)) {
+    return(FALSE)
+  }
+  fit <- tryCatch(nm_job_result(job_id, job_root), error = function(e) NULL)
+  if (is.null(fit)) {
+    return(FALSE)
+  }
+  run_info <- LibeRation:::.nm_run_info_collect(
+    job_id = job_id,
+    job_root = job_root,
+    started = meta$started %||% "",
+    finished = meta$finished %||% Sys.time()
+  )
+  nm_workspace_save_run(
+    proj,
+    ver,
+    est_run,
+    fit,
+    root = ws_root,
+    label = fit$method,
+    job_id = job_id,
+    run_info = run_info
+  )
+  meta$workspace_saved <- TRUE
+  saveRDS(meta, LibeRation:::.nm_job_meta_path(job_id, job_root))
+  TRUE
+}
+
+.shiny_save_remote_sim_result <- function(res, ws_root, job_id = NULL) {
+  if (is.null(res) || is.null(res$sim_data)) {
+    return(invisible(FALSE))
+  }
+  nm_workspace_save_sim(
+    res$project,
+    res$version_id,
+    res$sim_id,
+    res$sim_data,
+    root = ws_root,
+    label = res$label,
+    seed = res$seed,
+    n_sim = res$n_sim,
+    use_fit = isTRUE(res$use_fit),
+    est_run_id = res$est_run_id,
+    vpc = isTRUE(res$vpc)
+  )
+  if (!is.null(res$fit_diag) && !is.null(res$diag_est_run) && nzchar(res$diag_est_run)) {
+    nm_workspace_save_run(
+      res$project,
+      res$version_id,
+      res$diag_est_run,
+      res$fit_diag,
+      root = ws_root,
+      job_id = job_id
+    )
+  }
+  invisible(TRUE)
+}
+
 .shiny_start_simulation_job <- function(session, state, proj, ver, label, seed, n_sim,
                                         use_fit, est_run, n_cores, design, vpc,
                                         sim_compute_npc = FALSE, sim_compute_npde = FALSE,
                                         diag_n_sim = 50L, diag_refit_eta = TRUE,
-                                        ws_root, job_root) {
+                                        ws_root, job_root, server_id = "") {
   parsed <- nm_workspace_parse_model(proj, ver, root = ws_root)
   if (is.null(parsed$model) || is.null(parsed$data)) {
     stop("Could not parse model or dataset for this version.")
@@ -2212,6 +2513,17 @@ if (is.null(getOption("LibeRation.workspace"))) {
       src_run <- runs$run_id[[1L]]
     }
   }
+  fit_for_remote <- NULL
+  if (nzchar(server_id) && run_diag) {
+    fit_for_remote <- if (!is.null(src_run) && nzchar(src_run)) {
+      nm_workspace_load_run_fit(proj, ver, src_run, root = ws_root)
+    } else {
+      nm_workspace_load_fit(proj, ver, root = ws_root)
+    }
+    if (is.null(fit_for_remote)) {
+      stop("Could not load estimation run for remote NPC/NPDE.")
+    }
+  }
   job <- nm_job_submit_sim(
     model = parsed$model,
     data = template_data,
@@ -2236,10 +2548,14 @@ if (is.null(getOption("LibeRation.workspace"))) {
     sim_compute_npde = isTRUE(sim_compute_npde) && isTRUE(use_fit),
     diag_n_sim = max(1L, as.integer(diag_n_sim)),
     diag_refit_eta = isTRUE(diag_refit_eta),
-    diag_only = diag_only
+    diag_only = diag_only,
+    server = if (nzchar(server_id)) server_id else NULL,
+    fit = fit_for_remote
   )
   state$handles[[job$id]] <- job$process
   state$selected_job <- job$id
+  state$active_job_id <- job$id
+  state$active_job_started <- Sys.time()
   state$active_job_type <- "sim"
   state$active_job_project <- proj
   state$active_job_version <- ver
@@ -2261,6 +2577,10 @@ if (is.null(getOption("LibeRation.workspace"))) {
     type = "message",
     duration = 5L
   )
+  if (nzchar(server_id)) {
+    showNotification(paste("Running on remote server:", server_id), type = "message", duration = 6L)
+    updateSelectInput(session, "jobs_queue", selected = server_id)
+  }
   if (run_diag) {
     parts <- c(
       if (isTRUE(sim_compute_npc)) "NPC",
@@ -2328,6 +2648,13 @@ if (is.null(getOption("LibeRation.workspace"))) {
     return(paste0(round(secs / 60, 1), " min"))
   }
   paste0(round(secs / 3600, 2), " h")
+}
+
+.shiny_job_status_label <- function(status) {
+  if (identical(status, "queued")) {
+    return("in queue")
+  }
+  as.character(status %||% "")
 }
 
 .shiny_job_duration_label <- function(started, finished, status = NULL) {
@@ -2761,8 +3088,61 @@ if (is.null(getOption("LibeRation.workspace"))) {
   )
 }
 
+.shiny_code_editor <- function(inputId, value = "", rows = 6L, editor_mode = "pk") {
+  tags$div(
+    class = "liberation-code-editor-host",
+    tags$textarea(
+      id = inputId,
+      class = "liberation-code-editor",
+      style = "display: none;",
+      rows = as.integer(rows),
+      `data-rows` = as.integer(rows),
+      `data-editor-mode` = editor_mode,
+      value
+    )
+  )
+}
+
+.shiny_update_code_editor <- function(session, inputId, value = NULL, highlight = NULL) {
+  msg <- list()
+  if (!is.null(value)) {
+    msg$value <- value
+  }
+  if (!is.null(highlight)) {
+    msg$highlight <- highlight
+  }
+  if (length(msg) > 0L) {
+    session$sendInputMessage(inputId, msg)
+  }
+}
+
 ui <- fluidPage(
   tags$head(
+    tags$title("LibeRation"),
+    tags$script(HTML("
+      (function() {
+        function boot() {
+          try {
+            if (localStorage.getItem('liberationDarkTheme') !== '0') {
+              document.body.classList.add('theme-dark');
+            }
+          } catch (e) {
+            document.body.classList.add('theme-dark');
+          }
+        }
+        if (document.body) boot();
+        else document.addEventListener('DOMContentLoaded', boot);
+      })();
+    ")),
+    tags$link(rel = "icon", type = "image/png", href = "favicon.png"),
+    tags$link(
+      rel = "stylesheet",
+      href = "https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.css"
+    ),
+    tags$link(rel = "stylesheet", type = "text/css", href = "liberation-editor.css"),
+    tags$script(src = "https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.js"),
+    tags$script(src = "liberation-editor.js"),
+    tags$script(src = "job-push.js"),
     tags$style(HTML("
       body { padding-top: 0; }
       .app-header {
@@ -3357,6 +3737,24 @@ ui <- fluidPage(
       .job-detail-table { width: 100%; font-size: 11px; border-collapse: collapse; }
       .job-detail-table th, .job-detail-table td { padding: 3px 6px; border-bottom: 1px solid #eee; text-align: left; }
       .job-detail-table th { color: #666; font-weight: 600; }
+      .job-log-scroll {
+        max-height: 360px;
+        overflow-y: auto;
+        overflow-x: auto;
+        border: 1px solid #ddd;
+        background: #f8f9fa;
+        margin-bottom: 8px;
+      }
+      .job-log-scroll pre {
+        margin: 0;
+        padding: 8px 10px;
+        font-size: 11px;
+        line-height: 1.35;
+        white-space: pre-wrap;
+        word-break: break-word;
+        border: none;
+        background: transparent;
+      }
       .btn-sim-green {
         background-color: #2b579a;
         border-color: #234a82;
@@ -3367,7 +3765,235 @@ ui <- fluidPage(
         border-color: #1c3d6b;
         color: #fff;
       }
+      .theme-toggle-wrap {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        flex-shrink: 0;
+      }
+      .theme-toggle-label {
+        font-size: 12px;
+        color: rgba(255,255,255,0.85);
+        min-width: 32px;
+        text-align: right;
+      }
+      .theme-switch {
+        position: relative;
+        display: inline-block;
+        width: 40px;
+        height: 22px;
+        margin: 0;
+      }
+      .theme-switch input {
+        opacity: 0;
+        width: 0;
+        height: 0;
+      }
+      .theme-slider {
+        position: absolute;
+        cursor: pointer;
+        inset: 0;
+        background-color: #b0b8c4;
+        border-radius: 22px;
+        transition: background-color 0.25s;
+      }
+      .theme-slider:before {
+        position: absolute;
+        content: '';
+        height: 16px;
+        width: 16px;
+        left: 3px;
+        bottom: 3px;
+        background-color: #fff;
+        border-radius: 50%;
+        transition: transform 0.25s;
+        box-shadow: 0 1px 2px rgba(0,0,0,0.25);
+      }
+      .theme-switch input:checked + .theme-slider {
+        background-color: #3d6fa8;
+      }
+      .theme-switch input:checked + .theme-slider:before {
+        transform: translateX(18px);
+      }
+      .app-header-right {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        flex-shrink: 0;
+      }
+      body.theme-dark {
+        background: #121212;
+        color: #e8e8e8;
+      }
+      body.theme-dark .ribbon-wrap {
+        background: #1e1e1e;
+        border-bottom-color: #404040;
+      }
+      body.theme-dark .ribbon-wrap .nav-tabs > li > a {
+        color: #adb5bd;
+      }
+      body.theme-dark .ribbon-wrap .nav-tabs > li.active > a,
+      body.theme-dark .ribbon-wrap .nav-tabs > li.active > a:focus,
+      body.theme-dark .ribbon-wrap .nav-tabs > li.active > a:hover {
+        background: #2b2b2b;
+        color: #8ab4f8;
+        border-bottom-color: #2b579a;
+      }
+      body.theme-dark .ribbon-panel {
+        background: #1e1e1e;
+        border-bottom-color: #404040;
+      }
+      body.theme-dark .panel-box {
+        background: #1e1e1e;
+        border-color: #404040;
+      }
+      body.theme-dark .panel-box-header {
+        background: #252525;
+        border-bottom-color: #404040;
+        color: #e8e8e8;
+      }
+      body.theme-dark .app-log-wrap {
+        background: #1a1a1a;
+        border-bottom-color: #404040;
+      }
+      body.theme-dark .app-log-history {
+        background: #1e1e1e;
+        border-top-color: #404040;
+      }
+      body.theme-dark .app-log-table th {
+        background: #252525;
+        color: #e8e8e8;
+      }
+      body.theme-dark .app-log-table td {
+        border-bottom-color: #333;
+        color: #d4d4d4;
+      }
+      body.theme-dark .form-control,
+      body.theme-dark .selectize-input,
+      body.theme-dark textarea.form-control {
+        background: #2b2b2b;
+        color: #e8e8e8;
+        border-color: #505050;
+      }
+      body.theme-dark .selectize-dropdown {
+        background: #2b2b2b;
+        color: #e8e8e8;
+        border-color: #505050;
+      }
+      body.theme-dark .selectize-dropdown .option.active {
+        background: #3d6fa8;
+      }
+      body.theme-dark .help-block,
+      body.theme-dark .text-muted {
+        color: #adb5bd !important;
+      }
+      body.theme-dark .version-row,
+      body.theme-dark .sim-row,
+      body.theme-dark .project-row,
+      body.theme-dark .job-row,
+      body.theme-dark .run-row {
+        border-bottom-color: #333;
+      }
+      body.theme-dark .version-row:hover,
+      body.theme-dark .sim-row:hover,
+      body.theme-dark .project-row:hover,
+      body.theme-dark .job-row:hover,
+      body.theme-dark .run-row:hover {
+        background: #2a2a2a;
+      }
+      body.theme-dark .version-row.selected,
+      body.theme-dark .sim-row.selected,
+      body.theme-dark .project-row.selected,
+      body.theme-dark .job-row.selected,
+      body.theme-dark .run-row.selected {
+        background: #2d3a4f;
+      }
+      body.theme-dark .version-id,
+      body.theme-dark .project-id,
+      body.theme-dark .job-id,
+      body.theme-dark .run-id,
+      body.theme-dark .sim-id {
+        color: #e8e8e8;
+      }
+      body.theme-dark .version-label,
+      body.theme-dark .job-label,
+      body.theme-dark .run-label,
+      body.theme-dark .sim-label,
+      body.theme-dark .ctl-problem-text,
+      body.theme-dark .ctl-inline-label,
+      body.theme-dark .ctl-section h5,
+      body.theme-dark .data-plot-section-title {
+        color: #d4d4d4;
+      }
+      body.theme-dark .version-meta,
+      body.theme-dark .job-meta,
+      body.theme-dark .job-time,
+      body.theme-dark .model-version-id {
+        color: #9aa0a6;
+      }
+      body.theme-dark .sim-list {
+        border-left-color: #404040;
+      }
+      body.theme-dark .sidebar-actions-divider {
+        border-top-color: #404040;
+      }
+      body.theme-dark .data-dataset-section {
+        border-bottom-color: #404040;
+      }
+      body.theme-dark .job-detail-panel {
+        background: #252525;
+        border-left-color: #404040;
+      }
+      body.theme-dark .job-log-scroll {
+        background: #1a1a1a;
+        border-color: #404040;
+      }
+      body.theme-dark .job-log-scroll pre {
+        color: #d4d4d4;
+      }
+      body.theme-dark .ctl-col-picker-table th,
+      body.theme-dark .ctl-col-picker-table td {
+        border-bottom-color: #333;
+      }
+      body.theme-dark .pk-box {
+        background: #252525;
+        border-color: #5a8fd4;
+        color: #e8e8e8;
+      }
+      body.theme-dark table.dataTable thead th {
+        background: #2b2b2b;
+        color: #e8e8e8;
+        border-color: #404040;
+      }
+      body.theme-dark table.dataTable tbody tr {
+        background: #1e1e1e;
+        color: #e8e8e8;
+      }
+      body.theme-dark table.dataTable tbody tr:nth-child(even) {
+        background: #252525;
+      }
+      body.theme-dark .dataTables_wrapper,
+      body.theme-dark .dataTables_info,
+      body.theme-dark .dataTables_length,
+      body.theme-dark .dataTables_filter,
+      body.theme-dark .dataTables_paginate {
+        color: #adb5bd !important;
+      }
+      body.theme-dark .modal-content {
+        background: #1e1e1e;
+        color: #e8e8e8;
+        border-color: #404040;
+      }
+      body.theme-dark .modal-header,
+      body.theme-dark .modal-footer {
+        border-color: #404040;
+      }
+      body.theme-dark .close {
+        color: #e8e8e8;
+        opacity: 0.8;
+      }
     ")),
+    tags$script(src = "liberation-theme.js"),
     tags$script(HTML("
       $(document).on('change', 'input.ctl-col-pick', function() {
         Shiny.setInputValue('ctl_col_picker_event', {
@@ -3451,7 +4077,20 @@ ui <- fluidPage(
   div(
     class = "app-header",
     tags$h3("LibeRation"),
-    div(class = "ws-path", textOutput("workspace_path", inline = TRUE))
+    div(
+      class = "app-header-right",
+      div(
+        class = "theme-toggle-wrap",
+        tags$span(class = "theme-toggle-label", id = "theme_label", "Dark"),
+        tags$label(
+          class = "theme-switch",
+          `aria-label` = "Toggle dark theme",
+          tags$input(type = "checkbox", id = "theme_toggle", checked = NA),
+          tags$span(class = "theme-slider")
+        )
+      ),
+      div(class = "ws-path", textOutput("workspace_path", inline = TRUE))
+    )
   ),
   div(
     class = "ribbon-wrap",
@@ -3609,20 +4248,20 @@ ui <- fluidPage(
                       div(
                         class = "ctl-code-col model-editor model-editor-flex",
                         tags$h5("$PK / $PRED"),
-                        textAreaInput("ctl_pk", NULL, value = "", rows = 6L, width = "100%")
+                        .shiny_code_editor("ctl_pk", value = "", rows = 6L)
                       ),
                       conditionalPanel(
                         condition = "input.ctl_advan == '6' || input.ctl_advan == '13'",
                         div(
                           class = "ctl-code-col model-editor model-editor-flex",
                           tags$h5("$DES"),
-                          textAreaInput("ctl_des", NULL, value = "", rows = 5L, width = "100%")
+                          .shiny_code_editor("ctl_des", value = "", rows = 5L, editor_mode = "des")
                         )
                       ),
                       div(
                         class = "ctl-code-col model-editor model-editor-flex",
                         tags$h5("$ERROR"),
-                        textAreaInput("ctl_error", NULL, value = "Y = F", rows = 6L, width = "100%")
+                        .shiny_code_editor("ctl_error", value = "Y = F", rows = 6L, editor_mode = "error")
                       )
                     ),
                     div(
@@ -3714,6 +4353,11 @@ ui <- fluidPage(
                   DT::dataTableOutput("param_table")
                 ),
                 tabPanel(
+                  "Run info",
+                  br(),
+                  uiOutput("run_info_panel")
+                ),
+                tabPanel(
                   "Report",
                   br(),
                   p(style = "font-size: 12px;",
@@ -3723,6 +4367,7 @@ ui <- fluidPage(
                     "Sections",
                     choices = c(
                       "Fit summary" = "summary",
+                      "Run information" = "run_info",
                       "Parameters" = "parameters",
                       "DV vs time (+ IPRED)" = "gof_time",
                       "IPRED/PRED vs time" = "gof_ipred_time",
@@ -3732,7 +4377,7 @@ ui <- fluidPage(
                       "ETA distributions" = "diag_eta",
                       "Interpretation stub" = "narrative_stub"
                     ),
-                    selected = c("summary", "parameters", "gof_time", "gof_ipred_time",
+                    selected = c("summary", "run_info", "parameters", "gof_time", "gof_ipred_time",
                                  "gof_scatter", "gof_residuals", "diag_shrinkage",
                                  "diag_eta", "narrative_stub")
                   ),
@@ -3757,19 +4402,46 @@ ui <- fluidPage(
       class = "ribbon-page",
       fluidRow(
         column(
+          3L,
+          selectInput(
+            "jobs_queue",
+            "Queue",
+            choices = c("Local" = "local"),
+            selected = "local",
+            width = "100%"
+          ),
+          numericInput(
+            "jobs_refresh_sec",
+            "Hub poll interval (seconds)",
+            value = 5L,
+            min = 1L,
+            max = 120L,
+            step = 1L,
+            width = "100%"
+          )
+        ),
+        column(
           8L,
           actionButton("refresh_jobs", "Refresh", class = "btn-sm"),
           actionButton("cancel_job", "Cancel selected", class = "btn-warning btn-sm"),
-          actionButton("cleanup_jobs", "Clear finished", class = "btn-sm")
-        ),
-        column(4L, textOutput("jobs_refresh_clock", inline = TRUE))
+          actionButton("cleanup_jobs", "Clear finished", class = "btn-sm"),
+          actionButton("add_remote_server", "Add server", class = "btn-sm"),
+          conditionalPanel(
+            condition = "input.jobs_queue && input.jobs_queue != 'local'",
+            actionButton("edit_remote_server", "Edit server", class = "btn-sm"),
+            actionButton("remove_remote_server", "Remove server", class = "btn-sm btn-danger")
+          )
+        )
+      ),
+      fluidRow(
+        column(12L, textOutput("jobs_refresh_clock", inline = TRUE))
       ),
       uiOutput("job_status_banner"),
       br(),
       uiOutput("jobs_tree"),
       tags$hr(),
       h4("Worker log"),
-      verbatimTextOutput("job_log"),
+      div(class = "job-log-scroll", verbatimTextOutput("job_log")),
       tags$p(class = "text-muted", style = "font-size: 11px;", uiOutput("job_root_display"))
     )
   ),
@@ -3971,12 +4643,69 @@ ui <- fluidPage(
         )
       )
     )
+  ),
+  tags$div(
+    style = "display: none;",
+    numericInput("job_push_rev", label = NULL, value = 0, min = 0),
+    textInput("job_push_sig", label = NULL, value = "")
   )
 )
 
 server <- function(input, output, session) {
   ws_root <- nm_workspace_root()
   job_root <- nm_job_root()
+
+  .shiny_hub_remote_servers <- function() {
+    df <- tryCatch(nm_remote_server_list(), error = function(e) NULL)
+    if (is.null(df) || nrow(df) == 0L) {
+      character()
+    } else {
+      as.character(df$id)
+    }
+  }
+
+  nm_shiny_job_hub_register(
+    session,
+    job_root,
+    remote_servers = .shiny_hub_remote_servers(),
+    sync_remote = TRUE
+  )
+
+  observe({
+    input$jobs_queue
+    input$jobs_refresh_sec
+    state$active_job_id
+    refresh_sec <- as.integer(input$jobs_refresh_sec %||% 5L)
+    if (!is.finite(refresh_sec) || refresh_sec < 1L) {
+      refresh_sec <- 5L
+    }
+    LibeRation:::.nm_shiny_job_hub_write_poll(refresh_sec)
+    ctx <- .shiny_jobs_queue_context(input$jobs_queue %||% "local", job_root)
+    servers <- if (identical(ctx$mode, "remote")) {
+      as.character(ctx$server_id)
+    } else {
+      .shiny_hub_remote_servers()
+    }
+    nm_shiny_job_hub_update(
+      session,
+      job_root = job_root,
+      remote_servers = servers,
+      sync_remote = TRUE
+    )
+  })
+
+  observeEvent(input$job_push_rev, {
+    state$jobs_rev <- isolate(state$jobs_rev) + 1L
+    state$job_log_rev <- isolate(state$job_log_rev) + 1L
+  }, ignoreInit = TRUE)
+
+  observe({
+    if (requireNamespace("later", quietly = TRUE)) {
+      return()
+    }
+    invalidateLater(500L, session)
+    LibeRation:::.nm_shiny_job_hub_flush()
+  })
 
   state <- reactiveValues(
     selected_project = NULL,
@@ -3988,6 +4717,7 @@ server <- function(input, output, session) {
     expanded_jobs = character(),
     saved_text = "",
     dirty = FALSE,
+    ctl_load_rev = 0L,
     ctl_data_file = NULL,
     dataset_columns = character(),
     ctl_input_cols = character(),
@@ -4001,8 +4731,17 @@ server <- function(input, output, session) {
     fit = NULL,
     handles = list(),
     selected_job = NULL,
+    active_job_id = NULL,
+    submit_in_flight = FALSE,
+    active_job_started = NULL,
     job_status_cache = list(),
+    pending_remote_saves = FALSE,
+    job_result_cache = list(),
     job_watch_last = "",
+    jobs_has_active = FALSE,
+    jobs_summary = list(n = 0L, n_active = 0L, error = NULL, elapsed = ""),
+    jobs_queue_label = "Local",
+    job_log_rev = 0L,
     jobs_rev = 0L,
     initialized = FALSE,
     last_report = NULL,
@@ -4027,7 +4766,8 @@ server <- function(input, output, session) {
     auto_data_sim_key = NULL,
     auto_data_est_key = NULL,
     explore_all_rows = FALSE,
-    compare_entries = NULL
+    compare_entries = NULL,
+    remote_servers_rev = 0L
   )
 
   flags <- new.env(parent = emptyenv())
@@ -4040,6 +4780,10 @@ server <- function(input, output, session) {
   flags$pending_sim <- NULL
   flags$artifact_warn_shown <- FALSE
   flags$ctl_load_gen <- 0L
+  flags$ctl_baseline_pending <- FALSE
+  flags$ctl_suppress_artifact <- FALSE
+  flags$ctl_pushed <- NULL
+  flags$postload_until <- NULL
 
   `%||%` <- function(x, y) if (is.null(x)) y else x
 
@@ -4136,6 +4880,31 @@ server <- function(input, output, session) {
       return(nm_ctl_effective_trans(adv))
     }
     as.integer(input$ctl_trans %||% nm_ctl_default_trans(adv))
+  }
+
+  .push_ctl_editor_highlights <- function() {
+    pk_hl <- tryCatch(
+      c(
+        nm_ctl_pk_highlight_symbols(.current_advan(), .current_trans()),
+        list(variant = "pk")
+      ),
+      error = function(e) list(pk = character(), flows = character(), builtin = character(), variant = "pk")
+    )
+    des_hl <- tryCatch(
+      c(
+        nm_ctl_pk_highlight_symbols(.current_advan(), .current_trans()),
+        list(variant = "des")
+      ),
+      error = function(e) list(pk = character(), flows = character(), builtin = character(), variant = "des")
+    )
+    err_hl <- nm_ctl_error_highlight_symbols()
+    .shiny_update_code_editor(session, "ctl_pk", highlight = pk_hl)
+    .shiny_update_code_editor(session, "ctl_des", highlight = des_hl)
+    .shiny_update_code_editor(session, "ctl_error", highlight = err_hl)
+  }
+
+  .push_pk_highlight <- function() {
+    .push_ctl_editor_highlights()
   }
 
   .sync_advan_input_cols <- function() {
@@ -4281,7 +5050,7 @@ server <- function(input, output, session) {
     new_des <- .shiny_default_des(as.integer(advan), 1L, ncomp = ncomp, oral = advan != "13")
     cur <- input$ctl_des %||% ""
     if (!nzchar(trimws(cur)) || identical(trimws(cur), trimws(state$ctl_des_last_default %||% ""))) {
-      updateTextAreaInput(session, "ctl_des", value = new_des)
+      .shiny_update_code_editor(session, "ctl_des", value = new_des)
       state$ctl_des_last_default <- new_des
     }
     invisible(new_des)
@@ -4312,37 +5081,108 @@ server <- function(input, output, session) {
       } else {
         nm_ctl_subroutine_text(advan, trans)
       },
-      data_file = state$ctl_data_file,
-      input_cols = state$ctl_input_cols,
-      output_cols = state$ctl_output_cols,
-      thetas = state$ctl_thetas,
-      omegas = state$ctl_omegas,
-      sigmas = state$ctl_sigmas,
+      data_file = if (!is.null(parts)) parts$data_file else state$ctl_data_file,
+      input_cols = if (!is.null(parts)) parts$input_cols else state$ctl_input_cols,
+      output_cols = if (!is.null(parts)) parts$output_cols %||% character() else state$ctl_output_cols,
+      thetas = if (!is.null(parts)) parts$thetas else state$ctl_thetas,
+      omegas = if (!is.null(parts)) parts$omegas else state$ctl_omegas,
+      sigmas = if (!is.null(parts)) parts$sigmas else state$ctl_sigmas,
       pk = if (!is.null(parts)) parts$pk %||% "" else input$ctl_pk,
       des = if (nm_ctl_use_ode(advan)) des_val else "",
       error = if (!is.null(parts)) parts$error %||% "Y = F" else input$ctl_error
     )
   }
 
-  sync_ctl_baseline <- function(parts = NULL) {
-    state$saved_text <- nm_ctl_canonical(nm_ctl_compose(compose_ctl_baseline(parts)))
+  sync_ctl_baseline <- function(parts = NULL, ctl_text = NULL) {
+    if (!is.null(ctl_text) && nzchar(ctl_text)) {
+      state$saved_text <- LibeRation:::.nm_ctl_baseline_text(ctl_text)
+    } else {
+      state$saved_text <- nm_ctl_canonical(nm_ctl_compose(compose_ctl_baseline(parts)))
+    }
     state$dirty <- FALSE
   }
 
   sync_dirty <- function() {
-    if (isTRUE(flags$loading_ctl) || !.valid_id(state$selected_version_id)) {
+    if (isTRUE(flags$loading_ctl) || isTRUE(flags$ctl_baseline_pending) ||
+        !.valid_id(state$selected_version_id)) {
       return()
     }
     cur <- nm_ctl_canonical(nm_ctl_compose(collect_ctl_parts()))
     saved <- nm_ctl_canonical(state$saved_text %||% "")
+    # Post-load grace window: the $PK/$DES/$ERROR CodeMirror editors echo their
+    # values back asynchronously (and may briefly report partial content while
+    # they initialise). During the short window right after a model load, any
+    # difference from the deterministic baseline is a still-settling echo rather
+    # than a user edit, so treat the model as clean and wait for the value to
+    # land (each echo re-triggers sync_dirty). This prevents a brief false
+    # "unsaved changes" flash without swallowing real edits made later.
+    if (!identical(cur, saved) && !is.null(flags$postload_until) &&
+        Sys.time() < flags$postload_until) {
+      state$dirty <- FALSE
+      return()
+    }
     was_dirty <- isTRUE(state$dirty)
     state$dirty <- !identical(cur, saved)
-    if (!was_dirty && isTRUE(state$dirty) && !isTRUE(flags$artifact_warn_shown)) {
+    if (!was_dirty && isTRUE(state$dirty) && !isTRUE(flags$artifact_warn_shown) &&
+        !isTRUE(flags$ctl_suppress_artifact)) {
       flags$artifact_warn_shown <- TRUE
       .shiny_warn_version_artifacts(
         state$selected_project, state$selected_version_id, ws_root
       )
     }
+  }
+
+  # Compose the "saved" baseline for a freshly loaded model *deterministically*
+  # from the parsed control stream plus the synchronously-populated state (data
+  # file, columns, THETA/OMEGA/SIGMA tables) and the exact text pushed into the
+  # $PK/$DES/$ERROR editors. It deliberately reads NO async `input$` values.
+  #
+  # Why: push_ctl_to_ui() sets the structural fields (state$ctl_*) and the editor
+  # payloads (flags$ctl_pushed) synchronously, but $PROBLEM/ADVAN/TRANS/$PK/$DES/
+  # $ERROR only reach the server later as debounced client echoes. The old
+  # capture read those `input$` fields directly, so if any echo hadn't landed by
+  # baseline time it baked a *stale* value (e.g. an empty $PROBLEM missing the
+  # "Synthetic demo" description). Once the real value settled, the model was
+  # permanently flagged as having unsaved changes even though nothing was edited.
+  # Because echo timing varied per flush, the false "unsaved" state appeared
+  # intermittently on startup, on already-saved models, and on project switches.
+  #
+  # Building the baseline from the same source push_ctl_to_ui uses makes it match
+  # the eventual steady-state UI regardless of echo timing. Any late echo still
+  # triggers sync_dirty(), which now recomputes to an identical value -> clean.
+  capture_ctl_baseline <- function(parts = NULL) {
+    advan <- if (!is.null(parts)) as.integer(parts$advan) else .current_advan()
+    trans <- nm_ctl_effective_trans(
+      advan, if (!is.null(parts)) parts$trans else .current_trans()
+    )
+    if (!nm_ctl_is_valid_pair(advan, trans)) {
+      trans <- as.integer(nm_ctl_effective_trans(advan, nm_ctl_default_trans(advan)))
+    }
+    use_ode <- nm_ctl_use_ode(advan)
+    pushed <- flags$ctl_pushed %||% list()
+    parts_now <- list(
+      problem = if (!is.null(parts)) parts$problem %||% "" else input$ctl_problem,
+      advan = advan,
+      trans = trans,
+      use_ode = use_ode,
+      subroutine = nm_ctl_subroutine_text(advan, trans),
+      data_file = state$ctl_data_file,
+      input_cols = state$ctl_input_cols,
+      output_cols = state$ctl_output_cols,
+      thetas = state$ctl_thetas,
+      omegas = state$ctl_omegas,
+      sigmas = state$ctl_sigmas,
+      pk = pushed$pk %||% (if (!is.null(parts)) parts$pk %||% "" else input$ctl_pk %||% ""),
+      des = if (use_ode) {
+        pushed$des %||% (if (!is.null(parts)) parts$des %||% "" else input$ctl_des %||% "")
+      } else {
+        ""
+      },
+      error = pushed$error %||%
+        (if (!is.null(parts)) parts$error %||% "Y = F" else input$ctl_error %||% "Y = F")
+    )
+    state$saved_text <- nm_ctl_canonical(nm_ctl_compose(parts_now))
+    state$dirty <- FALSE
   }
 
   push_ctl_to_ui <- function(parts, project, keep_loading = FALSE) {
@@ -4399,26 +5239,37 @@ server <- function(input, output, session) {
     state$ctl_thetas <- th
     state$ctl_omegas <- .shiny_ctl_param_labels(parts$omegas, "OMEGA")
     state$ctl_sigmas <- .shiny_ctl_param_labels(parts$sigmas, "SIGMA")
-    updateTextAreaInput(session, "ctl_pk", value = parts$pk %||% "")
+    .shiny_update_code_editor(session, "ctl_pk", value = parts$pk %||% "")
     des_val <- parts$des %||% ""
     if (nm_ctl_use_ode(as.integer(advan)) && !nzchar(des_val)) {
       ncomp <- 2L
       des_val <- .shiny_default_des(as.integer(advan), 1L, ncomp = ncomp, oral = advan != "13")
     }
     state$ctl_des_last_default <- des_val
-    updateTextAreaInput(session, "ctl_des", value = des_val)
-    updateTextAreaInput(session, "ctl_error", value = parts$error %||% "Y = F")
+    .shiny_update_code_editor(session, "ctl_des", value = des_val)
+    .shiny_update_code_editor(session, "ctl_error", value = parts$error %||% "Y = F")
+    # Record the exact values pushed into the async code editors so the post-load
+    # baseline can wait until the client has echoed them back (see the baseline
+    # settling observer). These are compared verbatim against the debounced
+    # CodeMirror inputs, so they must match what was sent above.
+    flags$ctl_pushed <- list(
+      pk = parts$pk %||% "",
+      des = des_val %||% "",
+      error = parts$error %||% "Y = F",
+      use_ode = nm_ctl_use_ode(as.integer(advan))
+    )
     if (!isTRUE(keep_loading)) {
       flags$loading_ctl <- FALSE
     }
+    .push_pk_highlight()
   }
 
   clear_ctl_ui <- function() {
     flags$loading_ctl <- TRUE
     updateTextInput(session, "ctl_problem", value = "")
-    updateTextAreaInput(session, "ctl_pk", value = "")
-    updateTextAreaInput(session, "ctl_des", value = "")
-    updateTextAreaInput(session, "ctl_error", value = "Y = F")
+    .shiny_update_code_editor(session, "ctl_pk", value = "")
+    .shiny_update_code_editor(session, "ctl_des", value = "")
+    .shiny_update_code_editor(session, "ctl_error", value = "Y = F")
     state$ctl_data_file <- NULL
     state$dataset_columns <- character()
     state$ctl_input_cols <- character()
@@ -4428,6 +5279,7 @@ server <- function(input, output, session) {
     state$ctl_omegas <- NULL
     state$ctl_sigmas <- NULL
     flags$loading_ctl <- FALSE
+    .push_pk_highlight()
   }
 
   datasets_df <- reactive({
@@ -4536,7 +5388,242 @@ server <- function(input, output, session) {
   })
 
   output$job_root_display <- renderUI({
-    tags$span(paste("Job directory:", job_root))
+    ctx <- .shiny_jobs_queue_context(input$jobs_queue, job_root)
+    if (identical(ctx$mode, "remote")) {
+      srv <- tryCatch(nm_remote_server_list(), error = function(e) NULL)
+      name <- ctx$server_id
+      if (!is.null(srv) && nrow(srv) > 0L) {
+        hit <- srv[srv$id == ctx$server_id, , drop = FALSE]
+        if (nrow(hit) > 0L) {
+          name <- paste0(hit$name[[1L]], " (", hit$base_url[[1L]], ")")
+        }
+      }
+      tags$span(paste("Remote queue:", name))
+    } else {
+      tags$span(paste("Local job directory:", job_root))
+    }
+  })
+
+  observe({
+    state$remote_servers_rev
+    choices <- .shiny_jobs_queue_choices()
+    sel <- isolate(input$jobs_queue) %||% "local"
+    if (!sel %in% names(choices)) {
+      sel <- "local"
+    }
+    updateSelectInput(session, "jobs_queue", choices = choices, selected = sel)
+  })
+
+  observeEvent(input$jobs_queue, {
+    state$selected_job <- NULL
+    state$expanded_jobs <- character()
+    state$job_result_cache <- list()
+    ctx <- .shiny_jobs_queue_context(input$jobs_queue, job_root)
+    if (identical(ctx$mode, "local")) {
+      state$job_watch_last <- nm_job_watch_signature(job_root, light = TRUE, local_only = TRUE)
+      state$jobs_queue_label <- "Local"
+    } else {
+      state$job_watch_last <- ""
+      srv <- tryCatch(nm_remote_server_list(), error = function(e) NULL)
+      state$jobs_queue_label <- ctx$server_id
+      if (!is.null(srv) && nrow(srv) > 0L && ctx$server_id %in% srv$id) {
+        state$jobs_queue_label <- srv$name[match(ctx$server_id, srv$id)]
+      }
+    }
+    state$jobs_rev <- isolate(state$jobs_rev) + 1L
+  }, ignoreInit = TRUE)
+
+  .remote_server_choices <- function() {
+    choices <- c("Local" = "")
+    if (!requireNamespace("jsonlite", quietly = TRUE) ||
+        !requireNamespace("curl", quietly = TRUE)) {
+      return(choices)
+    }
+    df <- tryCatch(nm_remote_server_list(), error = function(e) NULL)
+    if (!is.null(df) && nrow(df) > 0L) {
+      choices <- c(
+        choices,
+        stats::setNames(
+          df$id,
+          paste0(df$name, " (", df$base_url, ")")
+        )
+      )
+    }
+    choices
+  }
+
+  observeEvent(input$add_remote_server, {
+    showModal(modalDialog(
+      title = "Add LibeRties server",
+      textInput("remote_srv_name", "Display name", width = "100%"),
+      textInput("remote_srv_url", "API URL", placeholder = "http://cluster:8080", width = "100%"),
+      textInput("remote_srv_user", "Username", width = "100%"),
+      passwordInput("remote_srv_token", "API token", width = "100%"),
+      checkboxInput("remote_srv_default", "Set as default", value = TRUE),
+      footer = tagList(
+        modalButton("Cancel"),
+        actionButton("confirm_add_remote_server", "Save", class = "btn-primary")
+      )
+    ))
+  })
+
+  observeEvent(input$edit_remote_server, {
+    req(input$jobs_queue)
+    if (identical(input$jobs_queue, "local") || !nzchar(input$jobs_queue)) {
+      showNotification("Select a remote server queue first.", type = "warning")
+      return()
+    }
+    entry <- tryCatch(
+      LibeRation:::.nm_remote_get_server(input$jobs_queue),
+      error = function(e) {
+        showNotification(conditionMessage(e), type = "error")
+        NULL
+      }
+    )
+    req(entry)
+    is_default <- tryCatch({
+      cfg <- jsonlite::fromJSON(
+        LibeRation:::.nm_remote_config_path(),
+        simplifyVector = FALSE
+      )
+      identical(cfg$default_server, input$jobs_queue)
+    }, error = function(e) FALSE)
+    showModal(modalDialog(
+      title = "Edit LibeRties server",
+      textInput("remote_srv_name", "Display name", value = entry$name %||% "", width = "100%"),
+      textInput("remote_srv_url", "API URL", value = entry$base_url %||% "", width = "100%"),
+      textInput("remote_srv_user", "Username", value = entry$username %||% "", width = "100%"),
+      passwordInput(
+        "remote_srv_token", "API token",
+        placeholder = "Leave blank to keep current token",
+        width = "100%"
+      ),
+      checkboxInput("remote_srv_default", "Set as default", value = is_default),
+      footer = tagList(
+        modalButton("Cancel"),
+        actionButton("confirm_edit_remote_server", "Save", class = "btn-primary")
+      )
+    ))
+  })
+
+  observeEvent(input$confirm_add_remote_server, {
+    if (!requireNamespace("jsonlite", quietly = TRUE) ||
+        !requireNamespace("curl", quietly = TRUE)) {
+      showNotification("Install packages jsonlite and curl for remote jobs.", type = "error")
+      return()
+    }
+    req(nzchar(input$remote_srv_name), nzchar(input$remote_srv_url),
+        nzchar(input$remote_srv_user), nzchar(input$remote_srv_token))
+    id <- tryCatch(
+      nm_remote_server_add(
+        name = input$remote_srv_name,
+        base_url = input$remote_srv_url,
+        username = input$remote_srv_user,
+        token = trimws(input$remote_srv_token),
+        set_default = isTRUE(input$remote_srv_default)
+      ),
+      error = function(e) {
+        showNotification(conditionMessage(e), type = "error")
+        NULL
+      }
+    )
+    if (!is.null(id)) {
+      test <- tryCatch(nm_remote_server_test(id), error = function(e) e)
+      if (inherits(test, "error")) {
+        showNotification(
+          paste("Server saved but health check failed:", conditionMessage(test)),
+          type = "warning",
+          duration = 8L
+        )
+      } else {
+        showNotification(paste("Remote server added:", input$remote_srv_name), type = "message")
+      }
+      state$remote_servers_rev <- state$remote_servers_rev + 1L
+      updateSelectInput(session, "jobs_queue", selected = id)
+      removeModal()
+    }
+  })
+
+  observeEvent(input$confirm_edit_remote_server, {
+    if (!requireNamespace("jsonlite", quietly = TRUE) ||
+        !requireNamespace("curl", quietly = TRUE)) {
+      showNotification("Install packages jsonlite and curl for remote jobs.", type = "error")
+      return()
+    }
+    req(input$jobs_queue)
+    if (identical(input$jobs_queue, "local") || !nzchar(input$jobs_queue)) {
+      return()
+    }
+    req(nzchar(input$remote_srv_name), nzchar(input$remote_srv_url), nzchar(input$remote_srv_user))
+    id <- tryCatch(
+      nm_remote_server_add(
+        name = input$remote_srv_name,
+        base_url = input$remote_srv_url,
+        username = input$remote_srv_user,
+        token = trimws(input$remote_srv_token),
+        id = input$jobs_queue,
+        set_default = isTRUE(input$remote_srv_default)
+      ),
+      error = function(e) {
+        showNotification(conditionMessage(e), type = "error")
+        NULL
+      }
+    )
+    if (!is.null(id)) {
+      test <- tryCatch(nm_remote_server_test(id), error = function(e) e)
+      if (inherits(test, "error")) {
+        showNotification(
+          paste("Server updated but health check failed:", conditionMessage(test)),
+          type = "warning",
+          duration = 8L
+        )
+      } else {
+        showNotification(paste("Remote server updated:", input$remote_srv_name), type = "message")
+      }
+      state$remote_servers_rev <- state$remote_servers_rev + 1L
+      removeModal()
+    }
+  })
+
+  observeEvent(input$remove_remote_server, {
+    req(input$jobs_queue)
+    if (identical(input$jobs_queue, "local") || !nzchar(input$jobs_queue)) {
+      showNotification("Select a remote server queue first.", type = "warning")
+      return()
+    }
+    if (!requireNamespace("jsonlite", quietly = TRUE)) {
+      showNotification("No remote server config.", type = "warning")
+      return()
+    }
+    df <- tryCatch(nm_remote_server_list(), error = function(e) NULL)
+    if (is.null(df) || nrow(df) == 0L || !input$jobs_queue %in% df$id) {
+      showNotification("Remote server not found.", type = "warning")
+      return()
+    }
+    srv_name <- df$name[match(input$jobs_queue, df$id)]
+    showModal(modalDialog(
+      title = "Remove remote server",
+      paste0("Remove server \"", srv_name, "\" from LibeRation?"),
+      footer = tagList(
+        modalButton("Cancel"),
+        actionButton("confirm_remove_remote_server", "Remove", class = "btn-danger")
+      )
+    ))
+  })
+
+  observeEvent(input$confirm_remove_remote_server, {
+    req(input$jobs_queue)
+    if (identical(input$jobs_queue, "local") || !nzchar(input$jobs_queue)) {
+      return()
+    }
+    tryCatch(
+      nm_remote_server_remove(input$jobs_queue),
+      error = function(e) showNotification(conditionMessage(e), type = "error")
+    )
+    state$remote_servers_rev <- state$remote_servers_rev + 1L
+    updateSelectInput(session, "jobs_queue", selected = "local")
+    removeModal()
+    showNotification("Remote server removed.", type = "message")
   })
 
   .version_meta <- function(project, version_id) {
@@ -4767,7 +5854,7 @@ server <- function(input, output, session) {
     state$explore_df <- if (is.null(tbl)) NULL else .shiny_as_explore_df(tbl)
     state$explore_data_rev <- (state$explore_data_rev %||% 0L) + 1L
     .shiny_load_run_vpc_state(state, project, version_id, est_run_id, ws_root)
-    if (.valid_id(project) && .valid_id(version_id)) {
+    if (is.null(state$data) && .valid_id(project) && .valid_id(version_id)) {
       parsed <- tryCatch(
         nm_workspace_parse_model(project, version_id, root = ws_root),
         error = function(e) NULL
@@ -4784,6 +5871,11 @@ server <- function(input, output, session) {
     if (!.valid_id(project) || !.valid_id(version_id)) {
       return(invisible(FALSE))
     }
+    state$dirty <- FALSE
+    flags$artifact_warn_shown <- FALSE
+    flags$ctl_suppress_artifact <- TRUE
+    flags$ctl_baseline_pending <- TRUE
+    flags$postload_until <- NULL
     txt <- nm_workspace_read_model(project, version_id, root = ws_root)
     state$selected_version_id <- version_id
     if (!isTRUE(keep_sim)) {
@@ -4793,6 +5885,14 @@ server <- function(input, output, session) {
     push_ctl_to_ui(parts, project, keep_loading = TRUE)
     flags$ctl_load_gen <- flags$ctl_load_gen + 1L
     load_gen <- flags$ctl_load_gen
+    parts_loaded <- parts
+    ctl_loaded <- txt
+    # Provisional baseline from the on-disk control stream so the model never
+    # appears dirty while the async editors settle.
+    isolate({
+      state$saved_text <- LibeRation:::.nm_ctl_baseline_text(txt)
+      state$dirty <- FALSE
+    })
     session$onFlushed(function() {
       if (!identical(load_gen, flags$ctl_load_gen)) {
         return()
@@ -4802,10 +5902,23 @@ server <- function(input, output, session) {
           return()
         }
         isolate({
-          sync_ctl_baseline()
+          sync_ctl_baseline(parts_loaded, ctl_text = ctl_loaded)
           flags$artifact_warn_shown <- FALSE
         })
         flags$loading_ctl <- FALSE
+        session$onFlushed(function() {
+          if (!identical(load_gen, flags$ctl_load_gen)) {
+            return()
+          }
+          isolate({
+            capture_ctl_baseline(parts_loaded)
+            flags$artifact_warn_shown <- FALSE
+          })
+          flags$ctl_baseline_pending <- FALSE
+          flags$ctl_suppress_artifact <- FALSE
+          flags$postload_until <- Sys.time() + 1.5
+          state$dirty <- FALSE
+        }, once = TRUE)
       }, once = TRUE)
     }, once = TRUE)
     parsed <- tryCatch(
@@ -4892,6 +6005,8 @@ server <- function(input, output, session) {
       return(invisible(FALSE))
     }
     state$selected_project <- project
+    flags$ctl_baseline_pending <- TRUE
+    state$dirty <- FALSE
     state$expanded_versions <- character()
     state$selected_sim_id <- NULL
     state$sim_vpc_data <- NULL
@@ -5162,7 +6277,8 @@ server <- function(input, output, session) {
       showNotification("Select a model version first.", type = "warning")
       return()
     }
-    showModal(.shiny_run_estimation_modal())
+    state$remote_servers_rev
+    showModal(.shiny_run_estimation_modal(.remote_server_choices()))
   })
 
   observeEvent(input$ctl_trans_help, {
@@ -5228,7 +6344,7 @@ server <- function(input, output, session) {
   })
 
   observeEvent(input$ctl_dataset, {
-    if (isTRUE(flags$loading_ctl)) {
+    if (isTRUE(flags$loading_ctl) || isTRUE(flags$ctl_baseline_pending)) {
       return()
     }
     rel <- input$ctl_dataset
@@ -5285,6 +6401,8 @@ server <- function(input, output, session) {
       showNotification("Select a model version first.", type = "warning")
       return()
     }
+    state$remote_servers_rev
+    sim_server_choices <- .remote_server_choices()
     ver <- state$selected_version_id
     proj <- state$selected_project
     runs <- nm_workspace_list_runs(proj, ver, root = ws_root)
@@ -5313,9 +6431,10 @@ server <- function(input, output, session) {
       title = paste("Create simulation —", ver),
       size = "l",
       fluidRow(
-        column(6L, textInput("sim_label", "Label", value = "", width = "100%")),
-        column(3L, numericInput("sim_seed", "Random seed", value = sample.int(99999L, 1L), min = 1L, step = 1L, width = "100%")),
-        column(3L, numericInput("sim_n_cores", "Parallel cores", value = .shiny_default_n_cores(), min = 1L, max = max_cores, step = 1L, width = "100%"))
+        column(4L, selectInput("sim_server", "Run on", choices = sim_server_choices, width = "100%")),
+        column(4L, textInput("sim_label", "Label", value = "", width = "100%")),
+        column(2L, numericInput("sim_seed", "Random seed", value = sample.int(99999L, 1L), min = 1L, step = 1L, width = "100%")),
+        column(2L, numericInput("sim_n_cores", "Parallel cores", value = .shiny_default_n_cores(), min = 1L, max = max_cores, step = 1L, width = "100%"))
       ),
       fluidRow(
         column(4L, numericInput("sim_n_subjects", "Individuals", value = default_n_sub, min = 1L, max = 10000L, step = 1L, width = "100%")),
@@ -5449,7 +6568,8 @@ server <- function(input, output, session) {
         diag_n_sim = pending$diag_n_sim,
         diag_refit_eta = pending$diag_refit_eta,
         ws_root = ws_root,
-        job_root = job_root
+        job_root = job_root,
+        server_id = pending$server_id %||% ""
       )
     })
   }
@@ -5492,6 +6612,7 @@ server <- function(input, output, session) {
     }
     seed <- as.integer(input$sim_seed)
     design <- .shiny_sim_build_design(input, seed = seed)
+    server_id <- input$sim_server %||% ""
     pending <- list(
       proj = proj,
       ver = ver,
@@ -5506,7 +6627,8 @@ server <- function(input, output, session) {
       sim_compute_npc = sim_compute_npc,
       sim_compute_npde = sim_compute_npde,
       diag_n_sim = as.integer(input$sim_diag_n_sim %||% 50L),
-      diag_refit_eta = isTRUE(input$sim_diag_refit_eta)
+      diag_refit_eta = isTRUE(input$sim_diag_refit_eta),
+      server_id = server_id
     )
     wl <- tryCatch({
       parsed <- nm_workspace_parse_model(proj, ver, root = ws_root)
@@ -5564,7 +6686,7 @@ server <- function(input, output, session) {
     c("ctl_problem", "ctl_advan", "ctl_trans", "ctl_pk", "ctl_des", "ctl_error", "ctl_ode_ncomp"),
     function(id) {
       observeEvent(input[[id]], {
-        if (isTRUE(flags$loading_ctl)) {
+        if (isTRUE(flags$loading_ctl) || isTRUE(flags$ctl_baseline_pending)) {
           return()
         }
         sync_dirty()
@@ -5573,7 +6695,7 @@ server <- function(input, output, session) {
   )
 
   observeEvent(input$ctl_advan, {
-    if (isTRUE(flags$loading_ctl)) {
+    if (isTRUE(flags$loading_ctl) || isTRUE(flags$ctl_baseline_pending)) {
       return()
     }
     advan <- input$ctl_advan
@@ -5583,7 +6705,7 @@ server <- function(input, output, session) {
     } else {
       cur_des <- input$ctl_des %||% ""
       if (!nzchar(trimws(cur_des))) {
-        updateTextAreaInput(session, "ctl_des", value = "")
+        .shiny_update_code_editor(session, "ctl_des", value = "")
       }
     }
     if (nm_ctl_show_trans(as.integer(advan))) {
@@ -5601,10 +6723,11 @@ server <- function(input, output, session) {
       }
     }
     sync_dirty()
+    .push_pk_highlight()
   }, ignoreInit = TRUE)
 
   observeEvent(input$ctl_ode_ncomp, {
-    if (isTRUE(flags$loading_ctl)) {
+    if (isTRUE(flags$loading_ctl) || isTRUE(flags$ctl_baseline_pending)) {
       return()
     }
     if (.current_advan() == 6L) {
@@ -5614,11 +6737,12 @@ server <- function(input, output, session) {
   }, ignoreInit = TRUE)
 
   observeEvent(input$ctl_trans, {
-    if (isTRUE(flags$loading_ctl)) {
+    if (isTRUE(flags$loading_ctl) || isTRUE(flags$ctl_baseline_pending)) {
       return()
     }
     .sync_advan_input_cols()
     sync_dirty()
+    .push_pk_highlight()
   }, ignoreInit = TRUE)
 
   save_current_model <- function() {
@@ -5767,7 +6891,7 @@ server <- function(input, output, session) {
   })
 
   observeEvent(input$ctl_col_picker_event, {
-    if (isTRUE(flags$loading_ctl)) {
+    if (isTRUE(flags$loading_ctl) || isTRUE(flags$ctl_baseline_pending)) {
       return()
     }
     ev <- input$ctl_col_picker_event
@@ -6666,6 +7790,7 @@ server <- function(input, output, session) {
   })
 
   output$model_dirty_banner <- renderUI({
+    state$dirty
     if (!.valid_id(state$selected_version_id)) {
       return(NULL)
     }
@@ -6737,6 +7862,33 @@ server <- function(input, output, session) {
       class = "compact right-param-table",
       escape = FALSE
     )
+  })
+
+  output$run_info_panel <- renderUI({
+    req(state$selected_project, state$selected_version_id)
+    if (!.valid_id(state$selected_est_run_id)) {
+      return(tags$p(
+        class = "text-muted",
+        style = "font-size: 12px;",
+        "Select an estimation run to view run metadata."
+      ))
+    }
+    fit <- current_fit()
+    run_info <- if (!is.null(fit) && !is.null(fit$run_info)) {
+      fit$run_info
+    } else {
+      meta <- tryCatch(
+        nm_workspace_load_run_meta(
+          state$selected_project,
+          state$selected_version_id,
+          state$selected_est_run_id,
+          root = ws_root
+        ),
+        error = function(e) NULL
+      )
+      if (!is.null(meta)) meta$run_info else NULL
+    }
+    .shiny_run_info_ui(run_info)
   })
 
   output$data_summary <- renderUI({
@@ -7127,7 +8279,8 @@ server <- function(input, output, session) {
       cov_method = cov_method,
       infer_hessian = infer_hess,
       min_retries = as.integer(input$min_retries %||% 0L),
-      tweak_inits = isTRUE(input$tweak_inits)
+      tweak_inits = isTRUE(input$tweak_inits),
+      print_grad_every = as.integer(input$print_grad_every %||% 0L)
     )
     args <- list(
       grad = input$grad,
@@ -7135,9 +8288,21 @@ server <- function(input, output, session) {
       control = ctl
     )
     meth <- input$method
-    if (meth %in% c("FOCE", "FOCEI", "LAPLACE") && !is.null(state$model)) {
+    if (meth %in% c("FOCE", "LAPLACE") && !is.null(state$model)) {
       args$pk_engine <- "cpp"
       if (LibeRation:::.nm_cpp_capable(state$model)) {
+        args$grad <- "cpp"
+      }
+    }
+    if (meth == "FOCEI" && !is.null(state$model)) {
+      args$pk_engine <- "cpp"
+      if (LibeRation:::.nm_cpp_capable(state$model)) {
+        args$grad <- "auto"
+      }
+    }
+    if (meth == "FO" && !is.null(state$model) && LibeRation:::.nm_cpp_capable(state$model)) {
+      args$pk_engine <- "cpp"
+      if (input$grad %in% c("auto", "ad", "cpp")) {
         args$grad <- "cpp"
       }
     }
@@ -7181,6 +8346,13 @@ server <- function(input, output, session) {
   }
 
   observeEvent(input$submit_job, {
+    if (isTRUE(isolate(state$submit_in_flight))) {
+      return()
+    }
+    state$submit_in_flight <- TRUE
+    on.exit({
+      state$submit_in_flight <- FALSE
+    }, add = TRUE)
     if (isTRUE(state$dirty)) {
       showNotification("Save the model before submitting a job.", type = "warning")
       return()
@@ -7212,33 +8384,78 @@ server <- function(input, output, session) {
       root = ws_root
     )
     extra <- build_est_args()
-    job <- do.call(
-      nm_job_submit,
-      c(
-        list(
-          model = state$model,
-          data = state$data,
-          method = input$method,
-          label = label,
-          job_root = job_root
-        ),
-        extra
-      )
+    server_id <- input$job_server %||% ""
+    submit_args <- c(
+      list(
+        model = state$model,
+        data = state$data,
+        method = input$method,
+        label = label,
+        job_root = job_root,
+        workspace_project = state$selected_project,
+        workspace_version_id = state$selected_version_id,
+        est_run_id = est_run_id,
+        workspace_root = ws_root
+      ),
+      extra
     )
+    if (nzchar(server_id)) {
+      if (!requireNamespace("jsonlite", quietly = TRUE) ||
+          !requireNamespace("curl", quietly = TRUE)) {
+        showNotification("Install packages jsonlite and curl for remote jobs.", type = "error")
+        return()
+      }
+      submit_args$server <- server_id
+    }
+    job <- tryCatch(
+      do.call(nm_job_submit, submit_args),
+      error = function(e) {
+        showNotification(conditionMessage(e), type = "error", duration = NULL)
+        NULL
+      }
+    )
+    if (is.null(job)) {
+      # Submission failed: release the run id reserved above so it can be reused
+      # and we don't leave a numbering gap.
+      tryCatch(
+        LibeRation:::.nm_ws_release_reserved_run(
+          state$selected_project, state$selected_version_id, est_run_id, ws_root
+        ),
+        error = function(e) NULL
+      )
+      return()
+    }
     state$handles[[job$id]] <- job$process
     state$selected_job <- job$id
+    state$active_job_id <- job$id
+    state$active_job_started <- Sys.time()
     state$active_job_type <- "est"
     state$active_job_sim_id <- NULL
     state$active_job_version <- state$selected_version_id
     state$active_job_est_run <- est_run_id
     state$active_job_project <- state$selected_project
     state$jobs_rev <- state$jobs_rev + 1L
+    nm_shiny_job_hub_notify_local(job_root)
     message(
       "[LibeRation] Estimation started: job=", job$id,
       "  method=", input$method,
       "  run_id=", est_run_id
     )
     showNotification(paste("Job submitted:", job$id), type = "message", duration = 5L)
+    if (nzchar(server_id)) {
+      if (identical(job$status, "queued")) {
+        showNotification(
+          paste("Job queued on remote server:", server_id),
+          type = "message",
+          duration = 6L
+        )
+      } else {
+        showNotification(paste("Running on remote server:", server_id), type = "message", duration = 6L)
+      }
+      updateSelectInput(session, "jobs_queue", selected = server_id)
+    } else if (identical(job$status, "queued")) {
+      showNotification("Job queued; will start when a slot is free.", type = "message", duration = 6L)
+    }
     if (isTRUE(input$est_bootstrap) && input$method != "BAYES") {
       showNotification(
         paste("Bootstrap (", input$bootstrap_n, " replicates) will run after estimation in the worker.", sep = ""),
@@ -7249,58 +8466,131 @@ server <- function(input, output, session) {
     removeModal()
   })
 
-  observe({
-    input$submit_job
-    input$refresh_jobs
-    input$ribbon_tab
+  jobs_track_df <- reactive({
     state$jobs_rev
-    df <- nm_job_list(job_root)
-    sig <- nm_job_watch_signature(job_root)
-    if (!identical(sig, isolate(state$job_watch_last))) {
-      state$job_watch_last <- sig
-      state$jobs_rev <- isolate(state$jobs_rev) + 1L
-    }
-    n_active <- nrow(df) > 0L && any(df$status %in% c("queued", "running"))
-    on_jobs_tab <- identical(input$ribbon_tab, "jobs")
-    if (n_active) {
-      invalidateLater(150L, session)
-    } else if (on_jobs_tab && nrow(df) > 0L) {
-      invalidateLater(500L, session)
-    }
-  })
-
-  job_elapsed_timer <- reactive({
-    df <- nm_job_list(job_root)
-    if (nrow(df) > 0L && any(df$status %in% c("queued", "running"))) {
-      invalidateLater(1000L, session)
-    }
-    Sys.time()
-  })
-
-  jobs_df <- reactive({
-    state$jobs_rev
+    input$job_push_rev
     input$submit_job
     input$refresh_jobs
     input$cancel_job
     input$cleanup_jobs
-    job_elapsed_timer()
-    nm_job_list(job_root)
+    local <- nm_job_list(job_root, local_only = TRUE, sync_active = TRUE)
+    remote <- nm_job_list(job_root, remote_only = TRUE, sync_active = TRUE)
+    if (nrow(local) == 0L) {
+      remote
+    } else if (nrow(remote) == 0L) {
+      local
+    } else {
+      rbind(local, remote)
+    }
   })
 
-  observeEvent(jobs_df(), {
+  jobs_df <- reactive({
+    state$jobs_rev
+    input$job_push_rev
+    state$remote_servers_rev
+    input$submit_job
+    input$refresh_jobs
+    input$cancel_job
+    input$cleanup_jobs
+    input$jobs_queue
+    input$ribbon_tab
+    req(identical(input$ribbon_tab, "jobs"))
+    tryCatch(
+      .shiny_jobs_for_queue(.shiny_jobs_queue_context(input$jobs_queue, job_root)),
+      error = function(e) {
+        df <- nm_job_list(job_root)[0, , drop = FALSE]
+        attr(df, "error") <- conditionMessage(e)
+        df
+      }
+    )
+  })
+
+  observe({
+    req(identical(input$ribbon_tab, "jobs"))
     df <- jobs_df()
+    err <- attr(df, "error")
+    n <- if (is.null(df)) 0L else nrow(df)
+    n_active <- 0L
+    elapsed_txt <- ""
+    if (!is.null(df) && n > 0L && is.null(err)) {
+      n_active <- sum(df$status %in% c("queued", "running"))
+      if (n_active > 0L) {
+        active <- df[df$status %in% c("queued", "running"), , drop = FALSE]
+        el <- vapply(seq_len(nrow(active)), function(i) {
+          .shiny_job_duration_label(active$started[[i]], active$finished[[i]], active$status[[i]])
+        }, character(1L))
+        el <- el[nzchar(el)]
+        if (length(el) > 0L) {
+          elapsed_txt <- el[[1L]]
+        }
+      }
+    }
+    state$jobs_has_active <- isTRUE(n_active > 0L)
+    state$jobs_summary <- list(
+      n = n,
+      n_active = n_active,
+      error = err,
+      elapsed = elapsed_txt
+    )
+  })
+
+  job_elapsed_timer <- reactive({
+    input$job_push_rev
+    req(identical(input$ribbon_tab, "jobs"))
+    Sys.time()
+  })
+
+  observe({
+    req(identical(input$ribbon_tab, "jobs"))
+    input$submit_job
+    input$refresh_jobs
+    input$jobs_queue
+    ctx <- .shiny_jobs_queue_context(input$jobs_queue, job_root)
+    if (identical(ctx$mode, "local")) {
+      sig <- nm_job_watch_signature(job_root, light = TRUE, local_only = TRUE)
+      if (!identical(sig, isolate(state$job_watch_last))) {
+        state$job_watch_last <- sig
+        nm_shiny_job_hub_notify_local(job_root)
+      }
+    }
+  })
+
+  observeEvent(jobs_track_df(), {
+    df <- jobs_track_df()
     cache <- state$job_status_cache
+    pending_saves <- FALSE
     if (nrow(df) > 0L) {
       for (i in seq_len(nrow(df))) {
         id <- df$id[[i]]
         st <- df$status[[i]]
         prev <- cache[[id]]
-        if (is.null(prev) || !identical(prev, st)) {
-          cache[[id]] <- st
-          st_full <- nm_job_status(id, job_root)
+        meta_disk <- LibeRation:::.nm_job_read_meta(id, job_root)
+        needs_sync <- .shiny_job_should_sync_status(id, meta_disk, state)
+        st_full <- meta_disk
+        if (needs_sync && !isTRUE(meta_disk$remote)) {
+          st_full <- tryCatch(nm_job_status(id, job_root), error = function(e) meta_disk)
+        } else if (isTRUE(meta_disk$remote) &&
+                   (meta_disk$status %in% c("running", "queued", "error") ||
+                    (identical(meta_disk$status, "success") &&
+                     !isTRUE(meta_disk$workspace_saved)))) {
+          st_full <- tryCatch(nm_job_status(id, job_root), error = function(e) meta_disk)
+        }
+        st_actual <- if (!is.null(st_full$status)) st_full$status else st
+        # Re-enter for a remote estimation that finished but whose result has not
+        # yet been persisted into the workspace. Otherwise a save that fails once
+        # (e.g. the result isn't downloadable the instant the status flips to
+        # success — common when several remote jobs finish together) is cached as
+        # "success" and never retried, so the run shows in the job list but never
+        # appears under model versions on the Home tab.
+        needs_save_retry <- isTRUE(st_full$remote) &&
+          identical(st_actual, "success") &&
+          identical(st_full$job_type %||% "est", "est") &&
+          !isTRUE(st_full$workspace_saved)
+        if (is.null(prev) || !identical(prev, st_actual) || needs_save_retry) {
+          cache[[id]] <- st_actual
           jtype <- if (is.null(st_full$job_type)) "est" else st_full$job_type
-          if (!is.null(prev) && !identical(prev, st)) {
-            if (identical(st, "success")) {
+          if (!is.null(prev) && !identical(prev, st_actual)) {
+            if (identical(st_actual, "success")) {
               if (identical(jtype, "sim")) {
                 message(
                   "[LibeRation] Simulation finished: job=", id,
@@ -7317,9 +8607,9 @@ server <- function(input, output, session) {
                   message("[LibeRation] Estimation finished: job=", id)
                 }
               }
-            } else if (identical(st, "error")) {
+            } else if (identical(st_actual, "error")) {
               message("[LibeRation] Job failed: id=", id, " (", jtype, ")")
-            } else if (identical(st, "running") && !identical(prev, "running")) {
+            } else if (identical(st_actual, "running") && !identical(prev, "running")) {
               if (identical(jtype, "sim")) {
                 message("[LibeRation] Simulation running: job=", id)
               } else {
@@ -7327,35 +8617,75 @@ server <- function(input, output, session) {
               }
             }
           }
-          if (identical(st, "success") &&
-              identical(jtype, "est") &&
-              identical(id, state$selected_job) &&
-              !is.null(state$active_job_project) &&
-              !is.null(state$active_job_version) &&
-              !is.null(state$active_job_est_run)) {
-            fit <- tryCatch(nm_job_result(id, job_root), error = function(e) NULL)
-            if (!is.null(fit)) {
-              nm_workspace_save_run(
-                state$active_job_project,
-                state$active_job_version,
-                state$active_job_est_run,
-                fit,
-                root = ws_root,
-                label = fit$method,
-                job_id = id
-              )
-              if (identical(state$selected_project, state$active_job_project) &&
-                  identical(state$selected_version_id, state$active_job_version)) {
-                apply_est_run_fit(
+          if (identical(st_actual, "success") &&
+              identical(jtype, "est")) {
+            saved <- FALSE
+            if (isTRUE(st_full$remote)) {
+              saved <- .shiny_save_remote_est_result(id, st_full, ws_root, job_root)
+            }
+            if (!saved &&
+                .shiny_job_matches_active(id, st_full, state) &&
+                !is.null(state$active_job_project) &&
+                !is.null(state$active_job_version) &&
+                !is.null(state$active_job_est_run)) {
+              fit <- tryCatch(nm_job_result(id, job_root), error = function(e) NULL)
+              if (!is.null(fit)) {
+                run_info <- LibeRation:::.nm_run_info_collect(
+                  job_id = id,
+                  job_root = job_root,
+                  started = st_full$started %||% state$active_job_started,
+                  finished = st_full$finished %||% Sys.time()
+                )
+                nm_workspace_save_run(
                   state$active_job_project,
                   state$active_job_version,
                   state$active_job_est_run,
-                  fit
+                  fit,
+                  root = ws_root,
+                  label = fit$method,
+                  job_id = id,
+                  run_info = run_info
                 )
+                saved <- TRUE
+              }
+            }
+            if (isTRUE(st_full$remote) && !saved) {
+              # Result not persisted yet (e.g. not downloadable the instant the
+              # job flipped to success). Flag for a guaranteed retry below.
+              pending_saves <- TRUE
+            }
+            if (saved) {
+              proj <- if (isTRUE(st_full$remote)) {
+                st_full$workspace_project %||% state$active_job_project
+              } else {
+                state$active_job_project
+              }
+              ver <- if (isTRUE(st_full$remote)) {
+                st_full$workspace_version_id %||% state$active_job_version
+              } else {
+                state$active_job_version
+              }
+              est_run <- if (isTRUE(st_full$remote)) {
+                st_full$est_run_id %||% state$active_job_est_run
+              } else {
+                state$active_job_est_run
+              }
+              if (identical(state$selected_project, proj) &&
+                  identical(state$selected_version_id, ver) &&
+                  nzchar(est_run %||% "")) {
+                fit <- tryCatch(nm_job_result(id, job_root), error = function(e) NULL)
+                if (!is.null(fit)) {
+                  apply_est_run_fit(proj, ver, est_run, fit)
+                }
               }
               state$est_runs_rev <- state$est_runs_rev + 1L
               state$versions_rev <- state$versions_rev + 1L
-              if (!is.null(fit$bootstrap)) {
+              if (.shiny_job_matches_active(id, st_full, state)) {
+                state$active_job_id <- NULL
+                state$active_job_started <- NULL
+              }
+              fit <- tryCatch(nm_job_result(id, job_root), error = function(e) NULL)
+              if (!is.null(fit) && !is.null(fit$bootstrap)) {
                 showNotification(
                   paste(
                     "Bootstrap complete:",
@@ -7368,16 +8698,26 @@ server <- function(input, output, session) {
               }
             }
           }
-          if (identical(st, "success") &&
+          if (identical(st_actual, "success") &&
               identical(jtype, "sim") &&
-              identical(id, state$selected_job) &&
+              .shiny_job_matches_active(id, st_full, state) &&
               !is.null(state$active_job_project)) {
-            state$simulations_rev <- state$simulations_rev + 1L
-            ver <- st_full$version_id
-            sim_id <- st_full$sim_id
+            ver <- st_full$version_id %||% state$active_job_version
+            sim_id <- st_full$sim_id %||% state$active_job_sim_id
             diag_run <- st_full$diag_est_run %||% ""
             fit_diag <- NULL
-            if (nzchar(diag_run)) {
+            if (isTRUE(st_full$remote)) {
+              res <- tryCatch(nm_job_result(id, job_root), error = function(e) NULL)
+              if (!is.null(res)) {
+                .shiny_save_remote_sim_result(res, ws_root, job_id = id)
+                ver <- res$version_id %||% ver
+                sim_id <- res$sim_id %||% sim_id
+                diag_run <- res$diag_est_run %||% diag_run
+                fit_diag <- res$fit_diag
+              }
+            }
+            state$simulations_rev <- state$simulations_rev + 1L
+            if (!isTRUE(st_full$remote) && nzchar(diag_run)) {
               fit_diag <- tryCatch(
                 nm_workspace_load_run_fit(
                   state$active_job_project,
@@ -7402,6 +8742,24 @@ server <- function(input, output, session) {
                     duration = 8L
                   )
                 }
+                state$versions_rev <- state$versions_rev + 1L
+                state$est_runs_rev <- state$est_runs_rev + 1L
+              }
+            }
+            if (!is.null(fit_diag)) {
+              parts <- c(
+                if (.shiny_fit_has_npc(fit_diag)) "NPC",
+                if (.shiny_fit_has_npde(fit_diag)) "NPDE"
+              )
+              if (length(parts) > 0L && isTRUE(st_full$remote)) {
+                showNotification(
+                  paste(
+                    paste(parts, collapse = "/"), "complete — see",
+                    paste(parts, collapse = " / "), "tab(s)."
+                  ),
+                  type = "message",
+                  duration = 8L
+                )
                 state$versions_rev <- state$versions_rev + 1L
                 state$est_runs_rev <- state$est_runs_rev + 1L
               }
@@ -7435,12 +8793,43 @@ server <- function(input, output, session) {
               }
             }
             state$active_job_diag_only <- FALSE
+            state$active_job_id <- NULL
+            state$active_job_started <- NULL
           }
         }
       }
     }
     state$job_status_cache <- cache
+    state$pending_remote_saves <- isTRUE(pending_saves)
   }, ignoreInit = TRUE)
+
+  # Guaranteed retry for remote results that finished but couldn't be persisted
+  # into the workspace on the first attempt. Without this, a batch of jobs that
+  # all finish in the same poll (no further push) could leave results in the job
+  # list but missing from the Home model versions. Self-limiting: it only keeps
+  # ticking while saves are still pending.
+  observe({
+    if (!isTRUE(state$pending_remote_saves)) {
+      return()
+    }
+    invalidateLater(4000, session)
+    state$jobs_rev <- isolate(state$jobs_rev) + 1L
+  })
+
+  observe({
+    req(identical(input$ribbon_tab, "jobs"))
+    req(state$selected_job)
+    ctx <- .shiny_jobs_queue_context(input$jobs_queue, job_root)
+    st <- tryCatch(
+      .shiny_job_ctx_status(state$selected_job, ctx),
+      error = function(e) NULL
+    )
+    if (is.null(st) || !st$status %in% c("queued", "running")) {
+      return()
+    }
+    invalidateLater(2000L, session)
+    state$job_log_rev <- isolate(state$job_log_rev) + 1L
+  })
 
   observe({
     if (length(state$handles) == 0L) {
@@ -7458,7 +8847,11 @@ server <- function(input, output, session) {
 
   observeEvent(input$cancel_job, {
     req(state$selected_job)
-    st <- nm_job_status(state$selected_job, job_root)
+    ctx <- .shiny_jobs_queue_context(input$jobs_queue, job_root)
+    st <- tryCatch(
+      .shiny_job_ctx_status(state$selected_job, ctx),
+      error = function(e) NULL
+    )
     if (is.null(st)) {
       showNotification("No job selected.", type = "warning")
       return()
@@ -7467,20 +8860,90 @@ server <- function(input, output, session) {
       showNotification(paste("Job already finished:", st$status), type = "message")
       return()
     }
-    proc <- state$handles[[state$selected_job]]
-    if (!is.null(proc)) {
-      tryCatch(proc$kill(), error = function(e) NULL)
-      state$handles[[state$selected_job]] <- NULL
+    if (identical(ctx$mode, "local")) {
+      proc <- state$handles[[state$selected_job]]
+      if (!is.null(proc)) {
+        tryCatch(proc$kill(), error = function(e) NULL)
+        state$handles[[state$selected_job]] <- NULL
+      }
+      nm_job_cancel(state$selected_job, job_root)
+    } else {
+      stub <- .shiny_remote_stub_id(state$selected_job, ctx)
+      if (!is.null(stub)) {
+        nm_job_cancel(stub, ctx$job_root)
+      } else {
+        rid <- .shiny_resolve_remote_job_id(state$selected_job, ctx)
+        LibeRation:::.nm_remote_job_cancel(ctx$server_id, rid)
+      }
     }
-    nm_job_cancel(state$selected_job, job_root)
+    state$jobs_rev <- isolate(state$jobs_rev) + 1L
     showNotification(paste("Cancelled job:", state$selected_job), type = "warning", duration = 4L)
+  })
+
+  observe({
+    state$expanded_jobs
+    input$jobs_queue
+    jobs_df()
+    ctx <- .shiny_jobs_queue_context(input$jobs_queue, job_root)
+    df <- jobs_df()
+    if (length(state$expanded_jobs) == 0L || nrow(df) == 0L) {
+      return()
+    }
+    cache <- state$job_result_cache
+    changed <- FALSE
+    for (jid in state$expanded_jobs) {
+      idx <- match(jid, df$id)
+      if (is.na(idx)) {
+        next
+      }
+      st <- df$status[[idx]]
+      if (!st %in% c("success", "error")) {
+        next
+      }
+      key <- .shiny_job_cache_key(jid, ctx)
+      if (!is.null(cache[[key]])) {
+        next
+      }
+      if (identical(st, "error")) {
+        err_txt <- if ("error" %in% names(df)) {
+          as.character(df$error[[idx]] %||% "")
+        } else {
+          ""
+        }
+        if (!nzchar(trimws(err_txt))) {
+          st_full <- tryCatch(.shiny_job_ctx_status(jid, ctx), error = function(e) NULL)
+          err_txt <- if (!is.null(st_full$error)) as.character(st_full$error) else ""
+        }
+        cache[[key]] <- list(kind = "error", text = err_txt)
+      } else {
+        fit <- tryCatch(.shiny_job_ctx_result(jid, ctx), error = function(e) NULL)
+        pt <- if (!is.null(fit)) {
+          tryCatch(.shiny_param_table_for_fit(fit$model, fit), error = function(e) NULL)
+        } else {
+          NULL
+        }
+        cache[[key]] <- list(kind = "fit", fit = fit, param_table = pt)
+      }
+      changed <- TRUE
+    }
+    if (changed) {
+      state$job_result_cache <- cache
+    }
   })
 
   output$jobs_tree <- renderUI({
     jobs_df()
     state$selected_job
     state$expanded_jobs
-    .shiny_jobs_tree_ui(jobs_df(), state$selected_job, state$expanded_jobs, job_root)
+    state$job_result_cache
+    ctx <- .shiny_jobs_queue_context(input$jobs_queue, job_root)
+    .shiny_jobs_tree_ui(
+      jobs_df(),
+      state$selected_job,
+      state$expanded_jobs,
+      ctx,
+      result_cache = state$job_result_cache
+    )
   })
 
   output$project_tpl_synthetic_desc <- renderUI({
@@ -7492,39 +8955,64 @@ server <- function(input, output, session) {
   })
 
   output$jobs_refresh_clock <- renderText({
-    df <- jobs_df()
-    n_active <- sum(df$status %in% c("queued", "running"))
-    elapsed_txt <- if (n_active > 0L && nrow(df) > 0L) {
-      active <- df[df$status %in% c("queued", "running"), , drop = FALSE]
-      el <- vapply(seq_len(nrow(active)), function(i) {
-        .shiny_job_duration_label(active$started[[i]], active$finished[[i]], active$status[[i]])
-      }, character(1L))
-      el <- el[nzchar(el)]
-      if (length(el) > 0L) paste0(" | longest ", el[[1L]]) else ""
-    } else {
-      ""
+    job_elapsed_timer()
+    sm <- state$jobs_summary
+    queue_lbl <- state$jobs_queue_label %||% "Local"
+    if (!is.null(sm$error)) {
+      return(paste("Queue:", queue_lbl, "| Error:", sm$error))
     }
+    n <- sm$n %||% 0L
+    n_active <- sm$n_active %||% 0L
+    elapsed_txt <- sm$elapsed %||% ""
     paste(
-      "Updated:", format(Sys.time(), "%H:%M:%S"),
-      "|", nrow(df), "job(s)",
-      if (n_active > 0L) paste0("(", n_active, " active", elapsed_txt, ")") else ""
+      "Queue:", queue_lbl,
+      "| Updated:", format(Sys.time(), "%H:%M:%S"),
+      "|", n, "job(s)",
+      if (n_active > 0L) {
+        paste0("(", n_active, " active", if (nzchar(elapsed_txt)) paste0(" | longest ", elapsed_txt) else "", ")")
+      } else {
+        ""
+      }
     )
   })
 
   observeEvent(input$refresh_jobs, {
     state$job_watch_last <- ""
+    state$job_result_cache <- list()
     state$jobs_rev <- isolate(state$jobs_rev) + 1L
   })
 
   observeEvent(input$cleanup_jobs, {
-    n <- nm_job_cleanup(job_root)
-    showNotification(paste("Removed", n, "finished job(s)."), type = "message")
+    ctx <- .shiny_jobs_queue_context(input$jobs_queue, job_root)
+    n <- if (identical(ctx$mode, "local")) {
+      nm_job_cleanup(job_root)
+    } else {
+      tryCatch(
+        LibeRation:::.nm_remote_job_cleanup(ctx$server_id, job_root),
+        error = function(e) {
+          showNotification(conditionMessage(e), type = "error", duration = NULL)
+          0L
+        }
+      )
+    }
+    if (n > 0L) {
+      state$jobs_rev <- state$jobs_rev + 1L
+      state$job_result_cache <- list()
+      showNotification(paste("Removed", n, "finished job(s)."), type = "message")
+    } else {
+      showNotification("No finished jobs to remove.", type = "message")
+    }
   })
 
   output$job_status_banner <- renderUI({
-    jobs_df()
+    state$jobs_rev
+    state$selected_job
     req(state$selected_job)
-    st <- nm_job_status(state$selected_job, job_root)
+    ctx <- .shiny_jobs_queue_context(input$jobs_queue, job_root)
+    st <- tryCatch(
+      .shiny_job_ctx_status(state$selected_job, ctx),
+      error = function(e) NULL
+    )
     req(st)
     cls <- switch(
       st$status,
@@ -7536,7 +9024,7 @@ server <- function(input, output, session) {
       "alert-light"
     )
     err <- .shiny_clean_job_text(st$error)
-    if (identical(st$status, "error") && !nzchar(err)) {
+    if (identical(st$status, "error") && !nzchar(err) && identical(ctx$mode, "local")) {
       err_path <- file.path(job_root, state$selected_job, "error.txt")
       if (file.exists(err_path)) {
         err <- paste(readLines(err_path, warn = FALSE), collapse = "\n")
@@ -7552,7 +9040,7 @@ server <- function(input, output, session) {
       tags$p(
         strong("Job:"), state$selected_job,
         " | ", strong("Type:"), jtype_label,
-        " | ", strong("Status:"), st$status,
+        " | ", strong("Status:"), .shiny_job_status_label(st$status),
         if (nzchar(duration_lbl)) {
           tags$span(" | ", strong(if (identical(st$status, "running")) "Elapsed:" else "Duration:"), duration_lbl)
         },
@@ -7579,9 +9067,14 @@ server <- function(input, output, session) {
   })
 
   output$job_log <- renderText({
-    jobs_df()
+    state$jobs_rev
+    state$job_log_rev
     req(state$selected_job)
-    nm_job_log(state$selected_job, tail = 60L, job_root = job_root)
+    ctx <- .shiny_jobs_queue_context(input$jobs_queue, job_root)
+    tryCatch(
+      .shiny_job_ctx_log(state$selected_job, ctx, tail = 120L),
+      error = function(e) paste("Could not load log:", conditionMessage(e))
+    )
   })
 
   gof_data <- reactive({
@@ -7851,6 +9344,7 @@ server <- function(input, output, session) {
     secs <- input$report_sections
     sections <- list(
       summary = "summary" %in% secs,
+      run_info = "run_info" %in% secs,
       parameters = "parameters" %in% secs,
       gof_time = "gof_time" %in% secs,
       gof_ipred_time = "gof_ipred_time" %in% secs,
@@ -7860,6 +9354,16 @@ server <- function(input, output, session) {
       diag_eta = "diag_eta" %in% secs,
       narrative_stub = "narrative_stub" %in% secs
     )
+    run_meta <- tryCatch(
+      nm_workspace_load_run_meta(
+        state$selected_project,
+        state$selected_version_id,
+        state$selected_est_run_id,
+        root = ws_root
+      ),
+      error = function(e) NULL
+    )
+    run_info <- if (!is.null(run_meta)) run_meta$run_info else fit$run_info
     tryCatch(
       {
         res <- nm_report_pdf(
@@ -7870,7 +9374,8 @@ server <- function(input, output, session) {
             project = state$selected_project,
             version_id = state$selected_version_id,
             run_id = state$selected_est_run_id,
-            workspace = ws_root
+            workspace = ws_root,
+            run_info = run_info
           )
         )
         state$last_report <- res
@@ -7924,11 +9429,11 @@ server <- function(input, output, session) {
   outputOptions(output, "ctl_theta_table", suspendWhenHidden = FALSE)
   outputOptions(output, "ctl_omega_table", suspendWhenHidden = FALSE)
   outputOptions(output, "ctl_sigma_table", suspendWhenHidden = FALSE)
-  outputOptions(output, "jobs_tree", suspendWhenHidden = FALSE)
-  outputOptions(output, "jobs_refresh_clock", suspendWhenHidden = FALSE)
+  outputOptions(output, "jobs_tree", suspendWhenHidden = TRUE)
+  outputOptions(output, "jobs_refresh_clock", suspendWhenHidden = TRUE)
   outputOptions(output, "compare_gof_grid", suspendWhenHidden = FALSE)
-  outputOptions(output, "job_status_banner", suspendWhenHidden = FALSE)
-  outputOptions(output, "job_log", suspendWhenHidden = FALSE)
+  outputOptions(output, "job_status_banner", suspendWhenHidden = TRUE)
+  outputOptions(output, "job_log", suspendWhenHidden = TRUE)
   outputOptions(output, "app_log_banner", suspendWhenHidden = FALSE)
   outputOptions(output, "app_log_history", suspendWhenHidden = FALSE)
 }

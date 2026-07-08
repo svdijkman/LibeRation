@@ -181,12 +181,43 @@
       "METHOD = BAYES requires a C++-capable model and engine = \"cpp\" or \"auto\"."
     )
   }
+  .nm_est_progress_phase(
+    "BAYES", "start",
+    list(n_burn = n_burn, n_sample = n_sample, sampler = sampler, n_sub = n_sub)
+  )
+  .nm_est_progress_phase(
+    "BAYES", "MCMC",
+    list(n_burn = n_burn, n_sample = n_sample, n_thin = n_thin, sampler = sampler),
+    log_msg = paste0(
+      "BAYES MCMC: burn=", n_burn, " sample=", n_sample,
+      " thin=", n_thin, " sampler=", sampler, " subjects=", n_sub
+    )
+  )
   res <- .nm_bayes_mcmc_cpp(
     model, data, eta_mat, p0$theta, p0$omega, p0$sigma,
     n_burn = n_burn, n_sample = n_sample, n_thin = n_thin,
     step_scale = step_scale, prior = prior, par0 = par0,
     sampler = sampler, hmc_epsilon = hmc_epsilon,
     hmc_leap = hmc_leap, nuts_depth = nuts_depth
+  )
+  acc_txt <- if (!is.null(res$acceptance)) {
+    paste(format(unlist(res$acceptance), digits = 3), collapse = " ")
+  } else {
+    "NA"
+  }
+  .nm_est_progress_phase(
+    "BAYES", "MCMC complete",
+    list(
+      log_posterior = res$log_posterior,
+      n_burn = res$n_burn,
+      n_sample = res$n_sample,
+      acceptance = res$acceptance
+    ),
+    log_msg = paste0(
+      "BAYES MCMC complete: log posterior = ",
+      format(res$log_posterior, digits = 6),
+      "  acceptance = ", acc_txt
+    )
   )
   th_mean <- .nm_bayes_chain_mean(res$theta_chain)
   om_mean <- .nm_bayes_chain_mean(res$omega_chain)

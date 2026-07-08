@@ -60,7 +60,10 @@
   if (.nm_focei_needs_fd_g(model, subj)) {
     return("shi")
   }
-  # Default: Shi/central FD (C++ fast path). AD G is opt-in via focei_G = "ad".
+  if (.nm_ad_pk_supported(model)) {
+    return("ad")
+  }
+  # Default: Shi/central FD (C++ fast path).
   "shi"
 }
 

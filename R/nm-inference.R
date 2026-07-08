@@ -150,6 +150,11 @@
   }
   x0 <- fit$par[free]
   H <- NULL
+  .nm_job_progress_event(
+    "cov_hessian_compute",
+    list(method = fit$method, hessian = hessian),
+    log_msg = paste0("Covariance: computing Hessian (", hessian, ")")
+  )
   if (!identical(hessian, "numeric") &&
       !identical(fit$method, "BAYES")) {
     H <- .nm_fit_ad_hessian(fit, data = data, free = free)
@@ -368,8 +373,10 @@ nm_fit_par_gradients <- function(fit, data = fit$data) {
         model, data, eta_mat, pk_engine = pk
       )
       at <- stats::setNames(as.list(par), labels)
+      tape_key <- .nm_ad_tape_key(model, data, eta_mat, "focei")
       g <- .nm_ad_eval_cached(
-        focei_ad$fn, at, labels, fit$grad_backend %||% "cpp", need_grad = TRUE
+        focei_ad$fn, at, labels, fit$grad_backend %||% "cpp",
+        need_grad = TRUE, tape_key = tape_key
       )
       return(stats::setNames(unname(g[labels]), labels))
     }
@@ -409,7 +416,10 @@ nm_fit_par_gradients <- function(fit, data = fit$data) {
     )
     backend <- fit$grad_backend %||% "cpp"
     at <- stats::setNames(as.list(par), labels)
-    g <- .nm_ad_eval_cached(pop_ad$fn, at, labels, backend, need_grad = TRUE)
+    tape_key <- .nm_ad_tape_key(model, data, eta_mat, "pop")
+    g <- .nm_ad_eval_cached(
+      pop_ad$fn, at, labels, backend, need_grad = TRUE, tape_key = tape_key
+    )
     return(stats::setNames(unname(g[labels]), labels))
   }
 

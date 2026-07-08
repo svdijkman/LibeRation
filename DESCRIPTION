@@ -1,6 +1,6 @@
 Package: LibeRation
 Title: Nonlinear Mixed-Effects Modelling
-Version: 0.1.0
+Version: 0.4.0
 Authors@R: 
     person("Sven C.", "van Dijkman", email = "svdijkman@users.noreply.github.com", role = c("aut", "cre"))
 Description: NONMEM-style population PK/PD estimation with FO, FOCE, FOCEI,
@@ -13,7 +13,7 @@ BugReports: https://github.com/svdijkman/LibeRation/issues
 Encoding: UTF-8
 Roxygen: list(markdown = TRUE, r6 = FALSE)
 Imports:
-    LibeRtAD (>= 0.3.0),
+    LibeRtAD (>= 0.4.0),
     R6,
     Rcpp,
     stats,
@@ -26,6 +26,10 @@ Suggests:
     devtools,
     pkgload,
     callr,
+    curl,
+    jsonlite,
+    sodium,
+    later,
     shiny,
     DT,
     ggplot2,

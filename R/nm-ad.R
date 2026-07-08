@@ -325,10 +325,69 @@
 }
 
 #' @keywords internal
-.nm_ad_run_forward <- function(f, at, backend = "cpp") {
+.nm_ad_tape_reuse_enabled <- function() {
+  isTRUE(getOption("LibeRtAD.tape_reuse", TRUE))
+}
+
+#' Stable cache key for AD tape structure (model + fixed ETAs, not par values).
+#' @keywords internal
+.nm_ad_tape_key <- function(model, data = NULL, eta_mat = NULL, kind = "pop") {
+  cfg <- .nm_lik_config(model)
+  paste(
+    c(
+      kind,
+      model$ADVAN %||% 0L,
+      model$TRANS %||% 0L,
+      length(model$THETAS$THETA),
+      length(model$OMEGAS$OMEGA),
+      length(model$SIGMAS$SIGMA),
+      cfg$error_code %||% 0L,
+      cfg$omega_code %||% 0L,
+      if (!is.null(data)) nrow(data) else 0L,
+      if (!is.null(eta_mat) && length(eta_mat) > 0L) {
+        .ad_optim_cache_key(eta_mat)
+      } else {
+        "noeta"
+      }
+    ),
+    collapse = "\003"
+  )
+}
+
+#' @keywords internal
+.nm_ad_tape_cached <- function(tape_key) {
+  !is.null(tape_key) &&
+    .nm_ad_tape_reuse_enabled() &&
+    !is.null(ad_tape_load(tape_key))
+}
+
+#' @keywords internal
+.nm_ad_run_forward <- function(f, at, backend = "cpp", tape_key = NULL) {
   .ad_check_formals(f, at)
-  reset_tape()
   ad_st <- LibeRtAD:::.ad_state
+  reuse <- .nm_ad_tape_cached(tape_key)
+  if (reuse) {
+    cached <- ad_tape_load(tape_key)
+    ad_st$tape <- cached$tape
+    ad_st$graph_gen <- cached$graph_gen
+    ad_st$active <- FALSE
+    set_ops(backend)
+    on.exit({
+      ad_st$active <- FALSE
+      set_ops("R")
+    }, add = TRUE)
+    parameters <- .ad_bind_tape_parameters(cached$tape, at)
+    replay_tape_values_cpp(cached$tape, at)
+    result <- cached$tape[[length(cached$tape)]]
+    return(list(
+      result = result,
+      parameters = parameters,
+      at = at,
+      tape_key = tape_key,
+      reused = TRUE
+    ))
+  }
+  reset_tape()
   ad_st$active <- TRUE
   set_ops(backend)
   on.exit({
@@ -338,40 +397,58 @@
   parameters <- .ad_values_to_parameters(at)
   .ad_reset_gradients(parameters)
   env <- .ad_make_eval_env(parameters)
+  parent.env(env) <- environment(f)
   args <- lapply(names(at), function(nm) env[[nm]])
   result <- do.call(f, args)
   result <- .ad_as_ad_node(result)
   if (.ad_node_len(result$value) != 1L) {
     .nm_stop("Differentiation requires a scalar NLL output.")
   }
-  list(result = result, parameters = parameters, at = at)
+  if (!is.null(tape_key) && .nm_ad_tape_reuse_enabled()) {
+    tryCatch(ad_tape_save(tape_key), error = function(e) NULL)
+  }
+  list(
+    result = result,
+    parameters = parameters,
+    at = at,
+    tape_key = tape_key,
+    reused = FALSE
+  )
 }
 
 #' @keywords internal
 .nm_ad_run_reverse_only <- function(fwd, backend = "cpp") {
+  if (isTRUE(fwd$reused)) {
+    reset_tape_grads_cpp(LibeRtAD:::.ad_state$tape)
+  }
   .ad_run_reverse(fwd$result, backend)
   .ad_collect_reverse_partials(fwd$parameters)
 }
 
 #' @keywords internal
-.nm_do_call_autodiff <- function(f, at, backend = "cpp") {
-  fwd <- .nm_ad_run_forward(f, at, backend)
+.nm_do_call_autodiff <- function(f, at, backend = "cpp", tape_key = NULL) {
+  fwd <- .nm_ad_run_forward(f, at, backend, tape_key = tape_key)
   .nm_ad_run_reverse_only(fwd, backend)
 }
 
 #' @keywords internal
 .nm_ad_eval_cached <- function(objective_fn, at, par_names, backend = "cpp",
-                               need_grad = FALSE) {
+                               need_grad = FALSE, tape_key = NULL) {
   if (is.null(.nm_state$optim_cache)) {
     .nm_state$optim_cache <- list()
   }
   key <- .ad_optim_cache_key(unlist(at[par_names], use.names = FALSE))
   cache <- .nm_state$optim_cache
-  if (!is.null(cache) && identical(cache$key, key)) {
+  if (!is.null(cache) &&
+      identical(cache$key, key) &&
+      identical(cache$tape_key, tape_key)) {
     if (need_grad) {
       if (is.null(cache$fwd)) {
-        cache$fwd <- .nm_ad_run_forward(objective_fn, at, backend)
+        cache$fwd <- .nm_ad_run_forward(
+          objective_fn, at, backend, tape_key = tape_key
+        )
         cache$key <- key
+        cache$tape_key <- tape_key
       }
       grad <- .nm_ad_run_reverse_only(cache$fwd, backend)
       return(unname(grad[par_names]))
@@ -380,13 +457,15 @@
       return(cache$value)
     }
   }
-  fwd <- .nm_ad_run_forward(objective_fn, at, backend)
+  fwd <- .nm_ad_run_forward(objective_fn, at, backend, tape_key = tape_key)
   val <- .ad_scalar_value(fwd$result)
   if (need_grad) {
     grad <- .nm_ad_run_reverse_only(fwd, backend)
     return(unname(grad[par_names]))
   }
-  .nm_state$optim_cache <- list(key = key, fwd = fwd, value = val)
+  .nm_state$optim_cache <- list(
+    key = key, tape_key = tape_key, fwd = fwd, value = val
+  )
   val
 }
 

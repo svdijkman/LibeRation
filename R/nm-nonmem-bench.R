@@ -1497,3 +1497,235 @@ nm_bench_summarize <- function(results) {
   ), drop = FALSE]
   list(combined = combined, sim = sim, est = est)
 }
+
+# ---------------------------------------------------------------------------
+# NONMEM-free fidelity benchmarks (self-consistency / cross-method / recovery)
+#
+# When a NONMEM install is not available these provide automated fidelity
+# checks for every estimation method: FO/Laplace/SAEM/IMP/BAYES each get a
+# benchmark, complementing the FOCEI-centric nmfe73 comparisons above.
+# ---------------------------------------------------------------------------
+
+#' Cross-implementation check of the FO marginal objective
+#'
+#' Confirms the C++ FO marginal (\code{nm_fo_marginal_cpp}) matches the
+#' reference R implementation of \eqn{\sum_i \log|V_i| + r_i^\top V_i^{-1} r_i}
+#' on a synthetic dataset. This validates the FO marginal likelihood against an
+#' independent implementation of the analytic linear-model marginal formula.
+#'
+#' @param id Synthetic catalog id (see \code{\link{nm_synthetic_dataset}}).
+#' @param n_sub Number of subjects.
+#' @param seed Random seed.
+#' @param tol Relative tolerance for the cpp-vs-R comparison.
+#' @return List with \code{cpp}, \code{r}, \code{diff}, and \code{ok}.
+#' @examples
+#' nm_bench_fo_marginal_check(id = "warf", n_sub = 4L)
+#' @export
+nm_bench_fo_marginal_check <- function(id = "warf", n_sub = 8L, seed = 1L,
+                                       tol = 1e-5) {
+  sim <- nm_synthetic_dataset(id, n_sub = n_sub, seed = seed)
+  m <- sim$model
+  d <- sim$data
+  th <- m$THETAS$Value
+  om <- m$OMEGAS$Value
+  sg <- m$SIGMAS$Value
+  # Both paths use C++ predictions so the check isolates the marginal linear
+  # algebra: the exported nm_fo_marginal_cpp (hand-rolled Cholesky/logdet/solve)
+  # against an independent base-R chol()/backsolve() implementation.
+  cpp <- .nm_fo_marginal_nll(m, d, th, om, sg, pk_engine = "cpp")
+  rr <- .nm_fo_marginal_nll_r(m, d, th, om, sg, pk_engine = "cpp")
+  diff <- abs(cpp - rr)
+  list(
+    id = id,
+    cpp = cpp,
+    r = rr,
+    diff = diff,
+    ok = is.finite(cpp) && is.finite(rr) && diff <= tol * (1 + abs(cpp))
+  )
+}
+
+#' FOCEI interaction fidelity check (proportional vs additive error)
+#'
+#' Verifies that the FOCE-INTER curvature term is engaged for f-dependent error
+#' models (proportional) and is an exact no-op for additive error, and that the
+#' R and C++ FOCEI objectives agree.
+#'
+#' @param n_sub Number of subjects.
+#' @param seed Random seed.
+#' @return List of objective values and pass/fail flags.
+#' @examples
+#' \donttest{nm_bench_focei_interaction_check(n_sub = 6L)}
+#' @export
+nm_bench_focei_interaction_check <- function(n_sub = 20L, seed = 11L) {
+  sim <- nm_synthetic_warf(n_sub = n_sub, seed = seed)
+  m <- sim$model
+  d <- sim$data
+  th <- m$THETAS$Value
+  om <- m$OMEGAS$Value
+  sg <- m$SIGMAS$Value
+  meta <- .nm_cpp_meta(m)
+  subs <- .nm_cpp_subjects_cached(m, d)
+  dat <- .nm_prepare_data(d, m$INPUT, m)
+  focei_obj <- function(eta, interaction) {
+    nm_focei_objective_cpp(
+      subs, eta, as.numeric(th), as.numeric(om), as.numeric(sg),
+      meta$pred_lines, meta$advan, meta$trans, meta$obs_cmp, meta$dose_cmp,
+      meta$n_transit, meta$use_ode, meta$model_ss, interaction = interaction
+    )
+  }
+  # Proportional error: interaction must change the objective.
+  m$LIK_CONFIG <- nm_lik_config(error = "prop")
+  .nm_sync_lik_config(m)
+  eta <- .nm_sanitize_eta_mat(
+    .nm_fit_all_eta_modes(m, dat, th, om, sg, NULL, "cpp", list()), om
+  )
+  prop_on <- focei_obj(eta, TRUE)
+  prop_off <- focei_obj(eta, FALSE)
+  # R path agreement on the interaction objective.
+  ids <- .nm_subject_ids(dat)
+  r_obj <- 0
+  for (j in seq_along(ids)) {
+    r_obj <- r_obj + .nm_focei_subject_nll_internal(
+      m, .nm_subject_slice(dat, ids[j]), th, om, sg, eta[j, ],
+      pk_engine = "cpp", interaction = TRUE
+    )
+  }
+  # Additive error: interaction must be a no-op.
+  m_add <- m
+  m_add$LIK_CONFIG <- nm_lik_config(error = "add")
+  .nm_sync_lik_config(m_add)
+  add_on <- focei_obj(eta, TRUE)
+  add_off <- focei_obj(eta, FALSE)
+  .nm_sync_lik_config(m)
+  list(
+    prop_on = prop_on,
+    prop_off = prop_off,
+    prop_engaged = is.finite(prop_on) && abs(prop_on - prop_off) > 1e-4,
+    r_cpp_diff = abs(r_obj - prop_on),
+    r_cpp_ok = abs(r_obj - prop_on) <= 1e-6 * (1 + abs(prop_on)),
+    add_on = add_on,
+    add_off = add_off,
+    add_noop = abs(add_on - add_off) <= 1e-9 * (1 + abs(add_on))
+  )
+}
+
+#' Structural-parameter recovery benchmark for one estimation method
+#'
+#' Fits \code{method} to a synthetic dataset simulated at known truth and checks
+#' the finiteness of the objective and recovery of the structural THETAs within
+#' \code{rtol}. Random-effect and residual parameters are reported but not
+#' asserted (their bias differs by method, e.g. FO inflates OMEGA).
+#'
+#' @param id Synthetic catalog id.
+#' @param method Estimation method (\code{"FO"}, \code{"FOCE"}, \code{"FOCEI"},
+#'   \code{"LAPLACE"}, \code{"SAEM"}, \code{"IMP"}, \code{"BAYES"}).
+#' @param n_sub Number of subjects.
+#' @param seed Random seed.
+#' @param rtol Relative tolerance for THETA recovery.
+#' @param control \code{nm_est} control overrides.
+#' @param ... Passed to \code{nm_est} (e.g. \code{max_outer}, \code{n_iter}).
+#' @return List with truth/estimates, \code{max_theta_rel}, and \code{ok}.
+#' @examples
+#' \donttest{nm_bench_method_recovery(id = "warf", method = "FO", n_sub = 8L)}
+#' @export
+nm_bench_method_recovery <- function(id = "warf", method = "FOCE", n_sub = 15L,
+                                     seed = 1L, rtol = 0.5, control = list(),
+                                     ...) {
+  sim <- nm_synthetic_dataset(id, n_sub = n_sub, seed = seed)
+  truth_theta <- as.numeric(sim$model$THETAS$Value)
+  ctl <- utils::modifyList(
+    list(maxit = 200L, compute_inference = FALSE, n_cores = 1L), control
+  )
+  fit <- nm_est(
+    sim$model, sim$data, method = method, grad = "numeric",
+    pk_engine = "cpp", engine = "cpp", control = ctl, ...
+  )
+  est_theta <- as.numeric(fit$theta)
+  d_theta <- abs(est_theta - truth_theta) / pmax(abs(truth_theta), 1e-8)
+  # BAYES reports a posterior summary (log_posterior) rather than a -2LL
+  # objective, so its ok flag is based on THETA recovery alone.
+  obj_finite <- if (identical(method, "BAYES")) {
+    all(is.finite(est_theta))
+  } else {
+    is.finite(fit$objective %||% NA_real_)
+  }
+  theta_ok <- all(d_theta <= rtol, na.rm = TRUE)
+  list(
+    id = id,
+    method = method,
+    objective = fit$objective %||% NA_real_,
+    obj_finite = obj_finite,
+    theta_truth = truth_theta,
+    theta_est = est_theta,
+    max_theta_rel = if (length(d_theta)) max(d_theta) else NA_real_,
+    theta_ok = theta_ok,
+    ok = obj_finite && theta_ok,
+    fit = fit
+  )
+}
+
+#' Cross-method agreement benchmark on shared synthetic data
+#'
+#' Fits several methods to the same dataset and compares their structural THETA
+#' estimates (which should agree regardless of objective-constant conventions).
+#' A useful fidelity check is FOCEI vs LAPLACE on mildly nonlinear data.
+#'
+#' @param id Synthetic catalog id.
+#' @param methods Character vector of \code{nm_est} methods; the first is the
+#'   reference.
+#' @param n_sub Number of subjects.
+#' @param seed Random seed.
+#' @param theta_rtol Relative tolerance for pairwise THETA agreement.
+#' @param control \code{nm_est} control overrides.
+#' @param ... Passed to \code{nm_est}.
+#' @return List with per-method thetas/objectives and \code{theta_agree}.
+#' @examples
+#' \donttest{
+#' nm_bench_cross_method(id = "iv1", methods = c("FOCEI", "LAPLACE"), n_sub = 8L)
+#' }
+#' @export
+nm_bench_cross_method <- function(id = "iv1",
+                                  methods = c("FOCEI", "LAPLACE"),
+                                  n_sub = 12L, seed = 1L, theta_rtol = 0.2,
+                                  control = list(), ...) {
+  sim <- nm_synthetic_dataset(id, n_sub = n_sub, seed = seed)
+  ctl <- utils::modifyList(
+    list(maxit = 200L, compute_inference = FALSE, n_cores = 1L), control
+  )
+  dots <- list(...)
+  est_formals <- list(
+    FO = names(formals(.nm_est_fo)),
+    FOCE = names(formals(.nm_est_foce)),
+    FOCEI = names(formals(.nm_est_focei)),
+    SAEM = names(formals(.nm_est_saem)),
+    LAPLACE = names(formals(.nm_est_laplace)),
+    IMP = names(formals(.nm_est_imp)),
+    BAYES = names(formals(.nm_est_bayes))
+  )
+  fits <- lapply(methods, function(mm) {
+    ok_names <- est_formals[[mm]] %||% character()
+    mm_dots <- dots[names(dots) %in% ok_names]
+    do.call(nm_est, c(
+      list(
+        sim$model, sim$data, method = mm, grad = "numeric",
+        pk_engine = "cpp", engine = "cpp", control = ctl
+      ),
+      mm_dots
+    ))
+  })
+  names(fits) <- methods
+  theta <- vapply(fits, function(f) as.numeric(f$theta), numeric(length(sim$model$THETAS$Value)))
+  ref <- theta[, 1L]
+  d <- apply(theta, 2L, function(col) {
+    max(abs(col - ref) / pmax(abs(ref), 1e-8))
+  })
+  list(
+    id = id,
+    methods = methods,
+    theta = theta,
+    objective = vapply(fits, function(f) as.numeric(f$objective), numeric(1)),
+    max_theta_rel = max(d),
+    theta_agree = all(d <= theta_rtol),
+    fits = fits
+  )
+}

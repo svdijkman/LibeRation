@@ -33,8 +33,12 @@ nm_fit_all_eta_cpp <- function(subjects, theta, omega, sigma, pred_lines, advan,
     .Call(`_LibeRation_nm_fit_all_eta_cpp`, subjects, theta, omega, sigma, pred_lines, advan, trans, obs_cmp, dose_cmp, n_transit, use_ode, model_ss, eta_init, max_iter)
 }
 
-nm_focei_objective_cpp <- function(subjects, eta_modes, theta, omega, sigma, pred_lines, advan, trans, obs_cmp, dose_cmp, n_transit, use_ode, model_ss) {
-    .Call(`_LibeRation_nm_focei_objective_cpp`, subjects, eta_modes, theta, omega, sigma, pred_lines, advan, trans, obs_cmp, dose_cmp, n_transit, use_ode, model_ss)
+nm_fo_marginal_cpp <- function(subjects, theta, omega, sigma, n_eta, pred_lines, advan, trans, obs_cmp, dose_cmp, n_transit, use_ode, model_ss) {
+    .Call(`_LibeRation_nm_fo_marginal_cpp`, subjects, theta, omega, sigma, n_eta, pred_lines, advan, trans, obs_cmp, dose_cmp, n_transit, use_ode, model_ss)
+}
+
+nm_focei_objective_cpp <- function(subjects, eta_modes, theta, omega, sigma, pred_lines, advan, trans, obs_cmp, dose_cmp, n_transit, use_ode, model_ss, interaction = TRUE) {
+    .Call(`_LibeRation_nm_focei_objective_cpp`, subjects, eta_modes, theta, omega, sigma, pred_lines, advan, trans, obs_cmp, dose_cmp, n_transit, use_ode, model_ss, interaction)
 }
 
 nm_focei_interaction_cpp <- function(subjects, eta_modes, theta, omega, sigma, pred_lines, advan, trans, obs_cmp, dose_cmp, n_transit, use_ode, model_ss) {
@@ -53,8 +57,8 @@ nm_laplace_nll_detailed_cpp <- function(subjects, theta, omega, sigma, gh_nodes,
     .Call(`_LibeRation_nm_laplace_nll_detailed_cpp`, subjects, theta, omega, sigma, gh_nodes, gh_weights, pred_lines, advan, trans, obs_cmp, dose_cmp, n_transit, use_ode, model_ss, mode_centered, eta_modes)
 }
 
-nm_lik_config_set <- function(error_type = 0L, omega_type = 0L, sigma_corr = 0L, iov = 0L, ar1_rho = 0.0) {
-    invisible(.Call(`_LibeRation_nm_lik_config_set`, error_type, omega_type, sigma_corr, iov, ar1_rho))
+nm_lik_config_set <- function(error_type = 0L, omega_type = 0L, sigma_corr = 0L, iov = 0L, ar1_rho = 0.0, blq_method = 0L) {
+    invisible(.Call(`_LibeRation_nm_lik_config_set`, error_type, omega_type, sigma_corr, iov, ar1_rho, blq_method))
 }
 
 nm_lik_config_get <- function() {

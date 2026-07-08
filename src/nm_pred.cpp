@@ -77,8 +77,10 @@ nm_pk::PkParams list_to_pkparams(List pred, nm_pk::PkParams base) {
     else if (nm == "VMAX") p.vmax = v;
     else if (nm == "KM") p.km = v;
     else if (nm == "VM") {
+      // VM is a maximum elimination rate (amount/time), not a volume. It must
+      // not masquerade as the central volume/scale (that shadowed an explicit
+      // V for ADVAN10 and gave dimensionally wrong concentrations).
       p.vm = v;
-      if (p.v1 <= 0.0) p.v1 = v;
     }
     else {
       // allow sequential references to earlier PRED assignments

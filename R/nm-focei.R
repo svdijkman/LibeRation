@@ -246,6 +246,41 @@
   .nm_residual_var(f, sigma, error)
 }
 
+#' FOCE-INTER curvature addition: \eqn{0.5 (R'_j / R_j)^2}.
+#'
+#' R depends on eta only through the individual prediction \eqn{f_j}, so
+#' \eqn{\partial R_j/\partial\eta = (dR_j/df_j)\, G_j}. This returns the extra
+#' factor (beyond the FOCE \eqn{1/R_j}) multiplying \eqn{G_{ji}G_{jk}} in the
+#' curvature/information term. Zero for additive/log error (no interaction).
+#' @keywords internal
+.nm_focei_interaction_coef <- function(fj, sigma, rj, error, ad) {
+  s1 <- .nm_sigma_el(sigma, 1L)
+  s2 <- .nm_sigma_el(sigma, 2L)
+  if (ad) {
+    rp <- switch(
+      error,
+      prop = .ad_div(newConstant(name = "two_pr", value = 2), fj),
+      propadd = .ad_div(
+        .ad_mul(.ad_mul(newConstant(name = "two_pa", value = 2), .ad_mul(s1, s1)), fj),
+        rj
+      ),
+      power = .ad_div(.ad_mul(newConstant(name = "two_pw", value = 2), s2), fj),
+      newConstant(name = "zero_int", value = 0)
+    )
+    return(.ad_mul(newConstant(name = "half_int", value = 0.5), .ad_mul(rp, rp)))
+  }
+  fj <- as.numeric(fj)
+  rj <- as.numeric(rj)
+  rp <- switch(
+    error,
+    prop = if (abs(fj) > 1e-12) 2 / fj else 0,
+    propadd = if (rj > 0) 2 * as.numeric(s1)^2 * fj / rj else 0,
+    power = if (abs(fj) > 1e-12) 2 * as.numeric(s2) / fj else 0,
+    0
+  )
+  0.5 * rp^2
+}
+
 #' @keywords internal
 .nm_focei_subject_G <- function(model, subj, theta, omega, eta, sigma, pk_engine) {
   .nm_focei_subject_G_sens(
@@ -276,7 +311,8 @@
                                            omega,
                                            sigma,
                                            eta,
-                                           pk_engine = "auto") {
+                                           pk_engine = "auto",
+                                           interaction = TRUE) {
   eta <- as.numeric(eta)
   n_eta <- length(eta)
   if (n_eta == 0L || length(omega) == 0L) {
@@ -308,6 +344,13 @@
     } else {
       nll + log(rj) + resid^2 / rj
     }
+    # FOCE-INTER: augment the curvature coefficient 1/R_j with 0.5 (R'_j/R_j)^2.
+    coef <- if (isTRUE(interaction)) {
+      extra <- .nm_focei_interaction_coef(fj, sigma, rj, cfg$error, ad)
+      if (ad) .ad_add(inv_r, extra) else inv_r + extra
+    } else {
+      inv_r
+    }
     for (i in seq_len(n_eta)) {
       for (k in seq_len(n_eta)) {
         gij <- .nm_focei_G_ij(G, j, i, ad)
@@ -315,10 +358,10 @@
         if (ad) {
           gvg[[i]][[k]] <- .ad_add(
             gvg[[i]][[k]],
-            .ad_mul(.ad_mul(inv_r, gij), gkj)
+            .ad_mul(.ad_mul(coef, gij), gkj)
           )
         } else {
-          gvg[i, k] <- gvg[i, k] + inv_r * gij * gkj
+          gvg[i, k] <- gvg[i, k] + coef * gij * gkj
         }
       }
     }
@@ -479,6 +522,7 @@
   opt_grad <- "numeric"
   prev_val <- NULL
   for (iter in seq_len(max_outer)) {
+    .nm_est_progress_outer("FOCEI", iter, max_outer, if (!is.null(prev_val)) prev_val else NA_real_)
     .nm_clear_pop_optim_cache()
     .nm_clear_focei_nested_cache()
     eta_env <- new.env(parent = emptyenv())
@@ -514,7 +558,7 @@
       function(par) {
         nested <- fetch(par)
         .nm_focei_sensitivity_grad(
-          model, data, par, nested$eta, pk_eff
+          model, data, par, nested$eta, pk_eff, backend, focei_grad
         )
       }
     } else {
@@ -525,6 +569,7 @@
       ad_objective = NULL, ad_presolve = NULL, eta_mat = NULL,
       include_omega_prior = TRUE, cpp_pop_grad = FALSE, gr_fn = gr_fn
     )
+    .nm_est_progress_outer_done("FOCEI", iter, max_outer, fit$value)
     optim_runs[[iter]] <- fit$optim
     par <- fit$par
     eta_mat <- eta_env$eta
@@ -551,9 +596,15 @@
       objective = final_obj,
       outer = vapply(optim_runs, function(o) o$value, numeric(1)),
       convergence = fit$convergence,
-      grad = if (use_sens) "sensitivity" else est_grad,
+      grad = if (use_sens) {
+        if (.nm_grad_uses_ad(focei_grad)) "ad" else "sensitivity"
+      } else {
+        est_grad
+      },
       grad_requested = focei_grad,
-      grad_backend = if (use_sens) {
+      grad_backend = if (use_sens && .nm_grad_uses_ad(focei_grad)) {
+        backend
+      } else if (use_sens) {
         "sensitivity"
       } else {
         .nm_report_grad_backend(model, est_grad, backend)

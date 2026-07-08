@@ -36,6 +36,8 @@ nm_bootstrap_se <- function(fit, n_boot = 50L, seed = 1L, warm_start = TRUE, ...
   boot_pars <- matrix(NA_real_, n_boot, length(labels))
   colnames(boot_pars) <- labels
   start_par <- if (isTRUE(warm_start)) fit$par else NULL
+  n_success <- 0L
+  fail_msgs <- character(0)
   for (b in seq_len(n_boot)) {
     samp <- sample(ids, n_sub, replace = TRUE)
     boot_dat <- .nm_bootstrap_dataset(dat, samp)
@@ -52,11 +54,36 @@ nm_bootstrap_se <- function(fit, n_boot = 50L, seed = 1L, warm_start = TRUE, ...
     )
     boot_fit <- tryCatch(
       do.call(nm_est, boot_args),
-      error = function(e) NULL
+      error = function(e) {
+        fail_msgs[[length(fail_msgs) + 1L]] <<- conditionMessage(e)
+        NULL
+      }
     )
     row <- .nm_bootstrap_par_row(boot_fit, labels)
     if (!is.null(row)) {
       boot_pars[b, ] <- row
+      n_success <- n_success + 1L
+    }
+  }
+  n_fail <- n_boot - n_success
+  if (n_fail > 0L) {
+    detail <- if (length(fail_msgs) > 0L) {
+      paste0(" First error: ", fail_msgs[[1L]])
+    } else {
+      ""
+    }
+    msg <- sprintf(
+      "%d of %d bootstrap replicate(s) failed or did not converge and were excluded.%s",
+      n_fail, n_boot, detail
+    )
+    if (n_success < 2L) {
+      warning(msg, " Fewer than 2 usable replicates: bootstrap SE is not available.",
+        call. = FALSE)
+    } else if (n_success < 0.5 * n_boot) {
+      warning(msg, " More than half of replicates failed: bootstrap SE is unreliable.",
+        call. = FALSE)
+    } else {
+      warning(msg, call. = FALSE)
     }
   }
   ok <- apply(boot_pars, 2, function(x) sum(is.finite(x)))
@@ -95,6 +122,8 @@ nm_bootstrap_se <- function(fit, n_boot = 50L, seed = 1L, warm_start = TRUE, ...
     boot_pars = boot_pars,
     n_ok = n_ok,
     n_ok_col = stats::setNames(as.integer(ok), labels),
+    n_success = n_success,
+    n_fail = n_fail,
     se_method = "sd_of_bootstrap_estimates",
     n_boot = n_boot,
     seed = seed

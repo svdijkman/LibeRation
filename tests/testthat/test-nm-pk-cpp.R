@@ -108,6 +108,16 @@ test_that("C++ PRED evaluator parses expressions with arithmetic", {
   expect_true(nm_pred_expr_check_cpp(lines))
 })
 
+test_that("C++ PRED evaluator accepts NONMEM ** power operator", {
+  lines <- c(
+    "CL = THETA(1)",
+    "VC = (THETA(2) ** 2) + 1"
+  )
+  expect_true(nm_pred_expr_check_cpp(lines))
+  out <- nm_eval_pred_cpp(lines, theta = c(3, 4), eta = numeric(), covariates = list())
+  expect_equal(as.numeric(out$VC), 17, tolerance = 1e-10)
+})
+
 test_that("PRED evaluator skips ODE $DES lines with compartment amounts", {
   pk <- c(
     "CL = THETA(1) * exp(ETA(1))",

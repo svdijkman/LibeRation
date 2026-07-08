@@ -41,22 +41,58 @@
   if (obs_cmp == 1L) A_dep / V else A_cen / V
 }
 
+#' Two-compartment IV bolus (analytical hybrid-eigenvalue solution).
+#'
+#' Mirrors the validated C++ core (`step_2_iv_bolus` in `nm_pk_pkadvan.h`):
+#' the amount vector is propagated over each interval with the exact
+#' matrix-exponential of the linear system rather than the previous crude
+#' first-order approximation. Doses are applied additively after propagation
+#' so multi-dose designs and residual drug are handled correctly.
 #' @keywords internal
 .nm_cmp2bol_ss <- function(dat, k10, k12, k21, V1, V2, obs_cmp = 1L) {
   n <- nrow(dat)
   A1 <- rep(0, n)
   A2 <- rep(0, n)
+  E1 <- k10 + k12
+  E2 <- k21
+  s <- E1 + E2
+  disc <- s * s - 4 * (E1 * E2 - k12 * k21)
+  root <- sqrt(max(disc, 0))
+  l1 <- 0.5 * (s + root)
+  l2 <- 0.5 * (s - root)
+  d <- l2 - l1
+  has_cmt <- "CMT" %in% names(dat)
+  a1 <- 0
+  a2 <- 0
   for (i in seq_len(n)) {
-    if (dat$EVID[i] == 1L && dat$CMT[i] == 1L) {
-      A1[i] <- dat$AMT[i]
-    } else if (dat$EVID[i] == 1L && dat$CMT[i] == 2L) {
-      A2[i] <- dat$AMT[i]
-    } else if (i > 1L) {
+    if (i > 1L) {
       dt <- dat$TIME[i] - dat$TIME[i - 1L]
-      e12 <- exp(-(k10 + k12 + k21) * dt)
-      A1[i] <- A1[i - 1L] * e12 + A2[i - 1L] * k21 * dt * e12
-      A2[i] <- A2[i - 1L] * e12 + A1[i - 1L] * k12 * dt * e12
+      p1 <- a1
+      p2 <- a2
+      if (abs(d) < 1e-12) {
+        e <- exp(-l1 * dt)
+        a1 <- (p1 + p2 * k21 / l1) * e
+        a2 <- p2 * e
+      } else {
+        a1 <- (((p1 * E2 + p2 * k21) - p1 * l1) * exp(-l1 * dt) -
+          ((p1 * E2 + p2 * k21) - p1 * l2) * exp(-l2 * dt)) / d
+        a2 <- (((p2 * E1 + p1 * k12) - p2 * l1) * exp(-l1 * dt) -
+          ((p2 * E1 + p1 * k12) - p2 * l2) * exp(-l2 * dt)) / d
+      }
     }
+    if (isTRUE(dat$EVID[i] == 3L)) {
+      a1 <- 0
+      a2 <- 0
+    } else if (isTRUE(dat$EVID[i] == 1L)) {
+      cmt <- if (has_cmt) as.integer(dat$CMT[i]) else 1L
+      if (identical(cmt, 2L)) {
+        a2 <- a2 + dat$AMT[i]
+      } else {
+        a1 <- a1 + dat$AMT[i]
+      }
+    }
+    A1[i] <- a1
+    A2[i] <- a2
   }
   if (obs_cmp == 2L) A2 / V2 else A1 / V1
 }
@@ -277,12 +313,13 @@
   pred_vals <- if (pk_engine == "cpp") {
     cov <- list()
     if (!is.null(model$COVARIATES) && length(model$COVARIATES) > 0L) {
-      subj_row <- subj[1L, ]
       cv <- as.character(model$COVARIATES)
+      missing_cv <- setdiff(cv, names(subj))
+      if (length(missing_cv) > 0L) {
+        .nm_stop("Covariate columns missing from data: ", paste(missing_cv, collapse = ", "))
+      }
       cov <- stats::setNames(
-        lapply(cv, function(cn) {
-          if (cn %in% names(subj_row)) as.numeric(subj_row[[cn]][1L]) else 0
-        }),
+        lapply(cv, function(cn) .nm_cov_baseline_value(subj[[cn]], cn)),
         cv
       )
     }

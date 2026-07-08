@@ -398,7 +398,16 @@ NumericVector solve_mm_iv(const SubjectEvents& ev, const PkParams& p,
       const double dose = ev.amt[i] * row_f1(ev, i, p);
       if (dose > 0.0 && cmt == 1) a[0] += dose;
     }
-    ipred[i] = a[0];
+    // NONMEM ADVAN10: Y is A(1)/S1 (concentration). Apply the central scale
+    // (S1 / V) like every other ADVAN; fall back to the raw amount only when
+    // the model defines neither a scale nor a central volume.
+    const double s = effective_scale(1, p, ev, i);
+    const double vol = pk_central_volume(p);
+    if (s > 0.0 || vol > 0.0) {
+      ipred[i] = conc_iv(event_obs_cmp(obs_cmp, ev, i), a[0], 0.0, 0.0, p, ev, i);
+    } else {
+      ipred[i] = a[0];
+    }
     pk_write_amounts(i, a);
   }
   return ipred;

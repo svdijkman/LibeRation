@@ -161,7 +161,8 @@
                              eta_mat = NULL,
                              include_omega_prior = TRUE,
                              cpp_pop_grad = NULL,
-                             gr_fn = NULL) {
+                             gr_fn = NULL,
+                             ad_tape_key = NULL) {
   fix_mask <- .nm_fix_mask(model)
   if (!is.null(fixed)) {
     fix_mask <- fix_mask | fixed
@@ -229,7 +230,8 @@
       if (use_ad_value) {
         at <- stats::setNames(as.list(par), par_names)
         return(.nm_finite_obj(.nm_ad_eval_cached(
-          ad_obj, at, par_names, backend, need_grad = FALSE
+          ad_obj, at, par_names, backend, need_grad = FALSE,
+          tape_key = ad_tape_key
         )))
       }
       pinned_obj(par)
@@ -252,7 +254,8 @@
         }
         at <- stats::setNames(as.list(par), par_names)
         grad <- .nm_ad_eval_cached(
-          ad_obj, at, par_names, backend, need_grad = TRUE
+          ad_obj, at, par_names, backend, need_grad = TRUE,
+          tape_key = ad_tape_key
         )
         .nm_finite_grad(grad[free])
       }
@@ -404,7 +407,9 @@
   pk_eff <- .nm_resolve_pk_engine(pk_engine, model, theta, omega, sigma, eta_mat)
   warm <- !is.null(eta_mat) && is.matrix(eta_mat) && nrow(eta_mat) > 0L
   eta_maxit <- .nm_focei_eta_max_iter(control, warm = warm)
-  if (.nm_cpp_capable(model) && pk_eff == "cpp") {
+  # The C++ empirical-Bayes eta fitter does not bind covariates or implement
+  # BLQ (M3/M4); use the R eta objective (still C++ PK predictions) for those.
+  if (.nm_cpp_capable(model) && pk_eff == "cpp" && !.nm_model_needs_r_lik(model)) {
     eta_out <- .nm_fit_all_eta_cpp(
       model, dat, theta, omega, sigma, eta_mat, max_iter = eta_maxit
     )
@@ -479,20 +484,110 @@
   method %in% c("SAEM", "LAPLACE", "BAYES")
 }
 
-#' First-order (FO) estimation
+#' First-order (FO) estimation (true NONMEM FO marginal likelihood)
 #'
-#' Two-step NONMEM-style FO: (1) THETA and SIGMA at eta = 0; (2) fit subject
-#' etas then OMEGA from the random-effects prior \eqn{\sum_i \eta_i^{\top} \Omega^{-1} \eta_i}.
+#' Minimises the FO marginal objective jointly over THETA, OMEGA, and SIGMA.
+#' For each subject the marginal -2LL is \eqn{\log|V_i| + r_i^{\top} V_i^{-1} r_i}
+#' with \eqn{V_i = R_i + G_i \Omega G_i^{\top}}, \eqn{G_i = \partial f_i/\partial\eta}
+#' at \eqn{\eta = 0}, and \eqn{R_i} the residual variance at \eqn{\eta = 0}. No
+#' etas are fitted for the objective; empirical-Bayes etas are computed only for
+#' diagnostics (\code{fit$eta}).
+#'
+#' Set \code{control$fo_objective = "twostep"} to fall back to the legacy
+#' (non-NONMEM) two-step scheme.
 #'
 #' @keywords internal
 .nm_est_fo <- function(model, data, par0, backend = "cpp", grad = "auto",
                      pk_engine = "auto", engine = "auto", control = list()) {
+  fo_obj <- control$fo_objective %||% getOption("LibeRation.fo_objective", "marginal")
+  fo_obj <- match.arg(fo_obj, c("marginal", "twostep"))
+  if (identical(fo_obj, "twostep")) {
+    return(.nm_est_fo_twostep(
+      model, data, par0, backend, grad, pk_engine, engine, control
+    ))
+  }
+  pk_eff <- .nm_effective_pk_engine(pk_engine, grad)
+  ginfo <- .nm_resolve_estimation_grad(model, grad)
+  pop_grad <- ginfo$grad
+  dat <- .nm_prepare_data(data, model$INPUT, model)
+  n_eta <- .nm_n_eta(model)
+  .nm_est_progress_phase("FO", "marginal (theta/omega/sigma)")
+
+  objective <- function(par) {
+    p <- .nm_unpack(model, par)
+    .nm_fo_marginal_nll(
+      model, data, p$theta, p$omega, p$sigma, pk_engine = pk_eff
+    )
+  }
+  # The FO marginal is not the standard population NLL, so the tape-AD and
+  # C++ population-gradient paths do not apply; use numeric gradients of the
+  # marginal (grad label is preserved for reporting/back-compat).
+  fit <- .nm_optimize_par(
+    model, data, par0, objective, backend, pop_grad, pk_eff, control,
+    ad_objective = NULL, include_omega_prior = FALSE, cpp_pop_grad = FALSE
+  )
+  .nm_est_progress_phase("FO", "marginal optimisation complete",
+                         list(objective = fit$value))
+
+  par <- fit$par
+  p <- .nm_unpack(model, par)
+  eta_mat <- NULL
+  if (n_eta > 0L) {
+    eta_mat <- .nm_fit_all_eta(
+      model, dat, p$theta, p$omega, p$sigma, NULL,
+      backend = backend, grad = grad, pk_engine = pk_eff, control = control
+    )
+    eta_mat <- .nm_sanitize_eta_mat(eta_mat, p$omega)
+  }
+  total_obj <- .nm_fo_marginal_nll(
+    model, data, p$theta, p$omega, p$sigma, pk_engine = pk_eff
+  )
+  structure(
+    list(
+      method = "FO",
+      par = par,
+      theta = p$theta,
+      omega = p$omega,
+      sigma = p$sigma,
+      eta = eta_mat,
+      objective = total_obj,
+      convergence = fit$convergence,
+      grad = pop_grad,
+      grad_requested = grad,
+      grad_backend = .nm_report_grad_backend(model, pop_grad, backend),
+      pk_engine = pk_eff,
+      fo_objective = "marginal",
+      fo_estimation = list(
+        step1 = fit,
+        step2 = list(
+          eta = eta_mat,
+          omega = p$omega,
+          note = "FO marginal likelihood: joint theta/omega/sigma optimisation"
+        )
+      ),
+      optim = list(step1 = fit$optim, step2 = NULL)
+    ),
+    class = "nm_fit"
+  )
+}
+
+#' Legacy two-step FO (retained behind \code{control$fo_objective = "twostep"}).
+#'
+#' NOTE: this is NOT the NONMEM FO marginal objective; it optimises theta/sigma
+#' at eta = 0, then fits etas and estimates OMEGA from a random-effects prior.
+#' Kept only for backward compatibility / diagnostics.
+#'
+#' @keywords internal
+.nm_est_fo_twostep <- function(model, data, par0, backend = "cpp", grad = "auto",
+                               pk_engine = "auto", engine = "auto",
+                               control = list()) {
   pk_eff <- .nm_effective_pk_engine(pk_engine, grad)
   ginfo <- .nm_resolve_estimation_grad(model, grad)
   pop_grad <- ginfo$grad
   par_names <- .nm_par_labels(model)
   omega_fixed <- grepl("^OMEGA", par_names)
   dat <- .nm_prepare_data(data, model$INPUT, model)
+  .nm_est_progress_phase("FO", "population (theta/sigma)")
 
   ad_obj1 <- if (.nm_grad_uses_ad(pop_grad)) {
     .nm_build_pop_objective(
@@ -512,12 +607,14 @@
     model, data, par0, objective1, backend, pop_grad, pk_eff, control,
     fixed = omega_fixed, ad_objective = ad_obj1, include_omega_prior = FALSE
   )
+  .nm_est_progress_phase("FO", "theta/sigma step complete", list(objective = fit1$value))
 
   n_eta <- .nm_n_eta(model)
   fit2 <- NULL
   eta_mat <- NULL
   par <- fit1$par
   if (n_eta > 0L) {
+    .nm_est_progress_phase("FO", "omega step")
     p1 <- .nm_unpack(model, par)
     eta_mat <- .nm_fit_all_eta(
       model, dat, p1$theta, p1$omega, p1$sigma,
@@ -527,6 +624,7 @@
     fit2 <- .nm_optimize_fo_omega(
       model, par, eta_mat, fixed = theta_sigma_fixed, control = control
     )
+    .nm_est_progress_phase("FO", "omega step complete", list(objective = fit2$value))
     par <- fit2$par
     p2 <- .nm_unpack(model, par)
     eta_mat <- .nm_fit_all_eta(
@@ -536,8 +634,8 @@
   }
 
   p <- .nm_unpack(model, par)
-  total_obj <- .nm_fo_report_objective(
-    model, data, par, eta_mat, pk_engine = pk_eff
+  total_obj <- .nm_fo_marginal_nll(
+    model, data, p$theta, p$omega, p$sigma, pk_engine = pk_eff
   )
   conv <- fit1$convergence
   if (!is.null(fit2)) {
@@ -557,8 +655,60 @@
       grad_requested = grad,
       grad_backend = .nm_report_grad_backend(model, pop_grad, backend),
       pk_engine = pk_eff,
+      fo_objective = "twostep",
       fo_estimation = list(step1 = fit1, step2 = fit2),
       optim = list(step1 = fit1$optim, step2 = if (!is.null(fit2)) fit2$optim else NULL)
+    ),
+    class = "nm_fit"
+  )
+}
+
+#' Post-hoc only "estimation" (NONMEM MAXEVAL=0 POSTHOC)
+#'
+#' Fixes the population parameters (THETA / OMEGA / SIGMA) at their supplied
+#' (initial or previously-estimated) values and only computes the empirical
+#' Bayes ETAs plus the objective function value and diagnostics. No population
+#' optimisation is performed. Reuses the standard conditional ETA fitter
+#' (\code{.nm_fit_all_eta}).
+#'
+#' @keywords internal
+.nm_est_posthoc <- function(model, data, par0, backend = "cpp", grad = "auto",
+                            pk_engine = "auto", engine = "auto",
+                            control = list()) {
+  pk_eff <- .nm_effective_pk_engine(pk_engine, grad)
+  dat <- .nm_prepare_data(data, model$INPUT, model)
+  par <- .nm_apply_fix(model, par0)
+  p <- .nm_unpack(model, par)
+  n_eta <- .nm_n_eta(model)
+  .nm_est_progress_phase("POSTHOC", "empirical Bayes ETAs (population fixed)")
+  eta_mat <- NULL
+  if (n_eta > 0L) {
+    eta_mat <- .nm_fit_all_eta_modes(
+      model, dat, p$theta, p$omega, p$sigma, NULL, pk_eff, control
+    )
+    eta_mat <- .nm_sanitize_eta_mat(eta_mat, p$omega)
+  }
+  final_obj <- .nm_nll_internal(
+    model, data, p$theta, p$omega, p$sigma,
+    eta = eta_mat, include_omega_prior = TRUE, pk_engine = pk_eff
+  )
+  .nm_est_progress_phase("POSTHOC", "complete", list(objective = final_obj))
+  structure(
+    list(
+      method = "POSTHOC",
+      par = par,
+      theta = p$theta,
+      omega = p$omega,
+      sigma = p$sigma,
+      eta = eta_mat,
+      objective = final_obj,
+      convergence = 0L,
+      posthoc = TRUE,
+      grad = NULL,
+      grad_requested = grad,
+      grad_backend = NULL,
+      pk_engine = pk_eff,
+      optim = NULL
     ),
     class = "nm_fit"
   )
@@ -590,6 +740,7 @@
   }
   prev_val <- NULL
   for (iter in seq_len(max_outer)) {
+    .nm_est_progress_outer("FOCE", iter, max_outer, if (!is.null(prev_val)) prev_val else NA_real_)
     .nm_clear_pop_optim_cache()
     p <- .nm_unpack(model, par)
     eta_mat <- .nm_fit_all_eta_modes(
@@ -610,8 +761,14 @@
     }
     fit <- .nm_optimize_par(
       model, data, par, objective, backend, est_grad, pk_eff, control,
-      ad_objective = ad_obj, eta_mat = eta_mat, include_omega_prior = TRUE
+      ad_objective = ad_obj, eta_mat = eta_mat, include_omega_prior = TRUE,
+      ad_tape_key = if (!is.null(ad_obj)) {
+        .nm_ad_tape_key(model, data, eta_mat, "foce")
+      } else {
+        NULL
+      }
     )
+    .nm_est_progress_outer_done("FOCE", iter, max_outer, fit$value)
     optim_runs[[iter]] <- fit$optim
     par <- fit$par
     outer[[iter]] <- fit$value
@@ -676,12 +833,34 @@
       backend, "numeric", pk_eff, control
     )
   }
+  .nm_est_progress_phase("SAEM", "starting iterations", list(n_iter = n_iter))
   theta_sa <- p$theta
   omega_sa <- p$omega
   sigma_sa <- p$sigma
   trace <- matrix(NA_real_, n_iter, length(par))
   optim_runs <- list()
   par_mstep <- par
+  # Opt-in classical SAEM Omega M-step: Robbins-Monro stochastic approximation
+  # of the sufficient statistic S = E[eta eta'] and the exact closed-form update
+  # Omega = S, instead of relying on the numeric M-step optimizer to recover it.
+  saem_omega_cf <- isTRUE(control$saem_omega_closed_form)
+  control$saem_omega_closed_form <- NULL
+  saem_cfg <- if (saem_omega_cf) .nm_lik_config(model) else NULL
+  suff_omega <- NULL
+  .nm_saem_pack_omega <- function(S, omega_vec, n_eta, om_struct) {
+    out <- omega_vec
+    if (identical(om_struct, "block2") && n_eta >= 2L && length(out) >= 3L) {
+      out[1L] <- max(S[1L, 1L], 1e-12)
+      out[2L] <- max(S[2L, 2L], 1e-12)
+      out[3L] <- S[1L, 2L]
+      if (n_eta > 2L) {
+        out[4L:n_eta] <- pmax(diag(S)[3L:n_eta], 1e-12)
+      }
+    } else {
+      out[seq_len(n_eta)] <- pmax(diag(S)[seq_len(n_eta)], 1e-12)
+    }
+    out
+  }
   use_cpp <- .nm_use_cpp_engine(engine, model, "SAEM")
   use_cpp_mstep <- .nm_use_cpp_pop_grad(model, est_grad)
   if (use_cpp_mstep) {
@@ -695,6 +874,7 @@
     NULL
   }
   for (k in seq_len(n_iter)) {
+    .nm_est_progress_iter("SAEM", k, n_iter)
     p <- .nm_unpack(model, par)
     if (n_eta > 0L) {
       if (use_cpp) {
@@ -734,7 +914,12 @@
     fit <- .nm_optimize_par(
       model, data, par_mstep, objective, backend, est_grad, pk_eff,
       control = .nm_saem_mstep_control(control, k, n_burn),
-      ad_objective = ad_obj, eta_mat = eta_mat, include_omega_prior = TRUE
+      ad_objective = ad_obj, eta_mat = eta_mat, include_omega_prior = TRUE,
+      ad_tape_key = if (!is.null(ad_obj)) {
+        .nm_ad_tape_key(model, data, eta_mat, "saem")
+      } else {
+        NULL
+      }
     )
     optim_runs[[k]] <- fit$optim
     par_mstep <- fit$par
@@ -745,7 +930,19 @@
     theta_sa <- (1 - gamma_k) * theta_sa + gamma_k * pp_new$theta
     sigma_sa <- (1 - gamma_k) * sigma_sa + gamma_k * pp_new$sigma
     if (n_eta > 0L) {
-      omega_sa <- (1 - gamma_k) * omega_sa + gamma_k * pp_new$omega
+      if (saem_omega_cf) {
+        S_k <- crossprod(eta_mat) / n_sub
+        suff_omega <- if (is.null(suff_omega)) {
+          S_k
+        } else {
+          (1 - gamma_k) * suff_omega + gamma_k * S_k
+        }
+        omega_sa <- .nm_saem_pack_omega(
+          suff_omega, omega_sa, n_eta, saem_cfg$omega
+        )
+      } else {
+        omega_sa <- (1 - gamma_k) * omega_sa + gamma_k * pp_new$omega
+      }
     }
     par <- .nm_pack(model, theta_sa, omega_sa, sigma_sa)
     par <- .nm_apply_fix(model, par)
@@ -819,6 +1016,7 @@
   use_cpp <- .nm_use_cpp_engine(engine, model, "LAPLACE") || use_cpp_grad
   use_cpp <- use_cpp && .nm_cpp_capable(model)
   est_ctl <- .nm_split_est_control(control)
+  .nm_est_progress_phase("LAPLACE", "start", list(n_quad = n_quad_eff))
   ad_obj <- if (use_ad_outer) {
     .nm_build_laplace_objective(model, data, gh, pk_engine = pk_eff)
   } else {
@@ -911,6 +1109,7 @@
       cpp_pop_grad = FALSE
     )
   }
+  .nm_est_progress_phase("LAPLACE", "optimization complete", list(objective = fit$value))
   p <- .nm_unpack(model, fit$par)
   eta_mat <- .nm_laplace_final_eta_modes(
     model, data, p$theta, p$omega, p$sigma, gh, pk_engine = pk_eff

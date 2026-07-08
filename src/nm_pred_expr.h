@@ -93,7 +93,16 @@ class ExprParser {
   double parse_power() {
     double v = parse_atom();
     skip_ws();
-    if (match("^")) v = std::pow(v, parse_unary());
+    while (true) {
+      if (match("**")) {
+        v = std::pow(v, parse_unary());
+      } else if (match("^")) {
+        v = std::pow(v, parse_unary());
+      } else {
+        break;
+      }
+      skip_ws();
+    }
     return v;
   }
 

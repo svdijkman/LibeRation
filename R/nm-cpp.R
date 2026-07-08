@@ -22,6 +22,21 @@
       return(TRUE)
     }
   }
+  .nm_cpp_pred_check(model, pred)
+}
+
+#' Covariate-aware wrapper around the static C++ PRED expression checker.
+#'
+#' The static checker evaluates with only THETA/ETA bound, so it rejects any
+#' covariate identifier. Covariates ARE bound at run time (see nm_eval_pred_cpp
+#' / .nm_cpp_subjects), so declare them as stubs before checking. Only affects
+#' models that declare COVARIATES.
+#' @keywords internal
+.nm_cpp_pred_check <- function(model, pred = .nm_split_lines(model$PRED)) {
+  covs <- as.character(model$COVARIATES)
+  if (length(covs) > 0L) {
+    pred <- c(paste0(covs, " = 1"), pred)
+  }
   nm_pred_expr_check_cpp(pred)
 }
 
@@ -168,10 +183,11 @@
     )
     if (!is.null(model$COVARIATES) && length(model$COVARIATES) > 0L) {
       cv <- as.character(model$COVARIATES)
-      subj_row <- subj[1L, ]
-      cov_vals <- vapply(cv, function(cn) {
-        if (cn %in% names(subj_row)) as.numeric(subj_row[[cn]][1L]) else 0
-      }, numeric(1))
+      missing_cv <- setdiff(cv, names(subj))
+      if (length(missing_cv) > 0L) {
+        .nm_stop("Covariate columns missing from data: ", paste(missing_cv, collapse = ", "))
+      }
+      cov_vals <- vapply(cv, function(cn) .nm_cov_baseline_value(subj[[cn]], cn), numeric(1))
       subj_list$cov <- stats::setNames(as.list(cov_vals), cv)
     }
     if (!is.null(model$DVID) && "DVID" %in% names(subj_ev)) {
@@ -271,6 +287,20 @@
   invisible(NULL)
 }
 
+#' Convert a non-finite (NaN/Inf) objective into a large finite penalty.
+#'
+#' Optimizers (e.g. \code{optim} L-BFGS-B) fail hard when handed a non-finite
+#' objective. This guard maps NaN/Inf/NULL/length-mismatched values to a large
+#' finite penalty so a bad parameter proposal degrades the search gracefully
+#' rather than crashing the whole estimation.
+#' @keywords internal
+.nm_finite_penalty <- function(val, penalty = .Machine$double.xmax) {
+  if (length(val) != 1L || !is.numeric(val) || !is.finite(val)) {
+    return(penalty)
+  }
+  as.numeric(val)
+}
+
 #' @keywords internal
 .nm_nll_cpp <- function(model, data, theta, omega, sigma, eta = NULL,
                         include_omega_prior = TRUE) {
@@ -286,7 +316,7 @@
   } else {
     eta_mat <- eta
   }
-  nm_nll_cpp(
+  val <- nm_nll_cpp(
     subjects = subs,
     theta = as.numeric(theta),
     omega = as.numeric(omega),
@@ -302,6 +332,7 @@
     model_ss = meta$model_ss,
     include_omega_prior = include_omega_prior
   )
+  .nm_finite_penalty(val)
 }
 
 #' @keywords internal
@@ -321,6 +352,11 @@
 #' @keywords internal
 .nm_use_cpp_pop_grad <- function(model, grad) {
   if (!isTRUE(getOption("LibeRtAD.cpp_pop_grad", TRUE)) || !.nm_cpp_capable(model)) {
+    return(FALSE)
+  }
+  # The C++ population objective/gradient does not implement BLQ (M3/M4) or
+  # covariates; those models must use the R likelihood path.
+  if (.nm_model_needs_r_lik(model)) {
     return(FALSE)
   }
   if (identical(grad, "cpp") || .nm_grad_uses_ad(grad)) {
@@ -492,10 +528,10 @@
   .nm_laplace_eta_modes_set(model, data, res$eta_modes, theta, omega, sigma)
   if (isTRUE(cache_fwd)) {
     cache$key <- cache_key
-    cache$objective <- res$objective
+    cache$objective <- .nm_finite_penalty(res$objective)
     cache$fwd <- res$fwd_subjects
   }
-  res$objective
+  .nm_finite_penalty(res$objective)
 }
 
 #' @keywords internal
@@ -600,6 +636,113 @@
     gradient = unname(c(res$grad_theta, res$grad_omega, res$grad_sigma)),
     names = names
   )
+}
+
+#' Compare the R and C++ PK engines for the same inputs (divergence notice)
+#'
+#' Predicts each subject's concentrations with both the R and the C++ PK solvers
+#' at the supplied parameters and reports the largest absolute and relative
+#' disagreement. If the engines disagree by more than \code{tol} (relative) a
+#' one-time warning (the "divergence notice") is emitted. This is a diagnostic
+#' safety check: the two engines should agree to numerical tolerance, and a
+#' large divergence indicates a model/data combination where one engine is
+#' unreliable.
+#'
+#' @param model An \code{nm_model} object.
+#' @param data An \code{nm_dataset} or data.frame.
+#' @param theta,omega,sigma Optional parameter vectors (default: model inits).
+#' @param eta Optional per-subject ETA matrix (default: zeros).
+#' @param tol Relative tolerance for flagging divergence.
+#' @param warn Logical; emit a one-time warning when diverged.
+#' @return Invisibly, a list with \code{max_abs_diff}, \code{max_rel_diff},
+#'   \code{diverged}, and a per-subject \code{data.frame}.
+#' @examples
+#' \dontrun{
+#' sim <- nm_synthetic_theo(n_sub = 3L)
+#' nm_check_pk_engines(sim$model, sim$data)
+#' }
+#' @export
+nm_check_pk_engines <- function(model, data,
+                                theta = NULL, omega = NULL, sigma = NULL,
+                                eta = NULL, tol = 1e-4, warn = TRUE) {
+  if (!.nm_cpp_capable(model)) {
+    if (isTRUE(warn)) {
+      warning("Model is not supported by the C++ PK engine; nothing to compare.",
+              call. = FALSE)
+    }
+    return(invisible(list(
+      max_abs_diff = NA_real_, max_rel_diff = NA_real_,
+      diverged = FALSE, per_subject = NULL, comparable = FALSE
+    )))
+  }
+  theta <- theta %||% model$THETAS$Value
+  omega <- omega %||% model$OMEGAS$Value
+  sigma <- sigma %||% model$SIGMAS$Value
+  dat <- .nm_prepare_data(data, model$INPUT, model)
+  ids <- .nm_subject_ids(dat)
+  n_eta <- .nm_n_eta(model)
+  rows <- vector("list", length(ids))
+  for (j in seq_along(ids)) {
+    subj <- .nm_subject_slice(dat, ids[j])
+    eta_j <- if (n_eta == 0L) {
+      numeric(0)
+    } else if (is.matrix(eta) && nrow(eta) >= j) {
+      eta[j, ]
+    } else {
+      numeric(n_eta)
+    }
+    fr <- tryCatch(
+      .nm_subject_ipred(model, subj, theta, omega, eta_j, pk_engine = "R")$F,
+      error = function(e) NULL
+    )
+    fc <- tryCatch(
+      .nm_subject_ipred(model, subj, theta, omega, eta_j, pk_engine = "cpp")$F,
+      error = function(e) NULL
+    )
+    if (is.null(fr) || is.null(fc) || length(fr) != length(fc) ||
+        length(fr) == 0L) {
+      next
+    }
+    fr <- as.numeric(fr)
+    fc <- as.numeric(fc)
+    adiff <- abs(fr - fc)
+    rdiff <- adiff / pmax(abs(fr), 1e-8)
+    rows[[j]] <- data.frame(
+      ID = ids[j],
+      max_abs_diff = max(adiff, na.rm = TRUE),
+      max_rel_diff = max(rdiff, na.rm = TRUE),
+      stringsAsFactors = FALSE
+    )
+  }
+  rows <- rows[!vapply(rows, is.null, logical(1L))]
+  if (length(rows) == 0L) {
+    return(invisible(list(
+      max_abs_diff = NA_real_, max_rel_diff = NA_real_,
+      diverged = FALSE, per_subject = NULL, comparable = FALSE
+    )))
+  }
+  per_subject <- do.call(rbind, rows)
+  max_abs <- max(per_subject$max_abs_diff, na.rm = TRUE)
+  max_rel <- max(per_subject$max_rel_diff, na.rm = TRUE)
+  diverged <- is.finite(max_rel) && max_rel > tol
+  if (diverged && isTRUE(warn) &&
+      isTRUE(getOption("LibeRation.warn_pk_divergence", TRUE))) {
+    warning(
+      "R and C++ PK engines diverge beyond tolerance (max relative diff = ",
+      formatC(max_rel, digits = 3, format = "g"), " > ", tol,
+      "). Results may depend on the chosen pk_engine. ",
+      "Set options(LibeRation.warn_pk_divergence = FALSE) to silence.",
+      call. = FALSE
+    )
+    options(LibeRation.warn_pk_divergence = FALSE)
+  }
+  invisible(list(
+    max_abs_diff = max_abs,
+    max_rel_diff = max_rel,
+    diverged = diverged,
+    per_subject = per_subject,
+    comparable = TRUE
+  ))
 }
 
 #' @keywords internal

@@ -22,7 +22,7 @@ nm_validate_model <- function(model, data = NULL, stop_on_error = TRUE) {
   pred_ok <- tryCatch(
     {
       if (.nm_cpp_pred_supported(model)) {
-        nm_pred_expr_check_cpp(pred_lines)
+        .nm_cpp_pred_check(model, pred_lines)
       } else {
         .nm_eval_pred(
           model, model$THETAS$Value, model$OMEGAS$Value,
@@ -152,7 +152,13 @@ nm_validate_model <- function(model, data = NULL, stop_on_error = TRUE) {
     th <- as.numeric(model$THETAS$Value)
     if (length(th) == 0L) th <- 1
     et <- rep(0, max(1L, .nm_n_eta(model)))
-    out <- nm_eval_pred_cpp(pred_lines, th, et, list())
+    covs <- as.character(model$COVARIATES)
+    cov_stub <- if (length(covs) > 0L) {
+      stats::setNames(as.list(rep(1, length(covs))), covs)
+    } else {
+      list()
+    }
+    out <- nm_eval_pred_cpp(pred_lines, th, et, cov_stub)
     return(toupper(names(out)))
   }
   vals <- .nm_eval_pred(

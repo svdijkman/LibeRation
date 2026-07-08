@@ -88,6 +88,13 @@ nm_fit_covariance <- function(fit,
   G <- matrix(0, n_sub, length(free))
   p <- .nm_unpack(model, par)
   for (j in seq_along(ids)) {
+    if (j == 1L || j == n_sub || j %% max(1L, min(5L, n_sub)) == 0L) {
+      .nm_job_progress_event(
+        "cov_opg",
+        list(subject = j, n_sub = n_sub),
+        log_msg = paste0("Covariance OPG: subject ", j, "/", n_sub)
+      )
+    }
     subj <- .nm_subject_slice(dat, ids[j])
     eta_j <- if (is.matrix(eta_mat) && nrow(eta_mat) >= j) {
       eta_mat[j, ]
@@ -251,6 +258,11 @@ nm_cov_step <- function(fit,
   hessian <- match.arg(hessian)
   cov_method <- .nm_cov_resolve_method(match.arg(method), fit$method)
   if (isTRUE(refit_eta)) {
+    .nm_job_progress_event(
+      "phase",
+      list(step = "cov_refit_eta", method = fit$method),
+      log_msg = paste0("Covariance: refitting individual ETAs (", fit$method, ")")
+    )
     fit <- .nm_cov_refit_eta(fit, data = data, control = control)
   }
   .nm_seed_laplace_eta_modes(fit, data = data)
@@ -314,8 +326,23 @@ nm_fit_correlation <- function(fit, type = NULL) {
   }
   hessian <- match.arg(hessian)
   free <- which(!.nm_fix_mask(fit$model))
+  .nm_job_progress_event(
+    "phase",
+    list(step = "cov_hessian", method = fit$method),
+    log_msg = "Covariance: Hessian-based variance matrix"
+  )
   vc_h <- nm_fit_covariance(fit, data = data, type = "hessian", hessian = hessian)
+  .nm_job_progress_event(
+    "phase",
+    list(step = "cov_linfim", method = fit$method),
+    log_msg = "Covariance: linearization (FIM) matrix"
+  )
   vc_lf <- nm_fit_covariance(fit, data = data, type = "linfim")
+  .nm_job_progress_event(
+    "phase",
+    list(step = "cov_sandwich", method = fit$method),
+    log_msg = "Covariance: sandwich matrix"
+  )
   vc_sw <- nm_fit_covariance(fit, data = data, type = "sandwich", hessian = hessian)
   fit$covariance <- list(
     hessian = vc_h,

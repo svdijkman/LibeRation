@@ -9,21 +9,127 @@
   1e-4
 }
 
-#' FO omega step: \eqn{\sum_i \eta_i^{\top} \Omega^{-1} \eta_i + \log|\Omega|} with fixed etas
+#' FO reported objective = true NONMEM FO marginal -2LL.
+#'
+#' The \code{eta_mat} argument is retained for call-site compatibility but is
+#' unused: the FO marginal likelihood integrates the random effects out
+#' analytically and does not condition on fitted etas.
 #'
 #' @keywords internal
-.nm_fo_report_objective <- function(model, data, par, eta_mat, pk_engine = "auto") {
+.nm_fo_report_objective <- function(model, data, par, eta_mat = NULL, pk_engine = "auto") {
   p <- .nm_unpack(model, par)
-  obj1 <- .nm_nll_internal(
-    model, data, p$theta, p$omega, p$sigma,
-    eta = NULL, include_omega_prior = FALSE, pk_engine = pk_engine
+  .nm_fo_marginal_nll(
+    model, data, p$theta, p$omega, p$sigma, pk_engine = pk_engine
   )
-  obj2 <- if (!is.null(eta_mat) && is.matrix(eta_mat) && nrow(eta_mat) > 0L) {
-    .nm_fo_omega_prior_nll_scalar(eta_mat, p$omega)
-  } else {
-    0
+}
+
+#' True NONMEM FO marginal -2 log-likelihood.
+#'
+#' For each subject \eqn{i}, with \eqn{f_i = f_i(\eta = 0)},
+#' \eqn{G_i = \partial f_i / \partial \eta} at \eqn{\eta = 0},
+#' \eqn{R_i = \mathrm{diag}} of the residual variance at \eqn{\eta = 0}, and
+#' \eqn{V_i = R_i + G_i \Omega G_i^{\top}}, the contribution is
+#' \eqn{\log|V_i| + r_i^{\top} V_i^{-1} r_i} with \eqn{r_i = y_i - f_i}. The
+#' population objective is the sum over subjects and is minimised jointly over
+#' theta, Omega, and sigma. No etas are fitted.
+#'
+#' @keywords internal
+.nm_fo_marginal_nll <- function(model, data, theta, omega, sigma, pk_engine = "auto") {
+  n_eta <- .nm_n_eta(model)
+  eta0 <- rep(0, max(n_eta, 0L))
+  pk_engine <- .nm_resolve_pk_engine(
+    pk_engine, model, theta, rep(0.01, max(n_eta, 0L)), sigma, eta0
+  )
+  if (pk_engine == "cpp" && .nm_cpp_capable(model) &&
+      !.nm_any_ad(theta, omega, sigma)) {
+    .nm_sync_lik_config(model)
+    meta <- .nm_cpp_meta(model)
+    subs <- .nm_cpp_subjects_cached(model, data)
+    return(nm_fo_marginal_cpp(
+      subjects = subs,
+      theta = as.numeric(theta),
+      omega = as.numeric(omega),
+      sigma = as.numeric(sigma),
+      n_eta = as.integer(n_eta),
+      pred_lines = meta$pred_lines,
+      advan = meta$advan,
+      trans = meta$trans,
+      obs_cmp = meta$obs_cmp,
+      dose_cmp = meta$dose_cmp,
+      n_transit = meta$n_transit,
+      use_ode = meta$use_ode,
+      model_ss = meta$model_ss
+    ))
   }
-  obj1 + obj2
+  .nm_fo_marginal_nll_r(model, data, theta, omega, sigma, pk_engine)
+}
+
+#' Per-subject FO marginal contribution: \eqn{\log|V| + r^{\top} V^{-1} r}.
+#' @keywords internal
+.nm_fo_subject_marginal_r <- function(f0, dv, G, R_diag, OM) {
+  n_obs <- length(f0)
+  if (n_obs == 0L) {
+    return(0)
+  }
+  r <- as.numeric(dv) - as.numeric(f0)
+  V <- diag(as.numeric(R_diag), n_obs)
+  if (!is.null(G) && ncol(G) > 0L && !is.null(OM) && nrow(OM) > 0L) {
+    V <- V + G %*% OM %*% t(G)
+  }
+  V <- (V + t(V)) / 2
+  ch <- tryCatch(chol(V), error = function(e) NULL)
+  if (is.null(ch)) {
+    jit <- 1e-10 * max(diag(V), 1)
+    for (attempt in seq_len(3L)) {
+      ch <- tryCatch(chol(V + diag(jit, n_obs)), error = function(e) NULL)
+      if (!is.null(ch)) break
+      jit <- jit * 10
+    }
+    if (is.null(ch)) {
+      return(Inf)
+    }
+  }
+  logdet <- 2 * sum(log(diag(ch)))
+  x <- backsolve(ch, backsolve(ch, r, transpose = TRUE))
+  logdet + sum(r * x)
+}
+
+#' @keywords internal
+.nm_fo_marginal_nll_r <- function(model, data, theta, omega, sigma,
+                                  pk_engine = "R") {
+  cfg <- .nm_lik_config(model)
+  n_eta <- .nm_n_eta(model)
+  dat <- .nm_prepare_data(data, model$INPUT, model)
+  ids <- .nm_subject_ids(dat)
+  OM <- if (n_eta > 0L) {
+    .nm_focei_omega_matrix(as.numeric(omega), n_eta, cfg$omega)
+  } else {
+    NULL
+  }
+  eta0 <- rep(0, max(n_eta, 0L))
+  omega0 <- rep(0.01, max(n_eta, 0L))
+  total <- 0
+  for (id in ids) {
+    subj <- .nm_subject_slice(dat, id)
+    pred0 <- .nm_subject_ipred(
+      model, subj, theta, omega0, eta0, sigma, pk_engine = pk_engine
+    )
+    f0 <- as.numeric(pred0$F)
+    if (length(f0) == 0L) {
+      next
+    }
+    dv <- as.numeric(pred0$subj_ev$DV[pred0$obs_idx])
+    G <- if (n_eta > 0L) {
+      .nm_fo_subject_G(model, subj, theta, sigma, pk_engine)
+    } else {
+      NULL
+    }
+    R_diag <- vapply(
+      f0, function(fj) .nm_residual_var(fj, sigma, cfg$error), numeric(1)
+    )
+    total <- total + .nm_fo_subject_marginal_r(f0, dv, G, R_diag, OM)
+  }
+  total
 }
 
 #' @keywords internal
@@ -96,6 +202,12 @@
     names(g_omega) <- paste0("OMEGA", model$OMEGAS$OMEGA)
     unname(g_omega[par_names[omega_free]])
   }
+  g_free <- .nm_wrap_grad_trace(
+    g_free,
+    est_ctl$print_grad_every,
+    par_names[omega_free],
+    prefix = "FO omega"
+  )
   opt <- .nm_run_optim(
     par = par0[omega_free],
     fn = f_free,

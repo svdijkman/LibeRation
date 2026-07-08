@@ -964,14 +964,57 @@ nm_workspace_list_runs <- function(project, version_id, root = nm_workspace_root
 #' }
 #' @export
 nm_workspace_new_run_id <- function(project, version_id, root = nm_workspace_root()) {
-  existing <- nm_workspace_list_runs(project, version_id, root = root)
-  n <- if (nrow(existing) > 0L) nrow(existing) + 1L else 1L
-  run_id <- sprintf("est%03d", n)
-  while (run_id %in% existing$run_id) {
-    n <- n + 1L
+  runs_dir <- .nm_ws_version_runs_dir(project, version_id, root = root, create = TRUE)
+  # A run id must be unique per *submission*, not per saved run. Remote/async runs
+  # are only written to disk when they finish, so several jobs submitted before
+  # any of them completes would otherwise all be handed the same "estNNN" id and
+  # overwrite each other on save (leaving only a couple of runs visible). Reserve
+  # the id atomically by creating its directory: dir.create() succeeds for the
+  # winner and fails for anyone racing on the same name, so every caller walks
+  # forward to a distinct id. Consider both saved runs and already-reserved dirs.
+  taken <- unique(c(
+    nm_workspace_list_runs(project, version_id, root = root)$run_id,
+    {
+      d <- list.dirs(runs_dir, full.names = FALSE, recursive = FALSE)
+      d[nzchar(d)]
+    }
+  ))
+  n <- length(taken) + 1L
+  repeat {
     run_id <- sprintf("est%03d", n)
+    if (!(run_id %in% taken)) {
+      created <- suppressWarnings(
+        dir.create(file.path(runs_dir, run_id), recursive = TRUE, showWarnings = FALSE)
+      )
+      if (isTRUE(created)) {
+        return(run_id)
+      }
+      taken <- c(taken, run_id)
+    }
+    n <- n + 1L
   }
-  run_id
+}
+
+#' Release a run id reserved by nm_workspace_new_run_id() but never saved
+#'
+#' Only removes the directory if it is still empty (a pure reservation), so a
+#' genuinely saved run is never deleted.
+#' @keywords internal
+.nm_ws_release_reserved_run <- function(project, version_id, run_id,
+                                        root = nm_workspace_root()) {
+  if (!.nm_ws_valid_name(project) || !.nm_ws_valid_name(version_id) ||
+      is.null(run_id) || !nzchar(run_id)) {
+    return(invisible(FALSE))
+  }
+  run_dir <- .nm_ws_run_dir(project, version_id, run_id, root = root, create = FALSE)
+  if (!dir.exists(run_dir)) {
+    return(invisible(FALSE))
+  }
+  if (length(list.files(run_dir, all.files = TRUE, no.. = TRUE)) > 0L) {
+    return(invisible(FALSE))
+  }
+  unlink(run_dir, recursive = TRUE)
+  invisible(TRUE)
 }
 
 #' Save an estimation run (fit + metadata)
@@ -995,10 +1038,17 @@ nm_workspace_save_run <- function(project,
                                   fit,
                                   root = nm_workspace_root(),
                                   label = NULL,
-                                  job_id = NULL) {
+                                  job_id = NULL,
+                                  run_info = NULL) {
   version_id <- .nm_ws_sanitize_name(version_id)
   run_id <- .nm_ws_sanitize_name(run_id)
   run_dir <- .nm_ws_run_dir(project, version_id, run_id, root = root, create = TRUE)
+  if (is.null(run_info) && !is.null(fit$run_info)) {
+    run_info <- fit$run_info
+  }
+  if (!is.null(run_info)) {
+    fit$run_info <- run_info
+  }
   saveRDS(fit, file.path(run_dir, "fit.rds"))
   meta <- list(
     run_id = run_id,
@@ -1014,10 +1064,36 @@ nm_workspace_save_run <- function(project,
     has_npc = .nm_fit_has_npc(fit),
     has_npde = .nm_fit_has_npde(fit),
     npc_n_sim = if (!is.null(fit$npc)) as.integer(fit$npc$n_sim %||% NA_integer_) else NA_integer_,
-    npde_n_sim = if (!is.null(fit$npde)) as.integer(fit$npde$n_sim %||% NA_integer_) else NA_integer_
+    npde_n_sim = if (!is.null(fit$npde)) as.integer(fit$npde$n_sim %||% NA_integer_) else NA_integer_,
+    run_info = run_info
   )
   .nm_ws_write_json(meta, file.path(run_dir, "meta.json"))
   invisible(run_dir)
+}
+
+#' Load estimation run metadata
+#'
+#' @param project Project name.
+#' @param version_id Model version id.
+#' @param run_id Estimation run id.
+#' @param root Workspace root.
+#' @return Metadata list from \code{meta.json}, or \code{NULL}.
+#' @export
+nm_workspace_load_run_meta <- function(project,
+                                       version_id,
+                                       run_id,
+                                       root = nm_workspace_root()) {
+  version_id <- .nm_ws_sanitize_name(version_id)
+  run_id <- .nm_ws_sanitize_name(run_id)
+  run_dir <- .nm_ws_find_run_dir(project, version_id, run_id, root = root)
+  if (is.null(run_dir)) {
+    return(NULL)
+  }
+  meta_path <- file.path(run_dir, "meta.json")
+  if (!file.exists(meta_path)) {
+    return(NULL)
+  }
+  .nm_ws_read_json(meta_path)
 }
 
 #' Load fit for an estimation run

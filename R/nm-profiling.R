@@ -40,9 +40,9 @@
   )
 }
 
-#' @rdname profile.nm_fit
+#' @rdname nm_time_profile
 #' @method print nm_profile
-#' @param x A profiling summary data frame.
+#' @param x A timing-profile summary data frame.
 #' @param ... Unused.
 #' @examples
 #' \dontrun{
@@ -51,17 +51,25 @@
 #' fit <- nm_est(sim$model, sim$data, method = "FO",
 #'               control = list(maxit = 3L, compute_inference = FALSE))
 #' options(LibeRation.profile = FALSE)
-#' if (!is.null(fit$profile)) print(profile(fit))
+#' if (!is.null(fit$profile)) print(nm_time_profile(fit))
 #' }
 #' @export
 print.nm_profile <- function(x, ...) {
-  cat("LibeRation profiling summary\n")
+  cat("LibeRation timing-profile summary\n")
   print(x[order(-x$time_sec), , drop = FALSE])
   invisible(x)
 }
 
-#' Summarise profiling data attached to a fit
-#' @param object An \code{nm_fit} object.
+#' Summarise runtime (timing) profiling data attached to a fit
+#'
+#' Returns the wall-clock timing counters collected during estimation when
+#' \code{options(LibeRation.profile = TRUE)} was set. This is the runtime
+#' \emph{timing} profiler; for likelihood-based parameter profiling see
+#' \code{\link{nm_profile_likelihood}}.
+#'
+#' @param fit An \code{nm_fit} object.
+#' @param ... Unused.
+#' @return An \code{nm_profile} object (a data frame), or \code{NULL}.
 #' @examples
 #' \dontrun{
 #' options(LibeRation.profile = TRUE)
@@ -69,12 +77,12 @@ print.nm_profile <- function(x, ...) {
 #' fit <- nm_est(sim$model, sim$data, method = "FO",
 #'               control = list(maxit = 3L, compute_inference = FALSE))
 #' options(LibeRation.profile = FALSE)
-#' profile(fit)
+#' nm_time_profile(fit)
 #' }
 #' @export
-profile.nm_fit <- function(object, ...) {
-  if (is.null(object$profile)) {
+nm_time_profile <- function(fit, ...) {
+  if (is.null(fit$profile)) {
     return(invisible(NULL))
   }
-  structure(object$profile, class = "nm_profile")
+  structure(fit$profile, class = "nm_profile")
 }

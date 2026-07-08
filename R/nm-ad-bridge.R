@@ -14,5 +14,12 @@
 .ad_use_cpp <- LibeRtAD:::.ad_use_cpp
 set_ops <- LibeRtAD:::set_ops
 reset_tape <- LibeRtAD::reset_tape
+ad_tape_save <- LibeRtAD::ad_tape_save
+ad_tape_load <- LibeRtAD::ad_tape_load
+.ad_bind_tape_parameters <- LibeRtAD:::.ad_bind_tape_parameters
+replay_tape_values_cpp <- LibeRtAD::replay_tape_values_cpp
+reset_tape_grads_cpp <- LibeRtAD::reset_tape_grads_cpp
+tape_scalar_value_cpp <- LibeRtAD::tape_scalar_value_cpp
+.ad_eval_function <- LibeRtAD:::.ad_eval_function
 newConstant <- LibeRtAD::newConstant
 newVariable <- LibeRtAD::newVariable

@@ -23,6 +23,7 @@ nm_report_pdf <- function(fit,
                           output_path,
                           sections = list(
                             summary = TRUE,
+                            run_info = TRUE,
                             parameters = TRUE,
                             gof_time = TRUE,
                             gof_ipred_time = TRUE,
@@ -74,6 +75,33 @@ nm_report_pdf <- function(fit,
     for (i in seq_along(lines)) {
       grid::grid.text(lines[i], x = 0.1, y = 0.85 - 0.05 * i, just = "left",
                       gp = grid::gpar(fontsize = 10))
+    }
+  }
+
+  run_info <- project_meta$run_info %||% fit$run_info
+  if (is.null(run_info) || length(run_info) == 0L) {
+    run_info <- NULL
+  }
+  if (!is.null(run_info)) {
+    if (!isTRUE(sections$run_info %||% TRUE)) {
+      run_info <- NULL
+    }
+  }
+  if (!is.null(run_info)) {
+    grid::grid.newpage()
+    grid::grid.text("Run information", y = 0.95, gp = grid::gpar(fontsize = 14, fontface = "bold"))
+    info_df <- .nm_run_info_as_rows(run_info)
+    y <- 0.88
+    grid::grid.text("Field", x = 0.1, y = y, just = "left", gp = grid::gpar(fontface = "bold", fontsize = 10))
+    grid::grid.text("Value", x = 0.45, y = y, just = "left", gp = grid::gpar(fontface = "bold", fontsize = 10))
+    y <- y - 0.04
+    for (i in seq_len(nrow(info_df))) {
+      grid::grid.text(info_df$field[[i]], x = 0.1, y = y, just = "left", gp = grid::gpar(fontsize = 9))
+      grid::grid.text(info_df$value[[i]], x = 0.45, y = y, just = "left", gp = grid::gpar(fontsize = 9))
+      y <- y - 0.035
+      if (y < 0.08) {
+        break
+      }
     }
   }
 
@@ -249,6 +277,7 @@ nm_report_pdf <- function(fit,
     n_subjects = length(unique(obs$ID)),
     n_obs = nrow(obs),
     sections = sections,
+    run_info = run_info,
     ai_narrative_placeholder = TRUE
   )
   if (requireNamespace("jsonlite", quietly = TRUE)) {

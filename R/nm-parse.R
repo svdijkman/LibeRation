@@ -53,6 +53,18 @@
   )
 }
 
+#' Normalize NONMEM-style power (**) to R/C++ power (^) in a single expression line
+#' @keywords internal
+.nm_nm_expr_normalize <- function(line) {
+  if (is.null(line) || !nzchar(line)) {
+    return(line)
+  }
+  if (requireNamespace("LibeRtAD", quietly = TRUE)) {
+    return(LibeRtAD::ad_nm_expr_normalize(line))
+  }
+  gsub("\\*\\*", "^", line, fixed = FALSE)
+}
+
 #' @keywords internal
 .nm_eval_block <- function(code, env, extra = list()) {
   lines <- .nm_split_lines(code)
@@ -64,6 +76,7 @@
   }
   out <- list()
   for (line in lines) {
+    line <- .nm_nm_expr_normalize(line)
     expr <- parse(text = line)
     if (length(expr) == 0L) {
       next

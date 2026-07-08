@@ -69,17 +69,59 @@ GhGrid build_gh_product_grid(const NumericVector& nodes, const NumericVector& we
   return grid;
 }
 
+// Lower-triangular Cholesky factor L (L L' = Omega) of the full Omega matrix,
+// respecting the diagonal / 2x2-block structure and the packing used by
+// omega_matrix()/. nm_focei_omega_matrix (omega[0..2] = var1, var2, cov12;
+// diagonal remainder for eta3..etaN starts at omega[3]). For diagonal Omega
+// this reduces to diag(sqrt(omega)), so mode-centered scaling is unchanged.
+NumericMatrix build_omega_chol(const NumericVector& omega, int n_eta) {
+  NumericMatrix L(n_eta, n_eta);
+  if (n_eta <= 0) return L;
+  NumericMatrix OM(n_eta, n_eta);
+  const bool block2 = (nm_lik::config().omega_type == nm_lik::OMEGA_BLOCK2 &&
+                       n_eta >= 2 && omega.size() >= 3);
+  if (block2) {
+    OM(0, 0) = std::max(omega[0], 1e-15);
+    OM(1, 1) = std::max(omega[1], 1e-15);
+    OM(0, 1) = OM(1, 0) = omega[2];
+    for (int i = 2; i < n_eta; ++i) {
+      const double v = (i + 1 < omega.size()) ? omega[i + 1] : omega[0];
+      OM(i, i) = std::max(v, 1e-15);
+    }
+  } else {
+    for (int i = 0; i < n_eta; ++i) {
+      const double v = (i < omega.size()) ? omega[i] : omega[0];
+      OM(i, i) = std::max(v, 1e-15);
+    }
+  }
+  for (int i = 0; i < n_eta; ++i) {
+    for (int j = 0; j <= i; ++j) {
+      double s = OM(i, j);
+      for (int k = 0; k < j; ++k) s -= L(i, k) * L(j, k);
+      if (i == j) {
+        L(i, j) = std::sqrt(std::max(s, 1e-15));
+      } else {
+        L(i, j) = (L(j, j) > 0.0) ? s / L(j, j) : 0.0;
+      }
+    }
+  }
+  return L;
+}
+
 void eta_at_quadrature(
     NumericVector& eta,
     const NumericVector& mode,
-    const NumericVector& omega,
+    const NumericMatrix& omega_chol,
     const NumericVector& z_q,
     bool mode_centered) {
-  for (int j = 0; j < eta.size(); ++j) {
+  const int n = eta.size();
+  for (int i = 0; i < n; ++i) {
     if (mode_centered) {
-      eta[j] = mode[j] + std::sqrt(std::max(omega[j], 1e-15)) * z_q[j];
+      double acc = mode[i];
+      for (int j = 0; j <= i; ++j) acc += omega_chol(i, j) * z_q[j];
+      eta[i] = acc;
     } else {
-      eta[j] = z_q[j];
+      eta[i] = z_q[i];
     }
   }
 }
@@ -168,12 +210,13 @@ LaplaceSubjectResult laplace_subject_forward(
 
   NumericVector eta(n_eta);
   NumericVector z_q(n_eta);
+  const NumericMatrix omega_chol = build_omega_chol(omega, n_eta);
 
   for (int q = 0; q < n_q; ++q) {
     for (int j = 0; j < n_eta; ++j) {
       z_q[j] = grid.z(q, j);
     }
-    eta_at_quadrature(eta, out.eta_mode, omega, z_q, mode_centered);
+    eta_at_quadrature(eta, out.eta_mode, omega_chol, z_q, mode_centered);
     for (int j = 0; j < n_eta; ++j) out.eta_q[q][j] = eta[j];
     subject_f_at_obs(
         subj.time, subj.amt, subj.rate, subj.f1, subj.cmt, subj.evid, subj.ss, subj.ii,

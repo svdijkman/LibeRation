@@ -195,6 +195,8 @@ nm_ctl_compose <- function(parts) {
 
 #' Canonical control text for stable dirty-state comparison
 #'
+#' Canonical control stream text for comparison
+#'
 #' @param ctl_text Control stream text.
 #' @return Normalized control text.
 #' @examples
@@ -203,6 +205,15 @@ nm_ctl_compose <- function(parts) {
 #' nm_ctl_canonical(ctl)
 #' @export
 nm_ctl_canonical <- function(ctl_text) {
+  .nm_ctl_baseline_text(ctl_text)
+}
+
+#' Baseline canonical control text for dirty-state comparison
+#'
+#' @param ctl_text Raw control file text read from disk.
+#' @return Canonical control string.
+#' @keywords internal
+.nm_ctl_baseline_text <- function(ctl_text) {
   if (is.null(ctl_text) || !nzchar(trimws(ctl_text))) {
     return("")
   }
@@ -871,6 +882,78 @@ nm_ctl_model_info <- function(advan, trans = NULL) {
   structure(
     c(info, list(advan = advan, trans = trans)),
     class = "nm_ctl_model_info"
+  )
+}
+
+#' Symbol lists for $PK/$PRED syntax highlighting (ADVAN/TRANS-aware)
+#'
+#' @param advan ADVAN number.
+#' @param trans TRANS number (optional for ODE models).
+#' @return List with \code{pk} (model parameters), \code{flows} (inter-compartment
+#'   labels), and \code{builtin} (THETA, ETA, etc.).
+#' @examples
+#' nm_ctl_pk_highlight_symbols(4L, 4L)
+#' @export
+nm_ctl_pk_highlight_symbols <- function(advan, trans = NULL) {
+  advan <- as.integer(advan)
+  info <- nm_ctl_model_info(advan, trans)
+  pk <- character()
+  if (!is.null(info$parameters) && nrow(info$parameters) > 0L) {
+    pk <- as.character(info$parameters$symbol)
+  }
+  flows <- character()
+  if (length(info$flows) > 0L) {
+    flows <- vapply(info$flows, function(f) as.character(f$label %||% ""), character(1L))
+    flows <- flows[nzchar(flows)]
+  }
+  alias_lines <- tryCatch(
+    .nm_ctl_pk_nm_param_aliases(advan, info$trans),
+    error = function(e) character()
+  )
+  if (length(alias_lines) > 0L) {
+    lhs <- sub("\\s*([=<-]).*$", "", alias_lines)
+    lhs <- trimws(lhs)
+    pk <- c(pk, lhs[nzchar(lhs)])
+  }
+  scale_lines <- tryCatch(
+    .nm_ctl_pk_volume_aliases(advan, info$trans),
+    error = function(e) character()
+  )
+  if (length(scale_lines) > 0L) {
+    lhs <- sub("\\s*([=<-]).*$", "", scale_lines)
+    pk <- c(pk, trimws(lhs))
+  }
+  pk <- unique(toupper(pk[nzchar(pk)]))
+  flows <- unique(toupper(flows))
+  common <- c(
+    "CL", "V", "V1", "V2", "V3", "V4", "VC", "VP", "VP2", "VSS", "VM",
+    "KA", "K", "K10", "K12", "K21", "K13", "K31", "K23", "K32", "K24", "K42",
+    "K20", "KE", "Q", "Q2", "Q3", "Q4", "KM", "VMAX", "KTR",
+    "ALPHA", "BETA", "GAMMA", "AOB", "DISC", "E1", "E2", "TR", "TD", "TQ",
+    "S1", "S2", "S3", "S4", "S5", "F1", "F2", "F3", "ALAG", "ALAG1"
+  )
+  list(
+    pk = unique(c(pk, common)),
+    flows = flows,
+    builtin = c("THETA", "OMEGA", "SIGMA", "ETA", "ERR")
+  )
+}
+
+#' Symbol lists for $ERROR syntax highlighting
+#'
+#' @return List with \code{pk}, \code{flows}, \code{builtin}, and \code{variant}.
+#' @examples
+#' nm_ctl_error_highlight_symbols()
+#' @export
+nm_ctl_error_highlight_symbols <- function() {
+  list(
+    pk = c(
+      "Y", "F", "IPRED", "PRED", "RES", "WRES", "IWRES",
+      "CWRES", "CPRED", "CRES", "DV"
+    ),
+    flows = character(),
+    builtin = c("THETA", "OMEGA", "SIGMA", "ETA", "ERR"),
+    variant = "error"
   )
 }
 

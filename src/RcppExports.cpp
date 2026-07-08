@@ -235,9 +235,32 @@ BEGIN_RCPP
     return rcpp_result_gen;
 END_RCPP
 }
+// nm_fo_marginal_cpp
+double nm_fo_marginal_cpp(List subjects, NumericVector theta, NumericVector omega, NumericVector sigma, int n_eta, CharacterVector pred_lines, int advan, int trans, int obs_cmp, int dose_cmp, int n_transit, bool use_ode, int model_ss);
+RcppExport SEXP _LibeRation_nm_fo_marginal_cpp(SEXP subjectsSEXP, SEXP thetaSEXP, SEXP omegaSEXP, SEXP sigmaSEXP, SEXP n_etaSEXP, SEXP pred_linesSEXP, SEXP advanSEXP, SEXP transSEXP, SEXP obs_cmpSEXP, SEXP dose_cmpSEXP, SEXP n_transitSEXP, SEXP use_odeSEXP, SEXP model_ssSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< List >::type subjects(subjectsSEXP);
+    Rcpp::traits::input_parameter< NumericVector >::type theta(thetaSEXP);
+    Rcpp::traits::input_parameter< NumericVector >::type omega(omegaSEXP);
+    Rcpp::traits::input_parameter< NumericVector >::type sigma(sigmaSEXP);
+    Rcpp::traits::input_parameter< int >::type n_eta(n_etaSEXP);
+    Rcpp::traits::input_parameter< CharacterVector >::type pred_lines(pred_linesSEXP);
+    Rcpp::traits::input_parameter< int >::type advan(advanSEXP);
+    Rcpp::traits::input_parameter< int >::type trans(transSEXP);
+    Rcpp::traits::input_parameter< int >::type obs_cmp(obs_cmpSEXP);
+    Rcpp::traits::input_parameter< int >::type dose_cmp(dose_cmpSEXP);
+    Rcpp::traits::input_parameter< int >::type n_transit(n_transitSEXP);
+    Rcpp::traits::input_parameter< bool >::type use_ode(use_odeSEXP);
+    Rcpp::traits::input_parameter< int >::type model_ss(model_ssSEXP);
+    rcpp_result_gen = Rcpp::wrap(nm_fo_marginal_cpp(subjects, theta, omega, sigma, n_eta, pred_lines, advan, trans, obs_cmp, dose_cmp, n_transit, use_ode, model_ss));
+    return rcpp_result_gen;
+END_RCPP
+}
 // nm_focei_objective_cpp
-double nm_focei_objective_cpp(List subjects, NumericMatrix eta_modes, NumericVector theta, NumericVector omega, NumericVector sigma, CharacterVector pred_lines, int advan, int trans, int obs_cmp, int dose_cmp, int n_transit, bool use_ode, int model_ss);
-RcppExport SEXP _LibeRation_nm_focei_objective_cpp(SEXP subjectsSEXP, SEXP eta_modesSEXP, SEXP thetaSEXP, SEXP omegaSEXP, SEXP sigmaSEXP, SEXP pred_linesSEXP, SEXP advanSEXP, SEXP transSEXP, SEXP obs_cmpSEXP, SEXP dose_cmpSEXP, SEXP n_transitSEXP, SEXP use_odeSEXP, SEXP model_ssSEXP) {
+double nm_focei_objective_cpp(List subjects, NumericMatrix eta_modes, NumericVector theta, NumericVector omega, NumericVector sigma, CharacterVector pred_lines, int advan, int trans, int obs_cmp, int dose_cmp, int n_transit, bool use_ode, int model_ss, bool interaction);
+RcppExport SEXP _LibeRation_nm_focei_objective_cpp(SEXP subjectsSEXP, SEXP eta_modesSEXP, SEXP thetaSEXP, SEXP omegaSEXP, SEXP sigmaSEXP, SEXP pred_linesSEXP, SEXP advanSEXP, SEXP transSEXP, SEXP obs_cmpSEXP, SEXP dose_cmpSEXP, SEXP n_transitSEXP, SEXP use_odeSEXP, SEXP model_ssSEXP, SEXP interactionSEXP) {
 BEGIN_RCPP
     Rcpp::RObject rcpp_result_gen;
     Rcpp::RNGScope rcpp_rngScope_gen;
@@ -254,7 +277,8 @@ BEGIN_RCPP
     Rcpp::traits::input_parameter< int >::type n_transit(n_transitSEXP);
     Rcpp::traits::input_parameter< bool >::type use_ode(use_odeSEXP);
     Rcpp::traits::input_parameter< int >::type model_ss(model_ssSEXP);
-    rcpp_result_gen = Rcpp::wrap(nm_focei_objective_cpp(subjects, eta_modes, theta, omega, sigma, pred_lines, advan, trans, obs_cmp, dose_cmp, n_transit, use_ode, model_ss));
+    Rcpp::traits::input_parameter< bool >::type interaction(interactionSEXP);
+    rcpp_result_gen = Rcpp::wrap(nm_focei_objective_cpp(subjects, eta_modes, theta, omega, sigma, pred_lines, advan, trans, obs_cmp, dose_cmp, n_transit, use_ode, model_ss, interaction));
     return rcpp_result_gen;
 END_RCPP
 }
@@ -364,8 +388,8 @@ BEGIN_RCPP
 END_RCPP
 }
 // nm_lik_config_set
-void nm_lik_config_set(int error_type, int omega_type, int sigma_corr, int iov, double ar1_rho);
-RcppExport SEXP _LibeRation_nm_lik_config_set(SEXP error_typeSEXP, SEXP omega_typeSEXP, SEXP sigma_corrSEXP, SEXP iovSEXP, SEXP ar1_rhoSEXP) {
+void nm_lik_config_set(int error_type, int omega_type, int sigma_corr, int iov, double ar1_rho, int blq_method);
+RcppExport SEXP _LibeRation_nm_lik_config_set(SEXP error_typeSEXP, SEXP omega_typeSEXP, SEXP sigma_corrSEXP, SEXP iovSEXP, SEXP ar1_rhoSEXP, SEXP blq_methodSEXP) {
 BEGIN_RCPP
     Rcpp::RNGScope rcpp_rngScope_gen;
     Rcpp::traits::input_parameter< int >::type error_type(error_typeSEXP);
@@ -373,7 +397,8 @@ BEGIN_RCPP
     Rcpp::traits::input_parameter< int >::type sigma_corr(sigma_corrSEXP);
     Rcpp::traits::input_parameter< int >::type iov(iovSEXP);
     Rcpp::traits::input_parameter< double >::type ar1_rho(ar1_rhoSEXP);
-    nm_lik_config_set(error_type, omega_type, sigma_corr, iov, ar1_rho);
+    Rcpp::traits::input_parameter< int >::type blq_method(blq_methodSEXP);
+    nm_lik_config_set(error_type, omega_type, sigma_corr, iov, ar1_rho, blq_method);
     return R_NilValue;
 END_RCPP
 }
@@ -559,12 +584,13 @@ static const R_CallMethodDef CallEntries[] = {
     {"_LibeRation_nm_nll_grad_cpp", (DL_FUNC) &_LibeRation_nm_nll_grad_cpp, 16},
     {"_LibeRation_nm_fit_eta_mode_cpp", (DL_FUNC) &_LibeRation_nm_fit_eta_mode_cpp, 14},
     {"_LibeRation_nm_fit_all_eta_cpp", (DL_FUNC) &_LibeRation_nm_fit_all_eta_cpp, 14},
-    {"_LibeRation_nm_focei_objective_cpp", (DL_FUNC) &_LibeRation_nm_focei_objective_cpp, 13},
+    {"_LibeRation_nm_fo_marginal_cpp", (DL_FUNC) &_LibeRation_nm_fo_marginal_cpp, 13},
+    {"_LibeRation_nm_focei_objective_cpp", (DL_FUNC) &_LibeRation_nm_focei_objective_cpp, 14},
     {"_LibeRation_nm_focei_interaction_cpp", (DL_FUNC) &_LibeRation_nm_focei_interaction_cpp, 13},
     {"_LibeRation_nm_laplace_nll_cpp", (DL_FUNC) &_LibeRation_nm_laplace_nll_cpp, 17},
     {"_LibeRation_nm_laplace_nll_grad_cpp", (DL_FUNC) &_LibeRation_nm_laplace_nll_grad_cpp, 19},
     {"_LibeRation_nm_laplace_nll_detailed_cpp", (DL_FUNC) &_LibeRation_nm_laplace_nll_detailed_cpp, 16},
-    {"_LibeRation_nm_lik_config_set", (DL_FUNC) &_LibeRation_nm_lik_config_set, 5},
+    {"_LibeRation_nm_lik_config_set", (DL_FUNC) &_LibeRation_nm_lik_config_set, 6},
     {"_LibeRation_nm_lik_config_get", (DL_FUNC) &_LibeRation_nm_lik_config_get, 0},
     {"_LibeRation_pk_oral2_trans4_block_var", (DL_FUNC) &_LibeRation_pk_oral2_trans4_block_var, 11},
     {"_LibeRation_pk_oral1_block_var", (DL_FUNC) &_LibeRation_pk_oral1_block_var, 8},

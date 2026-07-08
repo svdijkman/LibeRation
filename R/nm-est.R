@@ -40,7 +40,8 @@
 #' @export
 nm_est <- function(model,
                    data,
-                   method = c("FO", "FOCE", "FOCEI", "SAEM", "LAPLACE", "IMP", "BAYES"),
+                   method = c("FO", "FOCE", "FOCEI", "SAEM", "LAPLACE", "IMP",
+                              "BAYES", "POSTHOC"),
                    start = NULL,
                    backend = c("cpp", "R"),
                    grad = c("auto", "ad", "numeric", "cpp"),
@@ -56,12 +57,33 @@ nm_est <- function(model,
   backend <- gopts$backend
   pk_engine <- match.arg(pk_engine)
   engine <- match.arg(engine)
+  # Post-hoc only path (NONMEM MAXEVAL=0 POSTHOC): population parameters are
+  # held fixed and only empirical-Bayes ETAs + diagnostics are computed.
+  posthoc_flag <- isTRUE(control$posthoc) ||
+    (!is.null(control$maxeval) && identical(as.integer(control$maxeval[1L]), 0L))
+  if (posthoc_flag) {
+    method <- "POSTHOC"
+  }
   if (!requireNamespace("data.table", quietly = TRUE)) {
     .nm_stop("Package 'data.table' is required for nm_est().")
   }
   par0 <- if (is.null(start)) .nm_init_par(model) else start
   par0 <- .nm_apply_fix(model, par0)
   .nm_sync_lik_config(model)
+  # BLQ (M3/M4) and covariate models are only supported in the numeric R
+  # likelihood path; AD and the monolithic C++ objective would silently ignore
+  # censoring/covariates, so force numeric gradients when either is active.
+  if (.nm_model_needs_r_lik(model) && !identical(grad, "numeric") &&
+      !identical(method, "BAYES")) {
+    if (isTRUE(getOption("LibeRation.blq_verbose", TRUE)) &&
+        .nm_model_blq_active(model)) {
+      message(
+        "BLQ likelihood (", .nm_lik_config(model)$blq_method,
+        ") active: using numeric gradients (grad = \"numeric\")."
+      )
+    }
+    grad <- "numeric"
+  }
   nm_validate_model(model, data = data, stop_on_error = TRUE)
   if (isTRUE(getOption("LibeRation.profile", FALSE))) {
     .nm_profile_reset()
@@ -84,7 +106,8 @@ nm_est <- function(model,
     SAEM = .nm_est_saem,
     LAPLACE = .nm_est_laplace,
     IMP = .nm_est_imp,
-    BAYES = .nm_est_bayes
+    BAYES = .nm_est_bayes,
+    POSTHOC = .nm_est_posthoc
   )
   attempt_par <- par0
   fit <- NULL
@@ -124,7 +147,9 @@ nm_est <- function(model,
     infer <- control$compute_covariance
   }
   if (is.null(infer)) {
-    infer <- TRUE
+    # Population parameters are fixed for POSTHOC, so covariance/inference is
+    # not meaningful by default (user can still opt in explicitly).
+    infer <- !identical(method, "POSTHOC")
   }
   if (isTRUE(infer)) {
     hess <- control$infer_hessian
@@ -139,6 +164,7 @@ nm_est <- function(model,
     if (is.null(refit_eta)) {
       refit_eta <- TRUE
     }
+    .nm_est_progress_covariance(method, cov_method = cov_method)
     fit <- .nm_fit_attach_inference(
       fit,
       data = data,

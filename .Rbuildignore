@@ -9,8 +9,8 @@
 ^.*\.tar\.gz$
 ^cran-comments\.md$
 
-# NONMEM benchmark dev tree (scripts + run outputs); not used at install/runtime.
-# Benchmark API lives in R/nm-nonmem-bench.R; Shiny uses inst/shiny only.
+# NONMEM benchmark dev tree (scripts only; outputs live under bench/ or temp).
+^bench/
 ^inst/nonmem_bench/
 
 # Shiny dev/test helpers (not part of the app).

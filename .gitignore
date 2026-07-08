@@ -17,16 +17,18 @@ bootstrap_test_out.txt
 test-run.log
 tests/_tmp_*.R
 
-# NONMEM benchmark run artifacts (keep scripts if needed; never commit outputs)
-inst/nonmem_bench/all_run/
-inst/nonmem_bench/all_run_v*/
-inst/nonmem_bench/sim_run/
-inst/nonmem_bench/_est_adv1_work/
-inst/nonmem_bench/pilot_run/
-inst/nonmem_bench/**/est
-inst/nonmem_bench/**/est.*
-inst/nonmem_bench/**/sim_*
-inst/nonmem_bench/**/FDATA
-inst/nonmem_bench/**/FCON
-inst/nonmem_bench/**/FSUBS
-inst/nonmem_bench/**/trash.*
+# NONMEM benchmark run artifacts (scripts under bench/; outputs never committed)
+bench/**/all_run/
+bench/**/all_run_v*/
+bench/**/sim_run/
+bench/**/pilot_run/
+bench/**/_est_adv1_work/
+bench/**/_spot_*/
+bench/**/est
+bench/**/est.*
+bench/**/sim_*
+bench/**/FDATA
+bench/**/FCON
+bench/**/FSUBS
+bench/**/trash.*
+inst/nonmem_bench/

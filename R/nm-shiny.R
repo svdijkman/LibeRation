@@ -97,17 +97,18 @@ liberation_shiny <- function(host = "127.0.0.1",
   nm_workspace_init(ws, create_demo_project = create_demo_project)
   message("[LibeRation] Shiny GUI — workspace: ", nm_workspace_root())
   message("[LibeRation] Shiny GUI — job directory: ", nm_job_root())
-  message("[LibeRation] Job list refresh every ", poll_ms / 1000, " s")
   app_dir <- system.file("shiny", package = "LibeRation")
   if (isTRUE(dev)) {
     dev_app <- file.path(.nm_shiny_dev_roots()$nm_root, "inst", "shiny")
     if (dir.exists(dev_app)) {
       app_dir <- dev_app
     }
+    Sys.setenv(LIBERATION_PKG_ROOT = .nm_shiny_dev_roots()$nm_root)
   }
   if (!nzchar(app_dir) || !dir.exists(app_dir)) {
     stop("Shiny app not found in LibeRation (inst/shiny). Reinstall or use devtools::load_all().")
   }
+  message("[LibeRation] Shiny GUI — job updates via push hub (poll interval configurable on Jobs tab)")
   shiny::runApp(
     app_dir,
     host = host,

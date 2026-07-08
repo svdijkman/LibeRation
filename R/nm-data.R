@@ -373,6 +373,12 @@ nm_max_scale_n <- function() {
 }
 
 #' Map ipred from an expanded event table back to the original subject rows.
+#'
+#' When several rows share the same (TIME, EVID, CMT) key (duplicate/replicate
+#' timepoints), a plain \code{match()} maps every duplicate original row to the
+#' \emph{first} matching event row. That is fixed here by matching positionally:
+#' the k-th original occurrence of a key maps to the k-th expanded occurrence
+#' (falling back to the last available occurrence).
 #' @keywords internal
 .nm_ipred_align <- function(subj, subj_ev, ipred_ev) {
   ipred_ev <- as.numeric(ipred_ev)
@@ -383,7 +389,21 @@ nm_max_scale_n <- function() {
                   if ("CMT" %in% names(subj_ev)) subj_ev$CMT else 1L)
   orig_key <- paste(subj$TIME, subj$EVID,
                     if ("CMT" %in% names(subj)) subj$CMT else 1L)
-  ipred_ev[match(orig_key, ev_key)]
+  if (!anyDuplicated(orig_key)) {
+    return(ipred_ev[match(orig_key, ev_key)])
+  }
+  ev_by_key <- split(seq_along(ev_key), ev_key)
+  orig_occ <- stats::ave(seq_along(orig_key), orig_key, FUN = seq_along)
+  out <- rep(NA_real_, length(orig_key))
+  for (i in seq_along(orig_key)) {
+    idxs <- ev_by_key[[orig_key[i]]]
+    if (is.null(idxs)) {
+      next
+    }
+    k <- min(orig_occ[i], length(idxs))
+    out[i] <- ipred_ev[idxs[k]]
+  }
+  out
 }
 
 #' Subject event table with ADDL/II doses expanded for PK simulation.

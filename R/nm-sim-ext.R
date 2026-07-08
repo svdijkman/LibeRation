@@ -21,55 +21,49 @@ nm_simulate <- function(model, data, n_sim = 1L, seed = 1L, vpc = FALSE,
   n_sim <- max(1L, as.integer(n_sim))
   n_cores <- max(1L, as.integer(n_cores))
   sim_args <- list(...)
-  sim_one <- function(k) {
+  sim_jobs <- lapply(seq_len(n_sim), function(k) {
+    list(
+      k = as.integer(k),
+      model = model,
+      data = data,
+      seed = as.integer(seed),
+      pk_engine = pk_engine,
+      sim_args = sim_args
+    )
+  })
+  sim_one_job <- function(job) {
     structure(
       list(data = do.call(
         .nm_task_sim,
         c(
           list(
-            model = model,
-            data = data,
-            seed = as.integer(seed) + as.integer(k) - 1L,
-            pk_engine = pk_engine,
-            rep = as.integer(k)
+            model = job$model,
+            data = job$data,
+            seed = job$seed + job$k - 1L,
+            pk_engine = job$pk_engine,
+            rep = job$k
           ),
-          sim_args
+          job$sim_args
         )
       )),
       class = "nm_dataset"
     )
   }
-  sims <- if (n_cores > 1L && n_sim > 1L) {
-    .nm_parallel_lapply(seq_len(n_sim), sim_one, n_cores = min(n_cores, n_sim))
+  sims <- if (n_cores > 1L && n_sim > 1L && is.null(.nm_parallel_dev_roots())) {
+    .nm_parallel_lapply(sim_jobs, sim_one_job, n_cores = min(n_cores, n_sim))
   } else {
-    lapply(seq_len(n_sim), sim_one)
+    if (n_cores > 1L && n_sim > 1L) {
+      message(
+        "Parallel simulation replicates disabled in development package sessions; ",
+        "running sequentially."
+      )
+    }
+    lapply(sim_jobs, sim_one_job)
   }
   if (!isTRUE(vpc)) {
     return(sims)
   }
   .nm_vpc_summary(model, data, sims)
-}
-
-#' @keywords internal
-.nm_parallel_lapply <- function(x, fun, n_cores = 2L) {
-  n_cores <- max(1L, as.integer(n_cores))
-  if (n_cores <= 1L || length(x) <= 1L) {
-    return(lapply(x, fun))
-  }
-  if (.Platform$OS.type == "windows") {
-    cl <- parallel::makePSOCKcluster(n_cores)
-    on.exit(parallel::stopCluster(cl), add = TRUE)
-    parallel::clusterExport(cl, c("fun"), envir = environment())
-    parallel::clusterEvalQ(cl, {
-      if (!requireNamespace("LibeRation", quietly = TRUE)) {
-        stop("LibeRation is required for parallel simulation.", call. = FALSE)
-      }
-      suppressPackageStartupMessages(library(LibeRation))
-    })
-    parallel::parLapply(cl, x, fun)
-  } else {
-    parallel::mclapply(x, fun, mc.cores = n_cores)
-  }
 }
 
 #' @keywords internal
@@ -597,4 +591,413 @@ nm_sim_template_data <- function(model, data, design = list()) {
     ))
   }
   .nm_sim_resize_subjects(data, model, n_sub = n_sub, seed = seed)
+}
+
+# ---------------------------------------------------------------------------
+# Visual predictive check (VPC) and prediction-corrected VPC (pcVPC)
+# ---------------------------------------------------------------------------
+
+#' Visual predictive check (VPC / pcVPC) with stratification
+#'
+#' Simulates \code{n_sim} replicate datasets from a fitted model (or a model
+#' with fixed parameters) and compares observed quantiles against the
+#' distribution of simulated quantiles, per time bin and optional stratum.
+#'
+#' When \code{pc = TRUE} the Bergstrand prediction correction is applied:
+#' each observed and simulated value is multiplied by
+#' \eqn{\widetilde{PRED}_{bin}/PRED_{ij}}, where \eqn{PRED_{ij}} is the typical
+#' (population, \eqn{\eta = 0}) prediction for that design point and
+#' \eqn{\widetilde{PRED}_{bin}} is the median typical prediction in the same
+#' bin/stratum. This removes prediction differences within a bin that would
+#' otherwise inflate the spread.
+#'
+#' Unlike the previous behaviour, if the prediction correction cannot be
+#' computed for a bin/stratum (non-finite typical prediction or a non-finite
+#' bin median) the affected points are set to \code{NA} and a warning is
+#' issued rather than silently falling back to the uncorrected value.
+#'
+#' @param object An \code{nm_fit} (preferred) or an \code{nm_model}.
+#' @param data Dataset; defaults to \code{object$data} for a fit, required for a
+#'   model.
+#' @param n_sim Number of simulation replicates.
+#' @param strata Optional character vector of data column names to stratify by.
+#' @param n_bins Target number of time bins (per stratum).
+#' @param pc Logical; apply Bergstrand prediction correction (pcVPC).
+#' @param prob Numeric vector of quantiles to summarise (default 5/50/95\%).
+#' @param ci Coverage of the simulation-based confidence band around each
+#'   quantile (default 0.9, i.e. 5th-95th percentile of the simulated
+#'   quantiles).
+#' @param seed Random seed for the simulation.
+#' @param n_cores Parallel workers for the replicate simulation.
+#' @param pk_engine PK engine (\code{"cpp"} recommended).
+#' @param ... Passed to \code{\link{nm_simulate}}.
+#' @return An object of class \code{nm_vpc}: a list with \code{stats} (per
+#'   bin/stratum observed quantiles and simulated median + CI band),
+#'   \code{pc}, \code{strata}, \code{prob}, \code{ci}, \code{n_sim} and
+#'   \code{pc_failed} (bin/stratum groups where correction failed).
+#' @examples
+#' \dontrun{
+#' sim <- nm_synthetic_theo(n_sub = 20L, seed = 1L)
+#' fit <- nm_est(sim$model, sim$data, method = "FOCE")
+#' v <- nm_vpc(fit, n_sim = 100L)
+#' pcv <- nm_pcvpc(fit, n_sim = 100L, strata = "SEX")
+#' }
+#' @export
+nm_vpc <- function(object,
+                   data = NULL,
+                   n_sim = 200L,
+                   strata = NULL,
+                   n_bins = 8L,
+                   pc = FALSE,
+                   prob = c(0.05, 0.5, 0.95),
+                   ci = 0.9,
+                   seed = 1L,
+                   n_cores = 1L,
+                   pk_engine = "cpp",
+                   ...) {
+  if (!requireNamespace("data.table", quietly = TRUE)) {
+    .nm_stop("Package 'data.table' is required for VPC.")
+  }
+  spec <- .nm_vpc_resolve(object, data)
+  model <- spec$model
+  dat <- spec$data
+  prob <- sort(unique(as.numeric(prob)))
+  if (length(prob) == 0L) {
+    .nm_stop("`prob` must contain at least one quantile in (0, 1).")
+  }
+  ci <- as.numeric(ci)[1L]
+  if (!is.finite(ci) || ci <= 0 || ci >= 1) {
+    .nm_stop("`ci` must be a single number in (0, 1).")
+  }
+  ci_lo <- (1 - ci) / 2
+  ci_hi <- 1 - ci_lo
+
+  obs <- as.data.frame(.nm_prepare_data(dat, model$INPUT, model))
+  obs <- obs[obs$MDV == 0L & obs$EVID == 0L & is.finite(obs$DV), , drop = FALSE]
+  if (nrow(obs) == 0L) {
+    .nm_stop("VPC requires observation rows (MDV = 0, EVID = 0).")
+  }
+
+  obs$strat <- .nm_vpc_strata_labels(obs, strata)
+  obs$binlab <- NA_character_
+  for (st in unique(obs$strat)) {
+    idx <- which(obs$strat == st)
+    br <- .nm_vpc_compute_breaks(obs$TIME[idx], n_bins = n_bins)
+    obs$binlab[idx] <- as.character(.nm_vpc_assign_bins(obs$TIME[idx], br))
+  }
+  obs$strbin <- paste(obs$strat, obs$binlab, sep = "\r")
+
+  pred <- .nm_vpc_typical_pred(
+    model, dat, spec$theta, spec$omega, spec$sigma, pk_engine
+  )
+  obs$PREDt <- pred$PRED[match(paste(obs$ID, obs$TIME),
+                               paste(pred$ID, pred$TIME))]
+
+  pc_failed <- character()
+  if (isTRUE(pc)) {
+    pcf <- .nm_vpc_pc_factor(obs$PREDt, obs$strbin)
+    pc_failed <- pcf$failed
+    obs$DVc <- obs$DV * pcf$factor
+    corr_factor <- pcf$factor
+  } else {
+    obs$DVc <- obs$DV
+    corr_factor <- rep(1, nrow(obs))
+  }
+
+  sims <- nm_simulate(
+    model, dat, n_sim = max(1L, as.integer(n_sim)),
+    seed = seed, n_cores = n_cores, pk_engine = pk_engine, ...
+  )
+  key_obs <- paste(obs$ID, obs$TIME)
+  sim_parts <- lapply(seq_along(sims), function(k) {
+    sd <- as.data.frame(sims[[k]]$data)
+    sd <- sd[sd$MDV == 0L & sd$EVID == 0L, , drop = FALSE]
+    m <- match(key_obs, paste(sd$ID, sd$TIME))
+    dvc <- sd$DV[m] * corr_factor
+    data.frame(sim = k, strbin = obs$strbin, DVc = dvc,
+               stringsAsFactors = FALSE)
+  })
+  sim_all <- data.table::rbindlist(sim_parts)
+
+  qnames <- .nm_vpc_qnames(prob)
+  obs_stat <- .nm_vpc_obs_stat(obs, prob, qnames)
+  sim_stat <- .nm_vpc_sim_stat(sim_all, prob, qnames, ci_lo, ci_hi)
+  stats_df <- merge(obs_stat, sim_stat, by = "strbin", all.x = TRUE, sort = FALSE)
+  stats_df <- stats_df[order(stats_df$strat, stats_df$xmed, na.last = TRUE), ,
+                       drop = FALSE]
+  stats_df$strbin <- NULL
+  rownames(stats_df) <- NULL
+
+  structure(
+    list(
+      stats = stats_df,
+      pc = isTRUE(pc),
+      strata = strata,
+      prob = prob,
+      ci = ci,
+      n_sim = length(sims),
+      pc_failed = pc_failed
+    ),
+    class = "nm_vpc"
+  )
+}
+
+#' Prediction-corrected VPC (Bergstrand)
+#'
+#' Convenience wrapper for \code{nm_vpc(..., pc = TRUE)}.
+#' @inheritParams nm_vpc
+#' @return An object of class \code{nm_vpc}.
+#' @examples
+#' \dontrun{
+#' pcv <- nm_pcvpc(fit, n_sim = 100L, strata = "SEX")
+#' }
+#' @export
+nm_pcvpc <- function(object, data = NULL, n_sim = 200L, strata = NULL,
+                     n_bins = 8L, prob = c(0.05, 0.5, 0.95), ci = 0.9,
+                     seed = 1L, n_cores = 1L, pk_engine = "cpp", ...) {
+  nm_vpc(
+    object, data = data, n_sim = n_sim, strata = strata, n_bins = n_bins,
+    pc = TRUE, prob = prob, ci = ci, seed = seed, n_cores = n_cores,
+    pk_engine = pk_engine, ...
+  )
+}
+
+#' @keywords internal
+.nm_vpc_resolve <- function(object, data) {
+  if (inherits(object, "nm_fit")) {
+    model <- object$model
+    if (is.null(model)) {
+      .nm_stop("fit does not carry its model (fit$model).")
+    }
+    d <- data %||% object$data
+    if (is.null(d)) {
+      .nm_stop("No data available; supply `data` or a fit carrying fit$data.")
+    }
+    return(list(
+      model = model, data = d,
+      theta = as.numeric(object$theta %||% model$THETAS$Value),
+      omega = as.numeric(object$omega %||% model$OMEGAS$Value),
+      sigma = as.numeric(object$sigma %||% model$SIGMAS$Value)
+    ))
+  }
+  if (inherits(object, "nm_model")) {
+    if (is.null(data)) {
+      .nm_stop("`data` is required when `object` is a model.")
+    }
+    return(list(
+      model = object, data = data,
+      theta = as.numeric(object$THETAS$Value),
+      omega = as.numeric(object$OMEGAS$Value),
+      sigma = as.numeric(object$SIGMAS$Value)
+    ))
+  }
+  .nm_stop("`object` must be an nm_fit or nm_model.")
+}
+
+#' @keywords internal
+.nm_vpc_strata_labels <- function(obs, strata) {
+  if (is.null(strata) || length(strata) == 0L) {
+    return(rep("all", nrow(obs)))
+  }
+  strata <- as.character(strata)
+  missing <- setdiff(strata, names(obs))
+  if (length(missing) > 0L) {
+    .nm_stop("Strata column(s) not found in data: ",
+             paste(missing, collapse = ", "))
+  }
+  do.call(paste, c(
+    lapply(strata, function(s) paste0(s, "=", obs[[s]])),
+    sep = ", "
+  ))
+}
+
+#' Typical (population, eta = 0) prediction for each observation row.
+#' @keywords internal
+.nm_vpc_typical_pred <- function(model, data, theta, omega, sigma,
+                                 pk_engine = "cpp") {
+  full <- .nm_prepare_data(data, model$INPUT, model)
+  n_eta <- .nm_n_eta(model)
+  ids <- .nm_subject_ids(full)
+  parts <- vector("list", length(ids))
+  for (j in seq_along(ids)) {
+    sub <- .nm_subject_slice(full, ids[[j]])
+    mask <- sub$MDV == 0L & sub$EVID == 0L
+    if (!any(mask)) {
+      next
+    }
+    pr <- tryCatch(
+      .nm_subject_ipred(
+        model, sub, theta, omega, numeric(n_eta), pk_engine = pk_engine
+      ),
+      error = function(e) NULL
+    )
+    f <- if (is.null(pr)) rep(NA_real_, sum(mask)) else as.numeric(pr$F)
+    if (length(f) != sum(mask)) {
+      f <- rep(NA_real_, sum(mask))
+    }
+    parts[[j]] <- data.frame(
+      ID = ids[[j]], TIME = sub$TIME[mask], PRED = f,
+      stringsAsFactors = FALSE
+    )
+  }
+  parts <- parts[!vapply(parts, is.null, logical(1L))]
+  if (length(parts) == 0L) {
+    return(data.frame(ID = character(), TIME = numeric(), PRED = numeric()))
+  }
+  do.call(rbind, parts)
+}
+
+#' Bergstrand prediction-correction factor per observation (median PRED / PRED).
+#'
+#' Returns the per-row correction factor and the bin/stratum groups where the
+#' correction could not be computed (left as NA, never silently uncorrected).
+#' @keywords internal
+.nm_vpc_pc_factor <- function(pred, strbin) {
+  factor <- rep(NA_real_, length(pred))
+  failed <- character()
+  for (sb in unique(strbin)) {
+    idx <- which(strbin == sb)
+    p <- pred[idx]
+    med <- suppressWarnings(stats::median(p[is.finite(p)], na.rm = TRUE))
+    ok_p <- is.finite(p) & p != 0
+    if (!is.finite(med) || !any(ok_p)) {
+      failed <- c(failed, sb)
+      next
+    }
+    f <- rep(NA_real_, length(idx))
+    f[ok_p] <- med / p[ok_p]
+    if (any(!ok_p)) {
+      failed <- c(failed, sb)
+    }
+    factor[idx] <- f
+  }
+  if (length(failed) > 0L) {
+    disp <- gsub("\r", " / ", unique(failed))
+    warning(sprintf(
+      paste0("Prediction correction could not be computed for %d bin/stratum ",
+             "group(s); those points are left as NA (not uncorrected): %s"),
+      length(unique(failed)),
+      paste(utils::head(disp, 6L), collapse = "; ")
+    ), call. = FALSE)
+  }
+  list(factor = factor, failed = unique(failed))
+}
+
+#' @keywords internal
+.nm_vpc_qnames <- function(prob) {
+  lab <- trimws(formatC(prob * 100, format = "g", digits = 6L, width = 0L))
+  lab <- gsub("[^0-9.]+", "", lab)
+  lab <- gsub("\\.", "p", lab)
+  paste0("q", lab)
+}
+
+#' @keywords internal
+.nm_vpc_obs_stat <- function(obs, prob, qnames) {
+  dt <- data.table::as.data.table(obs)
+  out <- dt[, {
+    qs <- as.numeric(stats::quantile(DVc, probs = prob, na.rm = TRUE,
+                                     names = FALSE))
+    c(
+      list(
+        strat = strat[1L], binlab = binlab[1L],
+        xmed = stats::median(TIME, na.rm = TRUE), n_obs = .N
+      ),
+      stats::setNames(as.list(qs), paste0("obs_", qnames))
+    )
+  }, by = strbin]
+  as.data.frame(out)
+}
+
+#' @keywords internal
+.nm_vpc_sim_stat <- function(sim_all, prob, qnames, ci_lo, ci_hi) {
+  persim <- sim_all[, {
+    qs <- as.numeric(stats::quantile(DVc, probs = prob, na.rm = TRUE,
+                                     names = FALSE))
+    stats::setNames(as.list(qs), qnames)
+  }, by = list(strbin, sim)]
+  agg <- persim[, {
+    res <- list()
+    for (q in qnames) {
+      v <- as.numeric(get(q))
+      res[[paste0("sim_", q, "_med")]] <- stats::median(v, na.rm = TRUE)
+      res[[paste0("sim_", q, "_lo")]] <-
+        as.numeric(stats::quantile(v, ci_lo, na.rm = TRUE, names = FALSE))
+      res[[paste0("sim_", q, "_hi")]] <-
+        as.numeric(stats::quantile(v, ci_hi, na.rm = TRUE, names = FALSE))
+    }
+    res
+  }, by = strbin]
+  as.data.frame(agg)
+}
+
+#' @rdname nm_vpc
+#' @method print nm_vpc
+#' @param x An \code{nm_vpc} object.
+#' @export
+print.nm_vpc <- function(x, ...) {
+  cat(if (isTRUE(x$pc)) "Prediction-corrected VPC" else "VPC", "\n", sep = "")
+  cat("  replicates:", x$n_sim, " quantiles:",
+      paste0(x$prob * 100, "%", collapse = ", "),
+      " CI:", x$ci, "\n")
+  if (!is.null(x$strata)) {
+    cat("  strata:", paste(x$strata, collapse = ", "),
+        " (", length(unique(x$stats$strat)), " level(s))\n", sep = "")
+  }
+  cat("  bins:", nrow(x$stats), "\n")
+  if (length(x$pc_failed) > 0L) {
+    cat("  prediction-correction failed in", length(x$pc_failed),
+        "bin/stratum group(s).\n")
+  }
+  print(utils::head(x$stats, 10L))
+  invisible(x)
+}
+
+#' Plot a VPC / pcVPC (requires ggplot2)
+#'
+#' @param x An \code{nm_vpc} object from \code{\link{nm_vpc}}.
+#' @param ... Unused.
+#' @return A \code{ggplot} object.
+#' @examples
+#' \dontrun{
+#' nm_vpc_plot(nm_vpc(fit, n_sim = 100L))
+#' }
+#' @export
+nm_vpc_plot <- function(x, ...) {
+  if (!inherits(x, "nm_vpc")) {
+    .nm_stop("x must be an nm_vpc object.")
+  }
+  if (!requireNamespace("ggplot2", quietly = TRUE)) {
+    .nm_stop("Package 'ggplot2' is required for nm_vpc_plot() (Suggests).")
+  }
+  df <- x$stats
+  med_q <- .nm_vpc_qnames(stats::median(x$prob))
+  lo_q <- .nm_vpc_qnames(min(x$prob))
+  hi_q <- .nm_vpc_qnames(max(x$prob))
+  p <- ggplot2::ggplot(df, ggplot2::aes(x = .data$xmed))
+  band <- function(qn, fill) {
+    ggplot2::geom_ribbon(
+      ggplot2::aes(
+        ymin = .data[[paste0("sim_", qn, "_lo")]],
+        ymax = .data[[paste0("sim_", qn, "_hi")]]
+      ),
+      fill = fill, alpha = 0.3
+    )
+  }
+  p <- p +
+    band(lo_q, "steelblue") + band(med_q, "tomato") + band(hi_q, "steelblue") +
+    ggplot2::geom_point(ggplot2::aes(y = .data[[paste0("obs_", med_q)]])) +
+    ggplot2::geom_line(ggplot2::aes(y = .data[[paste0("obs_", lo_q)]]),
+                       linetype = "dashed") +
+    ggplot2::geom_line(ggplot2::aes(y = .data[[paste0("obs_", med_q)]])) +
+    ggplot2::geom_line(ggplot2::aes(y = .data[[paste0("obs_", hi_q)]]),
+                       linetype = "dashed") +
+    ggplot2::labs(
+      x = "Time", y = if (isTRUE(x$pc)) "Prediction-corrected DV" else "DV",
+      title = if (isTRUE(x$pc)) "pcVPC" else "VPC"
+    ) +
+    ggplot2::theme_bw()
+  if (length(unique(df$strat)) > 1L) {
+    p <- p + ggplot2::facet_wrap(~strat, scales = "free")
+  }
+  p
 }

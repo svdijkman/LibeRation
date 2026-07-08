@@ -71,6 +71,7 @@ nm_add_npc_npde <- function(fit,
   sim_mat <- matrix(NA_real_, length(obs_idx), n_sim)
   fit_stub <- fit
   fit_stub$data <- data
+  n_rep_ok <- 0L
   for (k in seq_len(n_sim)) {
     fit_k <- fit_stub
     fit_k$data <- sims[[k]]
@@ -95,6 +96,22 @@ nm_add_npc_npde <- function(fit,
       cw_k[bad] <- gk$WRES[idx_k][bad]
     }
     sim_mat[, k] <- cw_k
+    n_rep_ok <- n_rep_ok + 1L
+  }
+  n_rep_fail <- n_sim - n_rep_ok
+  if (n_rep_fail > 0L) {
+    msg <- sprintf(
+      "%d of %d simulation replicate(s) failed and were excluded from NPC/NPDE.",
+      n_rep_fail, n_sim
+    )
+    if (n_rep_ok == 0L) {
+      .nm_stop(msg, " No usable replicates: NPC/NPDE cannot be computed.")
+    } else if (n_rep_ok < 0.5 * n_sim) {
+      warning(msg, " More than half of replicates failed: diagnostics are unreliable.",
+        call. = FALSE)
+    } else {
+      warning(msg, call. = FALSE)
+    }
   }
   npc_npde <- .nm_npc_npde_from_sim(obs_cw, sim_mat)
   if (isTRUE(compute_npc)) {
@@ -125,6 +142,8 @@ nm_add_npc_npde <- function(fit,
   fit$npc_npde <- list(
     n_sim = n_sim,
     n_ok = npc_npde$n_ok,
+    n_rep_ok = n_rep_ok,
+    n_rep_fail = n_rep_fail,
     refit_eta = isTRUE(refit_eta),
     seed = seed,
     compute_npc = isTRUE(compute_npc),
