@@ -1,22 +1,2 @@
-^.*\.Rproj$
-^\.Rproj\.user$
-^\.git$
-^\.github$
-^docs/
-^bootstrap_test_out\.txt$
-^tests/_tmp_.*\.R$
-^test-run\.log$
-^.*\.tar\.gz$
-^cran-comments\.md$
-
-# NONMEM benchmark dev tree (scripts only; outputs live under bench/ or temp).
-^bench/
-^inst/nonmem_bench/
-
-# Shiny dev/test helpers (not part of the app).
-^inst/shiny/_test_.*\.R$
-
-# Compiled objects / IDE clutter (should not be in tarball).
-^src/.*\.(o|obj|dll|so|dylib)$
-^src/.*\.(a|lib)$
-^src/Makevars\.user$
+^src/.*[.](o|obj|dll|so|dylib|a|def)$
+^TODO[.]md$

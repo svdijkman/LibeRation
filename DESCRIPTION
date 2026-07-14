@@ -1,40 +1,46 @@
 Package: LibeRation
-Title: Nonlinear Mixed-Effects Modelling
-Version: 0.4.1
-Authors@R: 
-    person("Sven C.", "van Dijkman", email = "svdijkman@users.noreply.github.com", role = c("aut", "cre"))
-Description: NONMEM-style population PK/PD estimation with FO, FOCE, FOCEI,
-    SAEM, Laplace, IMP, and full Bayesian MCMC. Supports configurable
-    residual and omega structures, covariates, GOF tables, bootstrap SE,
-    NONMEM control import, and project workflows. Uses LibeRtAD for AD.
+Type: Package
+Title: Population Pharmacometric Simulation and Estimation
+Version: 0.6.0
+Authors@R: person("Sven C.", "van Dijkman",
+    email = "svdijkman@users.noreply.github.com", role = c("aut", "cre"))
+Author: Sven C. van Dijkman [aut, cre]
+Maintainer: Sven C. van Dijkman <svdijkman@users.noreply.github.com>
+Description: NONMEM-compatible population PK/PD model specification,
+    simulation, estimation, diagnostics, and graphical workflow management
+    with one C++ numerical runtime. Implements ADVAN1-4, ADVAN6, ADVAN11-13,
+    arbitrary linear matrix propagation, analytical and nonlinear periodic
+    steady state, exact automatic differentiation, eight population
+    estimation methods, advanced likelihoods, stochastic simulation,
+    diagnostics, and versioned projects. Models use the established
+    LibeRation R syntax or the restricted C++ expression form.
 License: MIT + file LICENSE
-URL: https://github.com/svdijkman/LibeRation
-BugReports: https://github.com/svdijkman/LibeRation/issues
 Encoding: UTF-8
-Roxygen: list(markdown = TRUE, r6 = FALSE)
+Depends: R (>= 4.1.0)
 Imports:
-    LibeRtAD (>= 0.4.0),
+    graphics,
+    grDevices,
+    htmltools,
+    htmlwidgets,
+    jsonlite,
+    LibeRtAD (>= 0.6.0),
+    parallel,
     R6,
     Rcpp,
+    reactR,
+    shiny,
     stats,
-    data.table
-LinkingTo: Rcpp
+    utils
+LinkingTo:
+    Rcpp,
+    RcppEigen,
+    RcppEigenAD,
+    BH,
+    LibeRtAD
 Suggests:
     testthat (>= 3.0.0),
-    numDeriv,
-    statmod,
-    devtools,
-    pkgload,
-    callr,
-    curl,
-    jsonlite,
-    sodium,
-    later,
-    shiny,
-    DT,
-    ggplot2,
-    knitr,
-    rmarkdown
+    LibeRties (>= 0.6.0),
+    callr
+SystemRequirements: C++17
 Config/testthat/edition: 3
 Config/roxygen2/version: 8.0.0
-VignetteBuilder: knitr

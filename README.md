@@ -1,89 +1,48 @@
 # LibeRation
 
-**NONMEM-style** nonlinear mixed-effects modelling for population PK/PD: FO, FOCE, FOCEI, SAEM, Laplace, IMP, and Bayesian MCMC.
+LibeRation provides NONMEM-compatible population PK/PD model specification,
+simulation, estimation, diagnostics, and a React-based graphical workflow.
+The numerical model, event, ADVAN, ODE, likelihood, and automatic-
+differentiation paths run in C++; models can be specified with established
+LibeRation R syntax or the restricted C++ expression form.
 
-Depends on [LibeRtAD](../LibeRtAD) for automatic differentiation.
-
-## Installation
-
-Install **LibeRtAD** first, then LibeRation:
-
-```r
-devtools::install("path/to/LibeRtAD")
-devtools::install("path/to/LibeRation")
-```
-
-Suggested packages for the Shiny GUI and async jobs: `shiny`, `callr`, `ggplot2`, `DT`.
+Implemented model paths include ADVAN1-4/11/12, ADVAN6, ADVAN13, arbitrary
+linear matrix propagation, infusions, analytical and nonlinear periodic
+steady state, correlated OMEGA, IOV, priors, mixtures, BLQ likelihoods, and
+time-varying covariates. Estimation methods include FO, FOCE, FOCEI, Laplace,
+ITS, IMP, SAEM, and Bayesian estimation. Diagnostics and uncertainty workflows
+include covariance, GOF/CWRES, VPC/NPDE/NPC, categorical and time-to-event
+VPCs, bootstrap, profile likelihood, and SCM.
 
 ## Quick start
 
 ```r
 library(LibeRation)
 
-sim <- nm_synthetic_theo(n_sub = 12, seed = 1)
-fit <- nm_est(
-  sim$model, sim$data,
-  method = "FOCE",
-  grad = "cpp",
-  pk_engine = "cpp",
-  control = list(maxit = 200)
+model <- nm_model(
+  INPUT = c("ID", "TIME", "EVID", "AMT", "CMT", "DV", "MDV"),
+  ADVAN = 1,
+  PRED = "CL=THETA(1)*exp(ETA(1))\nV=THETA(2)\nS1=V",
+  ERROR = "Y=F*(1+ERR(1))",
+  THETAS = data.frame(THETA = 1:2, Value = c(2, 20)),
+  OMEGAS = data.frame(OMEGA = 1, Value = 0.1),
+  SIGMAS = data.frame(SIGMA = 1, Value = 0.1)
 )
 
-predict(fit)
-nm_etab(fit)
+data <- data.frame(
+  ID = 1, TIME = c(0, 1, 2, 4), EVID = c(1, 0, 0, 0),
+  AMT = c(100, 0, 0, 0), CMT = 1,
+  DV = c(NA, 4.5, 4.1, 3.4), MDV = c(1, 0, 0, 0)
+)
+
+fit <- nm_est(model, data, method = "FOCEI")
 summary(fit)
+liber_gui(model, data)
 ```
 
-## Shiny GUI
+Install LibeRtAD first, then install LibeRation with R 4.1 or newer and a
+C++17 toolchain. Install LibeRties as well to enable persistent local and
+remote job queues.
 
-```r
-liberation_shiny()
-# options(LibeRation.workspace = "path/to/projects")
-```
-
-## Project workspace
-
-```r
-nm_workspace_init("~/LibeRation_projects", create_demo_project = TRUE)
-nm_workspace_create_project("my_study", template = "theo")
-```
-
-## Main function groups
-
-| Area | Functions |
-|------|-----------|
-| Estimation | `nm_est()`, `nm_focei_setup()`, `nm_cov_step()` |
-| Data / model | `nm_dataset()`, `nm_model()`, `nm_read_nonmem()` |
-| Control stream | `nm_ctl_parse()`, `nm_ctl_compose()`, `nm_ctl_template()` |
-| GOF | `predict()`, `nm_etab()`, `nm_add_cwres()`, `nm_add_npc_npde()` |
-| Simulation | `nm_simulate()`, `nm_synthetic_*()` |
-| Workspace | `nm_workspace_*()` |
-| Jobs | `nm_job_submit()`, `nm_job_result()`, `nm_remote_server_*()` |
-| Diagnostics | `nm_scm()`, `nm_vpc()`, `nm_pcvpc()`, `nm_profile_likelihood()` |
-| Tables | `nm_write_table()`, `nm_read_table()` |
-
-## Documentation
-
-```r
-?LibeRation
-?nm_est
-?liberation_shiny
-```
-
-Regenerate `.Rd` manuals:
-
-```r
-roxygen2::roxygenise("path/to/LibeRation")
-```
-
-## Vignette
-
-```r
-vignette("getting-started", package = "LibeRation")
-```
-
-Requires **knitr**, **rmarkdown**, and Pandoc.
-
-## License
-
-MIT — see `LICENSE`.
+LibeRation is MIT licensed. The remaining engineering work is tracked in
+[TODO.md](TODO.md).

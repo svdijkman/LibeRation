@@ -1,0 +1,787 @@
+.nm_log_mean_exp <- function(values) {
+  maximum <- max(values)
+  maximum + log(mean(exp(values - maximum)))
+}
+
+.nm_imp_normals <- function(context, n_imp, seed) {
+  n_imp <- as.integer(n_imp)
+  seed <- as.integer(seed)
+  if (length(n_imp) != 1L || is.na(n_imp) || n_imp < 5L) {
+    .nm_stop("Importance-sampling information requires at least 5 samples.")
+  }
+  if (length(seed) != 1L || is.na(seed)) .nm_stop("`seed` must be one integer.")
+  had_seed <- exists(".Random.seed", envir = .GlobalEnv, inherits = FALSE)
+  if (had_seed) previous_seed <- get(".Random.seed", envir = .GlobalEnv, inherits = FALSE)
+  on.exit({
+    if (had_seed) assign(".Random.seed", previous_seed, envir = .GlobalEnv)
+    else if (exists(".Random.seed", envir = .GlobalEnv, inherits = FALSE)) {
+      rm(".Random.seed", envir = .GlobalEnv)
+    }
+  }, add = TRUE)
+  set.seed(seed)
+  lapply(seq_len(context$n_subjects), function(subject) {
+    matrix(stats::rnorm(n_imp * context$n_eta), n_imp, context$n_eta)
+  })
+}
+
+.nm_est_its <- function(context, map, maxit, eta_maxit, tolerance, trace,
+                        print_every = 0L, optimizer_backend = "auto") {
+  objective <- .nm_nested_objective(context, "its", eta_maxit, tolerance)
+  gradient <- function(parameters) .nm_nested_outer_gradient(
+    context, map, objective, parameters, "its"
+  )
+  compiled <- .nm_cpp_population_objective(
+    context, map, "its", eta_maxit, tolerance
+  )
+  optimizer <- .nm_outer_optim(
+    map, objective, maxit, tolerance, trace, print_every,
+    gradient = gradient, optimizer_backend = optimizer_backend,
+    compiled_objective = compiled
+  )
+  parameters <- map$decode(optimizer$par)
+  cached <- if (!is.null(compiled$pointer)) tryCatch(
+    .liberation_population_objective_state(compiled$pointer, optimizer$par),
+    error = function(error) NULL
+  ) else NULL
+  modes <- cached$modes %||% .nm_subject_modes(
+    context, parameters, maxit = eta_maxit, tolerance = tolerance,
+    exact_hessian = FALSE
+  )
+  work <- optimizer$population_objective
+  if (is.null(work)) {
+    work <- list(
+      value_requests = attr(objective, "state")$objective_calls,
+      value_cache_hits = attr(objective, "state")$cache_hits,
+      mode_iterations = attr(objective, "state")$mode_iterations,
+      mode_evaluations = attr(objective, "state")$mode_evaluations
+    )
+  }
+  .nm_fit_result(
+    context, "ITS", parameters, optimizer$value, modes, optimizer,
+    diagnostics = list(
+      eta_convergence = vapply(modes, `[[`, integer(1), "convergence"),
+      description = "iterative conditional modes without a Laplace determinant",
+      conditional_mode_work = list(
+        objective_calls = work$value_requests %||% work$parameter_evaluations,
+        cache_hits = sum(
+          work$value_cache_hits %||% 0L,
+          work$gradient_cache_hits %||% 0L,
+          work$shared_state_hits %||% 0L
+        ),
+        iterations = work$mode_iterations,
+        evaluations = work$mode_evaluations
+      ),
+      population_gradient = "exact envelope gradient"
+    )
+  )
+}
+
+.nm_imp_subject_objective <- function(evaluator, parameters, normals,
+                                      eta_maxit, tolerance) {
+  .nm_imp_subject_state(
+    evaluator, parameters, normals, eta_maxit, tolerance, gradient = FALSE
+  )$value
+}
+
+.nm_imp_subject_state <- function(evaluator, parameters, normals,
+                                  eta_maxit, tolerance, gradient = TRUE) {
+    mode <- evaluator$eta_mode(
+      parameters$theta, parameters$sigma, parameters$omega,
+      maxit = eta_maxit, tolerance = tolerance
+    )
+    if (mode$convergence != 0L) {
+      return(list(value = Inf, native_gradient = NULL, mode = mode))
+    }
+    dimension <- length(mode$par)
+    if (!dimension) {
+      evaluated <- evaluator$objective(
+        parameters$theta, numeric(), parameters$sigma, parameters$omega,
+        gradient = gradient
+      )
+      return(list(
+        value = mode$value,
+        native_gradient = if (isTRUE(gradient)) as.numeric(evaluated$gradient) else NULL,
+        mode = mode
+      ))
+    }
+    covariance <- 2 * solve(mode$hessian)
+    covariance <- .nm_positive_definite(covariance, "IMP proposal covariance")$matrix
+    root <- t(chol(covariance))
+    logdet <- as.numeric(determinant(covariance, logarithm = TRUE)$modulus)
+    z <- normals
+    eta <- sweep(z %*% t(root), 2L, mode$par, `+`)
+    evaluated <- if (isTRUE(gradient)) {
+      evaluator$objective_eta_batch(
+        parameters$theta, eta, parameters$sigma, parameters$omega
+      )
+    } else list(value = evaluator$objective_eta_values(
+      parameters$theta, eta, parameters$sigma, parameters$omega
+    ))
+    nll <- evaluated$value
+    log_proposal <- -0.5 * (
+      dimension * log(2 * pi) + logdet + rowSums(z^2)
+    )
+    log_weight <- -0.5 * nll - log_proposal
+    value <- -2 * .nm_log_mean_exp(log_weight)
+    native_gradient <- NULL
+    if (isTRUE(gradient)) {
+      shifted <- log_weight - max(log_weight)
+      weights <- exp(shifted) / sum(exp(shifted))
+      native_gradient <- colSums(evaluated$gradient * weights)
+    }
+    list(
+      value = value, native_gradient = native_gradient, mode = mode,
+      effective_sample_size = if (isTRUE(gradient)) 1 / sum(weights^2) else NA_real_
+    )
+}
+
+.nm_imp_objective <- function(context, parameters, normals,
+                              eta_maxit, tolerance) {
+  if (is.null(context$parallel)) {
+    subject_values <- vapply(seq_len(context$n_subjects), function(subject) {
+      .nm_imp_subject_objective(
+        context$subjects[[subject]], parameters, normals[[subject]],
+        eta_maxit, tolerance
+      )
+    }, numeric(1))
+  } else {
+    normal_chunks <- lapply(context$parallel$chunks, function(rows) normals[rows])
+    pieces <- parallel::clusterApply(
+      context$parallel$cluster, seq_along(context$parallel$chunks),
+      function(index, chunks, parameters, eta_maxit, tolerance) {
+        objective <- get(".nm_imp_subject_objective", envir = asNamespace("LibeRation"))
+        evaluators <- get(".liber_parallel_subjects", envir = .GlobalEnv)
+        worker_normals <- chunks[[index]]
+        vapply(seq_along(evaluators), function(subject) {
+          objective(
+            evaluators[[subject]], parameters, worker_normals[[subject]],
+            eta_maxit, tolerance
+          )
+        }, numeric(1))
+      }, chunks = normal_chunks, parameters = parameters,
+      eta_maxit = eta_maxit, tolerance = tolerance
+    )
+    subject_values <- unlist(pieces, use.names = FALSE)
+  }
+  sum(subject_values) + .nm_prior_nll(context$model, parameters)
+}
+
+.nm_imp_evaluate <- function(context, parameters, normals, eta_maxit, tolerance,
+                             gradient = TRUE) {
+  evaluate_chunk <- function(evaluators, chunk_normals) {
+    lapply(seq_along(evaluators), function(subject) {
+      .nm_imp_subject_state(
+        evaluators[[subject]], parameters, chunk_normals[[subject]],
+        eta_maxit, tolerance, gradient = gradient
+      )
+    })
+  }
+  if (is.null(context$parallel)) {
+    states <- evaluate_chunk(context$subjects, normals)
+  } else {
+    normal_chunks <- lapply(context$parallel$chunks, function(rows) normals[rows])
+    pieces <- parallel::clusterApply(
+      context$parallel$cluster, seq_along(context$parallel$chunks),
+      function(index, chunks, parameters, eta_maxit, tolerance, gradient) {
+        evaluators <- get(".liber_parallel_subjects", envir = .GlobalEnv)
+        state <- get(".nm_imp_subject_state", envir = asNamespace("LibeRation"))
+        lapply(seq_along(evaluators), function(subject) {
+          state(
+            evaluators[[subject]], parameters, chunks[[index]][[subject]],
+            eta_maxit, tolerance, gradient = gradient
+          )
+        })
+      }, chunks = normal_chunks, parameters = parameters,
+      eta_maxit = eta_maxit, tolerance = tolerance, gradient = gradient
+    )
+    states <- unlist(pieces, recursive = FALSE)
+  }
+  value <- sum(vapply(states, `[[`, numeric(1), "value")) +
+    .nm_prior_nll(context$model, parameters)
+  if (!isTRUE(gradient)) return(list(value = value, states = states))
+  gradients <- lapply(states, `[[`, "native_gradient")
+  if (any(vapply(gradients, is.null, logical(1)))) {
+    return(list(value = value, native_gradient = NULL, states = states))
+  }
+  full <- Reduce(`+`, gradients)
+  n_theta <- length(parameters$theta)
+  n_sigma <- length(parameters$sigma)
+  n_omega <- length(parameters$omega)
+  population_positions <- c(
+    seq_len(n_theta), n_theta + context$n_eta + seq_len(n_sigma),
+    n_theta + context$n_eta + n_sigma + seq_len(n_omega)
+  )
+  list(
+    value = value,
+    native_gradient = as.numeric(full[population_positions]) +
+      .nm_prior_nll_native_gradient(context$model, parameters),
+    states = states
+  )
+}
+
+.nm_est_imp <- function(context, map, maxit, eta_maxit, tolerance, trace,
+                        n_imp = 200L, seed = 20260713L, print_every = 0L,
+                        imp_gradient = c("score", "finite_crn"),
+                        optimizer_backend = "auto") {
+  n_imp <- as.integer(n_imp)
+  if (n_imp < 5L) .nm_stop("IMP requires `n_imp >= 5`.")
+  imp_gradient <- match.arg(imp_gradient)
+  normals <- .nm_imp_normals(context, n_imp, seed)
+  cache <- new.env(parent = emptyenv())
+  cache$key <- NULL
+  evaluate <- function(parameters) {
+    key <- c(parameters$theta, parameters$sigma, parameters$omega)
+    if (is.null(cache$key) || !identical(cache$key, key)) {
+      cache$result <- .nm_imp_evaluate(
+        context, parameters, normals, eta_maxit, tolerance,
+        gradient = imp_gradient == "score"
+      )
+      cache$key <- key
+    }
+    cache$result
+  }
+  objective <- function(parameters) evaluate(parameters)$value
+  gradient <- if (imp_gradient == "score") function(parameters) {
+    result <- evaluate(parameters)
+    as.vector(result$native_gradient %*% map$jacobian(parameters))
+  } else NULL
+  optimizer <- .nm_outer_optim(
+    map, objective, maxit, tolerance, trace, print_every,
+    gradient = gradient, optimizer_backend = optimizer_backend
+  )
+  parameters <- map$decode(optimizer$par)
+  modes <- .nm_subject_modes(
+    context, parameters, maxit = eta_maxit, tolerance = tolerance,
+    exact_hessian = FALSE
+  )
+  .nm_fit_result(
+    context, "IMP", parameters, optimizer$value, modes, optimizer,
+    diagnostics = list(
+      n_imp = n_imp, seed = seed, eta_maxit = eta_maxit,
+      common_random_numbers = TRUE, imp_gradient = imp_gradient,
+      population_gradient = if (imp_gradient == "score") {
+        "normalized importance-score CppAD gradient (proposal derivative omitted)"
+      } else "finite common-random-number objective"
+    )
+  )
+}
+
+.nm_saem_conditional <- function(context, parameters, eta) {
+  if (is.null(context$parallel)) {
+    value <- sum(.nm_objective_collection(context$subjects, parameters, eta))
+  } else {
+    eta_chunks <- lapply(
+      context$parallel$chunks, function(rows) eta[rows, , drop = FALSE]
+    )
+    pieces <- parallel::clusterApply(
+      context$parallel$cluster, seq_along(context$parallel$chunks),
+      function(index, eta_chunks, parameters) {
+        evaluators <- get(".liber_parallel_subjects", envir = .GlobalEnv)
+        worker_eta <- eta_chunks[[index]]
+        collection <- get(".nm_objective_collection", envir = asNamespace("LibeRation"))
+        sum(collection(evaluators, parameters, worker_eta))
+      }, eta_chunks = eta_chunks, parameters = parameters
+    )
+    value <- sum(unlist(pieces, use.names = FALSE))
+  }
+  value + .nm_prior_nll(context$model, parameters)
+}
+
+.nm_saem_conditional_gradient <- function(context, map, parameters, eta) {
+  native <- .nm_conditional_native_gradient(
+    context, parameters, eta, interaction = TRUE
+  )
+  as.vector(native %*% map$jacobian(parameters))
+}
+
+.nm_saem_omega_sufficient <- function(context, eta) {
+  iov <- context$model$LIK_CONFIG$iov
+  covariance <- matrix(0, context$model$n_eta, context$model$n_eta)
+  if (iov == 0L) {
+    covariance <- crossprod(eta) / max(nrow(eta), 1L)
+  } else {
+    between <- context$model$n_eta - iov
+    if (between) {
+      covariance[seq_len(between), seq_len(between)] <-
+        crossprod(eta[, seq_len(between), drop = FALSE]) / max(nrow(eta), 1L)
+    }
+    occasions <- (ncol(eta) - between) / iov
+    occasion_effects <- do.call(rbind, lapply(seq_len(occasions), function(occasion) {
+      index <- between + (occasion - 1L) * iov + seq_len(iov)
+      eta[, index, drop = FALSE]
+    }))
+    source <- between + seq_len(iov)
+    covariance[source, source] <- crossprod(occasion_effects) / max(nrow(occasion_effects), 1L)
+  }
+  covariance <- covariance + diag(1e-8, nrow(covariance))
+  vapply(seq_len(nrow(context$model$OMEGAS)), function(i) {
+    covariance[context$model$OMEGAS$ROW[[i]], context$model$OMEGAS$COL[[i]]]
+  }, numeric(1))
+}
+
+.nm_saem_sigma_sufficient <- function(context, parameters, eta) {
+  error <- context$model$LIK_CONFIG$error
+  if (!error %in% c("additive", "proportional", "exponential")) return(NULL)
+  prediction <- context$engine$simulate(
+    context$data, theta = parameters$theta, eta = eta,
+    sigma = parameters$sigma
+  )$IPRED
+  observed <- context$data$EVID == 0L & context$data$MDV == 0L &
+    is.finite(context$data$DV) & is.finite(prediction)
+  if (!any(observed)) return(NULL)
+  dvid <- if ("DVID" %in% names(context$data)) {
+    pmax(as.integer(context$data$DVID), 1L)
+  } else rep(1L, nrow(context$data))
+  values <- parameters$sigma
+  for (response in unique(dvid[observed])) {
+    rows <- observed & dvid == response
+    residual <- switch(
+      error,
+      additive = context$data$DV[rows] - prediction[rows],
+      proportional = (context$data$DV[rows] - prediction[rows]) /
+        pmax(abs(prediction[rows]), 1e-12),
+      exponential = {
+        valid <- context$data$DV[rows] > 0 & prediction[rows] > 0
+        log(context$data$DV[rows][valid]) - log(prediction[rows][valid])
+      }
+    )
+    variance <- mean(residual^2, na.rm = TRUE)
+    if (is.finite(variance) && variance > 0 && response <= length(values)) {
+      values[[response]] <- if (
+        identical(context$model$LIK_CONFIG$sigma_parameterization, "variance")
+      ) variance else sqrt(variance)
+    }
+  }
+  values
+}
+
+.nm_saem_metropolis_chunk <- function(evaluators, parameters, eta,
+                                      proposal_roots, normals, log_uniforms,
+                                      mcmc_steps, step_scale) {
+  if (!length(evaluators) || !ncol(eta)) {
+    return(list(eta = eta, accepted = 0L, attempted = 0L))
+  }
+  initial_eta <- eta
+  ode_guard <- isTRUE(evaluators[[1L]]$engine$model$USE_ODE)
+  if (ode_guard) invisible(Map(function(evaluator, subject) {
+    evaluator$ensure_valid_tapes(
+      parameters$theta, parameters$sigma, parameters$omega, eta[subject, ]
+    )
+  }, evaluators, seq_along(evaluators)))
+  make_points <- function(eta) cbind(
+    matrix(parameters$theta, nrow(eta), length(parameters$theta), byrow = TRUE),
+    eta,
+    matrix(parameters$sigma, nrow(eta), length(parameters$sigma), byrow = TRUE),
+    matrix(parameters$omega, nrow(eta), length(parameters$omega), byrow = TRUE)
+  )
+  run <- function(eta) .liberation_objective_tape_eta_metropolis(
+    lapply(evaluators, function(evaluator) evaluator$objective_tape$pointer),
+    make_points(eta), length(parameters$theta) + seq_len(ncol(eta)), eta,
+    proposal_roots, normals, log_uniforms, as.integer(mcmc_steps),
+    as.numeric(step_scale)
+  )
+  result <- run(initial_eta)
+  retaped <- ode_guard && any(vapply(seq_along(evaluators), function(subject) {
+    evaluators[[subject]]$ensure_valid_tapes(
+      parameters$theta, parameters$sigma, parameters$omega,
+      result$eta[subject, ]
+    )
+  }, logical(1)))
+  if (retaped) result <- run(initial_eta)
+  result
+}
+
+.nm_saem_metropolis <- function(context, parameters, eta, mcmc_steps,
+                                step_scale) {
+  if (!context$n_eta) return(list(eta = eta, accepted = 0L, attempted = 0L))
+  roots <- lapply(context$subjects, function(evaluator) {
+    t(chol(.nm_effect_covariance(
+      context$model, evaluator$data, parameters$omega
+    )))
+  })
+  normals <- matrix(
+    stats::rnorm(context$n_subjects * mcmc_steps * context$n_eta),
+    context$n_subjects * mcmc_steps, context$n_eta
+  )
+  log_uniforms <- log(stats::runif(context$n_subjects * mcmc_steps))
+  if (is.null(context$parallel)) {
+    return(.nm_saem_metropolis_chunk(
+      context$subjects, parameters, eta, roots, normals, log_uniforms,
+      mcmc_steps, step_scale
+    ))
+  }
+  chunks <- context$parallel$chunks
+  eta_chunks <- lapply(chunks, function(rows) eta[rows, , drop = FALSE])
+  root_chunks <- lapply(chunks, function(rows) roots[rows])
+  normal_chunks <- lapply(chunks, function(rows) {
+    draws <- unlist(lapply(rows, function(subject) {
+      (subject - 1L) * mcmc_steps + seq_len(mcmc_steps)
+    }))
+    normals[draws, , drop = FALSE]
+  })
+  uniform_chunks <- lapply(chunks, function(rows) {
+    draws <- unlist(lapply(rows, function(subject) {
+      (subject - 1L) * mcmc_steps + seq_len(mcmc_steps)
+    }))
+    log_uniforms[draws]
+  })
+  pieces <- parallel::clusterApply(
+    context$parallel$cluster, seq_along(chunks),
+    function(index, parameters, eta_chunks, root_chunks, normal_chunks,
+             uniform_chunks, mcmc_steps, step_scale) {
+      evaluators <- get(".liber_parallel_subjects", envir = .GlobalEnv)
+      sampler <- get(".nm_saem_metropolis_chunk", envir = asNamespace("LibeRation"))
+      sampler(
+        evaluators, parameters, eta_chunks[[index]], root_chunks[[index]],
+        normal_chunks[[index]], uniform_chunks[[index]], mcmc_steps, step_scale
+      )
+    }, parameters = parameters, eta_chunks = eta_chunks,
+    root_chunks = root_chunks, normal_chunks = normal_chunks,
+    uniform_chunks = uniform_chunks, mcmc_steps = mcmc_steps,
+    step_scale = step_scale
+  )
+  list(
+    eta = do.call(rbind, lapply(pieces, `[[`, "eta")),
+    accepted = sum(vapply(pieces, `[[`, integer(1), "accepted")),
+    attempted = sum(vapply(pieces, `[[`, integer(1), "attempted"))
+  )
+}
+
+.nm_est_saem <- function(context, map, maxit, tolerance, trace,
+                         n_iter = 200L, burn = NULL, mcmc_steps = 2L,
+                         step_scale = 0.5, sa_power = 0.7,
+                         mstep_maxit = 20L, seed = 20260713L,
+                         print_every = 0L, adapt_proposal = TRUE,
+                         target_acceptance = 0.3, closed_form_sigma = TRUE,
+                         optimizer_backend = "auto") {
+  n_iter <- as.integer(n_iter)
+  burn <- as.integer(burn %||% floor(n_iter / 3))
+  mcmc_steps <- as.integer(mcmc_steps)
+  if (n_iter < 2L || burn < 0L || burn >= n_iter || mcmc_steps < 1L) {
+    .nm_stop("SAEM requires n_iter >= 2, 0 <= burn < n_iter, and mcmc_steps >= 1.")
+  }
+  if (!is.finite(step_scale) || step_scale <= 0 ||
+      !is.finite(target_acceptance) || target_acceptance <= 0 ||
+      target_acceptance >= 1) {
+    .nm_stop("SAEM proposal scale must be positive and target acceptance must lie in (0, 1).")
+  }
+  set.seed(seed)
+  parameters <- map$decode(map$start)
+  eta <- matrix(0, context$n_subjects, context$n_eta)
+  accepted <- attempted <- 0L
+  objective_trace <- numeric(n_iter)
+  acceptance_trace <- numeric(n_iter)
+  step_scale_trace <- numeric(n_iter)
+  mstep_objective_evaluations <- 0L
+  mstep_gradient_evaluations <- 0L
+  mstep_iterations <- 0L
+  mstep_elapsed <- 0
+  mstep_backend <- "unknown"
+  for (iteration in seq_len(n_iter)) {
+    if (context$n_eta) {
+      sampled <- .nm_saem_metropolis(
+        context, parameters, eta, mcmc_steps, step_scale
+      )
+      eta <- sampled$eta
+      accepted <- accepted + sampled$accepted
+      attempted <- attempted + sampled$attempted
+      acceptance_trace[[iteration]] <- sampled$accepted / max(sampled$attempted, 1L)
+      if (isTRUE(adapt_proposal) && iteration <= burn) {
+        gain <- min(0.1, 1 / sqrt(iteration))
+        step_scale <- step_scale * exp(
+          gain * (acceptance_trace[[iteration]] - target_acceptance)
+        )
+      }
+    }
+    step_scale_trace[[iteration]] <- step_scale
+    gamma <- if (iteration <= burn) 1 else (iteration - burn)^(-sa_power)
+    simple_sigma <- isTRUE(closed_form_sigma) &&
+      context$model$LIK_CONFIG$error %in% c("additive", "proportional", "exponential")
+    mstep_model <- context$model
+    mstep_model$THETAS$Value <- parameters$theta
+    mstep_model$SIGMAS$Value <- parameters$sigma
+    mstep_model$OMEGAS$Value <- parameters$omega
+    if (length(map$omega_free)) mstep_model$OMEGAS$FIX[] <- TRUE
+    if (simple_sigma && length(map$sigma_free)) mstep_model$SIGMAS$FIX[] <- TRUE
+    iteration_map <- .nm_outer_map(mstep_model)
+    conditional <- function(candidate) .nm_saem_conditional(context, candidate, eta)
+    conditional_gradient <- function(candidate) {
+      .nm_saem_conditional_gradient(context, iteration_map, candidate, eta)
+    }
+    maximized <- .nm_outer_optim(
+      iteration_map, conditional, min(as.integer(mstep_maxit), as.integer(maxit)),
+      tolerance, if (trace > 1L) trace else 0L,
+      gradient = conditional_gradient, optimizer_backend = optimizer_backend
+    )
+    mstep_objective_evaluations <- mstep_objective_evaluations +
+      as.integer(maximized$objective_evaluations %||% 0L)
+    mstep_gradient_evaluations <- mstep_gradient_evaluations +
+      as.integer(maximized$gradient_evaluations %||% 0L)
+    mstep_iterations <- mstep_iterations + as.integer(maximized$iterations %||% 0L)
+    mstep_elapsed <- mstep_elapsed + as.numeric(maximized$elapsed_seconds %||% 0)
+    mstep_backend <- maximized$backend %||% mstep_backend
+    candidate <- iteration_map$decode(maximized$par)
+    sigma_sufficient <- if (simple_sigma) {
+      .nm_saem_sigma_sufficient(context, candidate, eta)
+    } else NULL
+    if (!is.null(sigma_sufficient) && length(map$sigma_free)) {
+      candidate$sigma[map$sigma_free] <- sigma_sufficient[map$sigma_free]
+    }
+    parameters$theta[map$theta_free] <-
+      (1 - gamma) * parameters$theta[map$theta_free] +
+      gamma * candidate$theta[map$theta_free]
+    parameters$sigma[map$sigma_free] <-
+      (1 - gamma) * parameters$sigma[map$sigma_free] +
+      gamma * candidate$sigma[map$sigma_free]
+    if (length(map$omega_free) && context$n_eta) {
+      sufficient <- .nm_saem_omega_sufficient(context, eta)
+      parameters$omega[map$omega_free] <-
+        (1 - gamma) * parameters$omega[map$omega_free] +
+        gamma * sufficient[map$omega_free]
+    }
+    objective_trace[[iteration]] <- .nm_saem_conditional(context, parameters, eta)
+    if (print_every > 0L && iteration %% print_every == 0L && length(map$start)) {
+      point <- map$encode(parameters)
+      objective_at <- function(value) .nm_saem_conditional(context, map$decode(value), eta)
+      gradient_at <- function(value) {
+        .nm_saem_conditional_gradient(context, map, map$decode(value), eta)
+      }
+      .nm_log_gradient(
+        iteration, objective_at, point, map, objective_trace[[iteration]],
+        gradient_function = gradient_at
+      )
+    }
+  }
+  modes <- lapply(seq_len(context$n_subjects), function(subject) {
+    list(par = eta[subject, ], convergence = 0L, jitter = 0)
+  })
+  optimizer <- list(
+    convergence = 0L, message = "SAEM iterations completed",
+    counts = c(`function` = mstep_objective_evaluations,
+               gradient = mstep_gradient_evaluations),
+    iterations = n_iter, objective_evaluations = mstep_objective_evaluations,
+    gradient_evaluations = mstep_gradient_evaluations,
+    mstep_iterations = mstep_iterations, elapsed_seconds = mstep_elapsed,
+    backend = paste0("saem+", mstep_backend)
+  )
+  fit <- .nm_fit_result(
+    context, "SAEM", parameters, tail(objective_trace, 1), modes, optimizer,
+    diagnostics = list(
+      objective_trace = objective_trace, acceptance = accepted / max(attempted, 1L),
+      acceptance_trace = acceptance_trace, step_scale_trace = step_scale_trace,
+      final_step_scale = step_scale, target_acceptance = target_acceptance,
+      adaptive_proposal = isTRUE(adapt_proposal),
+      closed_form_sigma = simple_sigma,
+      closed_form_omega = length(map$omega_free) > 0L,
+      n_iter = n_iter, burn = burn, seed = seed,
+      population_gradient = "exact conditional CppAD gradient"
+    )
+  )
+  fit
+}
+
+.nm_bayes_state <- function(map, outer, eta) {
+  list(outer = outer, parameters = map$decode(outer), eta = eta)
+}
+
+.nm_est_bayes <- function(context, map, tolerance,
+                          n_burn = 500L, n_sample = 1000L, n_thin = 1L,
+                          step_scale = 0.03, eta_step = 0.35,
+                          seed = 20260713L, adapt = TRUE,
+                          print_every = 0L) {
+  n_burn <- as.integer(n_burn)
+  n_sample <- as.integer(n_sample)
+  n_thin <- as.integer(n_thin)
+  if (n_burn < 0L || n_sample < 1L || n_thin < 1L) {
+    .nm_stop("BAYES requires n_burn >= 0, n_sample >= 1, and n_thin >= 1.")
+  }
+  set.seed(seed)
+  full_tape <- context$engine$objective_tape(
+    context$data, theta = context$model$THETAS$Value,
+    eta = matrix(0, context$n_subjects, context$n_eta),
+    sigma = context$model$SIGMAS$Value, omega = context$model$OMEGAS$Value
+  )
+  log_posterior <- function(state) {
+    if (!map$in_bounds(state$outer)) return(-Inf)
+    parameters <- state$parameters
+    point <- c(parameters$theta, as.vector(t(state$eta)),
+               parameters$sigma, parameters$omega)
+    nll <- tryCatch(
+      .liberation_objective_tape_eval(full_tape$pointer, point, FALSE, FALSE)$value,
+      error = function(e) Inf
+    )
+    if (!is.finite(nll)) return(-Inf)
+    jacobian <- map$log_jacobian(parameters)
+    -0.5 * nll + .nm_log_prior(context$model, parameters) + jacobian
+  }
+  state <- .nm_bayes_state(
+    map, map$start, matrix(0, context$n_subjects, context$n_eta)
+  )
+  current <- log_posterior(state)
+  total_iterations <- n_burn + n_sample * n_thin
+  kept <- vector("list", n_sample)
+  accepted_outer <- attempted_outer <- accepted_eta <- attempted_eta <- 0L
+  keep <- 0L
+  for (iteration in seq_len(total_iterations)) {
+    if (length(state$outer)) {
+      proposal <- .nm_bayes_state(
+        map, state$outer + stats::rnorm(length(state$outer), sd = step_scale), state$eta
+      )
+      proposed <- log_posterior(proposal)
+      attempted_outer <- attempted_outer + 1L
+      if (log(stats::runif(1)) < proposed - current) {
+        state <- proposal
+        current <- proposed
+        accepted_outer <- accepted_outer + 1L
+      }
+    }
+    if (context$n_eta) {
+      for (subject in seq_len(context$n_subjects)) {
+        proposal <- state
+        root <- t(chol(.nm_effect_covariance(
+          context$model, context$subjects[[subject]]$data, state$parameters$omega
+        )))
+        proposal$eta[subject, ] <- proposal$eta[subject, ] +
+          as.vector(root %*% stats::rnorm(context$n_eta, sd = eta_step))
+        proposed <- log_posterior(proposal)
+        attempted_eta <- attempted_eta + 1L
+        if (log(stats::runif(1)) < proposed - current) {
+          state <- proposal
+          current <- proposed
+          accepted_eta <- accepted_eta + 1L
+        }
+      }
+    }
+    if (isTRUE(adapt) && iteration <= n_burn && iteration %% 50L == 0L) {
+      rate <- accepted_outer / max(attempted_outer, 1L)
+      step_scale <- step_scale * exp(if (rate > 0.3) 0.1 else -0.1)
+    }
+    if (iteration > n_burn && (iteration - n_burn) %% n_thin == 0L) {
+      keep <- keep + 1L
+      kept[[keep]] <- c(
+        state$parameters$theta, state$parameters$sigma, state$parameters$omega,
+        as.vector(t(state$eta)), LOG_POSTERIOR = current
+      )
+    }
+    if (print_every > 0L && iteration %% print_every == 0L) {
+      point <- c(state$parameters$theta, as.vector(t(state$eta)),
+                 state$parameters$sigma, state$parameters$omega)
+      evaluated <- .liberation_objective_tape_eval(full_tape$pointer, point, TRUE, FALSE)
+      population <- c(
+        evaluated$gradient[seq_along(state$parameters$theta)],
+        evaluated$gradient[length(state$parameters$theta) + length(state$eta) +
+                             seq_along(state$parameters$sigma)],
+        evaluated$gradient[length(state$parameters$theta) + length(state$eta) +
+                             length(state$parameters$sigma) + seq_along(state$parameters$omega)]
+      )
+      names(population) <- .nm_parameter_names(
+        state$parameters$theta, state$parameters$sigma, state$parameters$omega
+      )
+      cat(sprintf(
+        "[LibeRation] MCMC ITERATION %d -2LOGPOST %.10g GRADIENT %s\n",
+        iteration, -2 * current,
+        paste(sprintf("%s=%.6g", names(population), population), collapse = " ")
+      ))
+      try(flush(stdout()), silent = TRUE)
+    }
+  }
+  chain <- do.call(rbind, kept)
+  n_theta <- nrow(context$model$THETAS)
+  n_sigma <- nrow(context$model$SIGMAS)
+  n_omega <- nrow(context$model$OMEGAS)
+  colnames(chain) <- c(
+    .nm_numbered_names("THETA", n_theta), .nm_numbered_names("SIGMA", n_sigma),
+    .nm_numbered_names("OMEGA", n_omega),
+    if (context$n_eta) unlist(lapply(seq_len(context$n_subjects), function(subject) {
+      paste0("ETA", subject, "_", seq_len(context$n_eta))
+    })) else character(), "LOG_POSTERIOR"
+  )
+  parameters <- list(
+    theta = colMeans(chain[, seq_len(n_theta), drop = FALSE]),
+    sigma = colMeans(chain[, n_theta + seq_len(n_sigma), drop = FALSE]),
+    omega = colMeans(chain[, n_theta + n_sigma + seq_len(n_omega), drop = FALSE])
+  )
+  eta_start <- n_theta + n_sigma + n_omega
+  eta <- if (context$n_eta) matrix(
+    colMeans(chain[, eta_start + seq_len(context$n_subjects * context$n_eta), drop = FALSE]),
+    context$n_subjects, context$n_eta, byrow = TRUE
+  ) else matrix(numeric(), context$n_subjects, 0L)
+  final_state <- list(parameters = parameters, eta = eta)
+  final_objective <- -2 * log_posterior(final_state)
+  modes <- lapply(seq_len(context$n_subjects), function(subject) {
+    list(par = eta[subject, ], convergence = 0L, jitter = 0)
+  })
+  optimizer <- list(
+    convergence = 0L, message = "Bayesian sampling completed",
+    counts = c(`function` = total_iterations, gradient = NA_integer_),
+    iterations = total_iterations, objective_evaluations = total_iterations
+  )
+  fit <- .nm_fit_result(
+    context, "BAYES", parameters, final_objective, modes, optimizer,
+    diagnostics = list(
+      outer_acceptance = accepted_outer / max(attempted_outer, 1L),
+      eta_acceptance = accepted_eta / max(attempted_eta, 1L),
+      n_burn = n_burn, n_sample = n_sample, n_thin = n_thin,
+      seed = seed, final_step_scale = step_scale
+    )
+  )
+  fit$chain <- chain
+  population_names <- .nm_parameter_names(
+    parameters$theta, parameters$sigma, parameters$omega
+  )
+  population_chain <- chain[, population_names, drop = FALSE]
+  population_covariance <- if (nrow(population_chain) > 1L) {
+    stats::cov(population_chain)
+  } else {
+    matrix(NA_real_, ncol(population_chain), ncol(population_chain),
+           dimnames = list(population_names, population_names))
+  }
+  population_sd <- apply(population_chain, 2, stats::sd)
+  population_correlation <- population_covariance / outer(population_sd, population_sd)
+  diag(population_correlation) <- 1
+  fit$posterior <- list(
+    mean = colMeans(chain),
+    sd = apply(chain, 2, stats::sd),
+    quantile = apply(chain, 2, stats::quantile, probs = c(0.025, 0.5, 0.975)),
+    population = list(
+      mean = colMeans(population_chain), sd = population_sd,
+      quantile = apply(
+        population_chain, 2, stats::quantile, probs = c(0.025, 0.5, 0.975)
+      ),
+      covariance = population_covariance,
+      correlation = population_correlation
+    )
+  )
+  fit
+}
+
+.nm_est_stochastic <- function(context, map, method, maxit, eta_maxit,
+                               tolerance, trace, print_every = 0L,
+                               optimizer_backend = "auto", ...) {
+  controls <- list(...)
+  if (method == "ITS") {
+    return(.nm_est_its(context, map, maxit, eta_maxit, tolerance, trace,
+                       print_every, optimizer_backend))
+  }
+  if (method == "IMP") {
+    return(do.call(.nm_est_imp, c(list(
+      context = context, map = map, maxit = maxit, eta_maxit = eta_maxit,
+      tolerance = tolerance, trace = trace, print_every = print_every,
+      optimizer_backend = optimizer_backend
+    ), controls)))
+  }
+  if (method == "SAEM") {
+    return(do.call(.nm_est_saem, c(list(
+      context = context, map = map, maxit = maxit,
+      tolerance = tolerance, trace = trace, print_every = print_every,
+      optimizer_backend = optimizer_backend
+    ), controls)))
+  }
+  if (method == "BAYES") {
+    return(do.call(.nm_est_bayes, c(list(
+      context = context, map = map, tolerance = tolerance,
+      print_every = print_every
+    ), controls)))
+  }
+  .nm_stop("Unknown stochastic estimation method: ", method)
+}

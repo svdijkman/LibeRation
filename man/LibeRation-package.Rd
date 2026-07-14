@@ -4,71 +4,9 @@
 \name{LibeRation-package}
 \alias{LibeRation}
 \alias{LibeRation-package}
-\title{LibeRation: NONMEM-Style Nonlinear Mixed-Effects Modelling}
+\title{LibeRation: population PK/PD modelling with a C++ runtime}
 \description{
-LibeRation fits population PK/PD models with FO, FOCE, FOCEI, SAEM,
-Laplace, IMP, and full Bayesian MCMC. Models follow NONMEM conventions
-(ADVAN/TRANS, THETA/OMEGA/SIGMA, $PK/$ERROR). C++ PK solvers and
-LibeRtAD-powered gradients are used when available.
-}
-\section{Core workflow}{
-
-\itemize{
-\item Build or import a model: \code{\link[=nm_model]{nm_model()}}, \code{\link[=nm_read_nonmem]{nm_read_nonmem()}}, \code{\link[=nm_ctl_template]{nm_ctl_template()}}
-\item Load data: \code{\link[=nm_dataset]{nm_dataset()}}
-\item Estimate: \code{\link[=nm_est]{nm_est()}}
-\item Goodness-of-fit: \code{\link[=predict]{predict()}}, \code{\link[=residuals]{residuals()}}, \code{\link[=nm_etab]{nm_etab()}}, \code{\link[=nm_add_cwres]{nm_add_cwres()}}
-\item Inference: \code{\link[=nm_cov_step]{nm_cov_step()}}, \code{\link[=nm_fit_standard_errors]{nm_fit_standard_errors()}}, \code{\link[=nm_bootstrap_se]{nm_bootstrap_se()}}
-}
-}
-
-\section{Project workspace (Pirana-style)}{
-
-\itemize{
-\item \code{\link[=nm_workspace_init]{nm_workspace_init()}}, \code{\link[=nm_workspace_create_project]{nm_workspace_create_project()}},
-\code{\link[=nm_workspace_new_version]{nm_workspace_new_version()}}, \code{\link[=nm_workspace_save_run]{nm_workspace_save_run()}}
-\item GUI: \code{\link[=liberation_shiny]{liberation_shiny()}}
-}
-}
-
-\section{Synthetic examples}{
-
-\itemize{
-\item \code{\link[=nm_synthetic_catalog]{nm_synthetic_catalog()}}, \code{\link[=nm_synthetic_theo]{nm_synthetic_theo()}}, \code{\link[=nm_synthetic_dataset]{nm_synthetic_dataset()}}
-}
-}
-
-\section{Background jobs}{
-
-\itemize{
-\item \code{\link[=nm_job_submit]{nm_job_submit()}}, \code{\link[=nm_job_status]{nm_job_status()}}, \code{\link[=nm_job_result]{nm_job_result()}} (requires \strong{callr})
-\item Remote clusters via \strong{LibeRties}: \code{\link[=nm_remote_server_add]{nm_remote_server_add()}},
-\code{\link[=nm_remote_job_list]{nm_remote_job_list()}}, \code{nm_job_submit(..., server = )}
-}
-}
-
-\section{Diagnostics (0.4)}{
-
-\itemize{
-\item VPC / pcVPC: \code{\link[=nm_vpc]{nm_vpc()}}, \code{\link[=nm_pcvpc]{nm_pcvpc()}}, \code{\link[=nm_vpc_plot]{nm_vpc_plot()}}
-\item Stepwise covariate modelling: \code{\link[=nm_scm]{nm_scm()}}, \code{\link[=nm_forest_plot]{nm_forest_plot()}}
-\item Likelihood profiling: \code{\link[=nm_profile_likelihood]{nm_profile_likelihood()}}
-\item Engine QA: \code{\link[=nm_check_pk_engines]{nm_check_pk_engines()}}, \code{\link[=nm_time_profile]{nm_time_profile()}}
-}
-}
-
-\section{Package options}{
-
-\itemize{
-\item \code{LibeRation.workspace} — workspace root directory
-\item \code{LibeRation.job_dir} — async job storage directory
-\item \code{LibeRation.profile} — enable estimation profiling
-\item \verb{LibeRtAD.*} — passed through to the AD backend (see \strong{LibeRtAD})
-}
-}
-
-\seealso{
-Package \strong{LibeRtAD} for the automatic differentiation engine.
+NONMEM-compatible population PK/PD model specification, simulation, estimation, diagnostics, and graphical workflow management with one C++ numerical runtime. Implements ADVAN1-4, ADVAN6, ADVAN11-13, arbitrary linear matrix propagation, analytical and nonlinear periodic steady state, exact automatic differentiation, eight population estimation methods, advanced likelihoods, stochastic simulation, diagnostics, and versioned projects. Models use the established LibeRation R syntax or the restricted C++ expression form.
 }
 \author{
 \strong{Maintainer}: Sven C. van Dijkman \email{svdijkman@users.noreply.github.com}
@@ -79,3 +17,4 @@ Authors:
 }
 
 }
+\keyword{internal}
