@@ -22,10 +22,13 @@ prefers a well-conditioned R matrix and falls back to sandwich or S.}
 
 \item{tolerance}{Positive-definite regularization tolerance.}
 
-\item{samples}{Importance samples used for IMP/SAEM marginal information.
+\item{samples}{Target integration budget for IMP/SAEM marginal information.
+Low-dimensional ETA integrals use a tensor Gauss--Hermite design near this
+budget; higher-dimensional integrals use this many random-normal samples.
 The default reuses the IMP fit sample count or uses 200 for SAEM.}
 
-\item{seed}{Common-random-number seed used for IMP/SAEM information.}
+\item{seed}{Common-random-number seed used by the random-normal fallback for
+IMP/SAEM information.}
 
 \item{eta_maxit}{Maximum conditional ETA iterations for IMP/SAEM information.}
 }

@@ -59,11 +59,13 @@ sandwich (`"sandwich"`). `"r"` and `"s"` are accepted aliases.}
 \item{covariance_tolerance}{Positive-definite regularization tolerance for
 the covariance step.}
 
-\item{covariance_samples}{Importance samples for an IMP or SAEM covariance
-step. The default reuses the IMP sample count or uses 200 for SAEM.}
+\item{covariance_samples}{Target integration budget for an IMP or SAEM
+covariance step. Low-dimensional ETA integrals use tensor Gauss--Hermite
+quadrature near this budget; higher-dimensional integrals use random-normal
+importance samples. The default reuses the IMP count or uses 200 for SAEM.}
 
-\item{covariance_seed}{Common-random-number seed for an IMP or SAEM
-covariance step. The default reuses the estimation seed.}
+\item{covariance_seed}{Common-random-number seed for the random-normal
+covariance fallback. The default reuses the estimation seed.}
 
 \item{...}{Method-specific controls.}
 }

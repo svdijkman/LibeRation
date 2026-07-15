@@ -19,3 +19,7 @@ A workspace stores serializable model versions, their runs, and saved
 diagnostics. Compiled external pointers are deliberately excluded and rebuilt
 when a model version or run is opened.
 }
+\examples{
+workspace <- nm_workspace(tempfile("liber-workspace-"))
+workspace
+}

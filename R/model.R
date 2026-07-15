@@ -314,6 +314,17 @@
 #' @param LAYOUT Optional graphical layout, stored separately from `GRAPH`.
 #' @param LANGUAGE Model source language (`R` or restricted `C++`).
 #' @return A serializable `nm_model`.
+#' @examples
+#' model <- nm_model(
+#'   INPUT = c("ID", "TIME", "EVID", "AMT", "CMT", "DV", "MDV"),
+#'   ADVAN = 1,
+#'   PRED = "CL=THETA(1)*exp(ETA(1)); V=THETA(2); S1=V",
+#'   ERROR = "Y=F*(1+ERR(1))",
+#'   THETAS = data.frame(THETA = 1:2, Value = c(2, 20)),
+#'   OMEGAS = data.frame(OMEGA = 1, Value = 0.1),
+#'   SIGMAS = data.frame(SIGMA = 1, Value = 0.1)
+#' )
+#' model
 #' @export
 nm_model <- function(INPUT,
                      ADVAN = 2L,

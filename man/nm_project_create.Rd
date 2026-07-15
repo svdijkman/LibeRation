@@ -21,3 +21,7 @@ Project metadata.
 \description{
 Create a project in a LibeRation workspace
 }
+\examples{
+workspace <- nm_workspace(tempfile("liber-workspace-"))
+nm_project_create(workspace, "Example project")
+}

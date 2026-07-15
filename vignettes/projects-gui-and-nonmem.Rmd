@@ -1,0 +1,147 @@
+---
+title: "Projects, graphical workflow, and NONMEM interoperability"
+author: "Sven C. van Dijkman"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Projects, graphical workflow, and NONMEM interoperability}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(collapse = TRUE, comment = "#>")
+```
+
+## Workspace hierarchy
+
+LibeRation persists work as projects containing named model versions. Each
+model version owns numbered estimation or simulation runs, and estimation
+runs can own saved GOF, VPC, NPDE, NPC, and covariance results.
+
+```{r workspace}
+library(LibeRation)
+
+workspace <- nm_workspace(tempfile("liber-workspace-"))
+project <- nm_project_create(
+  workspace,
+  name = "Oral PK development",
+  description = "Example project created from R"
+)
+nm_project_list(workspace)
+```
+
+Model and data objects are serializable. Compiled external pointers are not
+stored; they are reconstructed when a version or run is opened.
+
+```{r save-version, eval=FALSE}
+version_id <- nm_project_save(
+  workspace,
+  project$id,
+  model = model,
+  data = data,
+  label = "Mod001"
+)
+
+run_id <- nm_project_save_run(
+  workspace,
+  project$id,
+  version = version_id,
+  result = fit,
+  label = "FOCEI base model"
+)
+
+nm_project_save_diagnostics(
+  workspace,
+  project$id,
+  run_id,
+  list(gof = nm_gof(fit), vpc = nm_vpc(fit, nsim = 200))
+)
+```
+
+## Launching the GUI
+
+```{r gui, eval=FALSE}
+liber_gui()
+
+# Open an explicit workspace and preload model/data objects.
+liber_gui(
+  workspace = "D:/projects/LibeR/workspace",
+  model = model,
+  data = data
+)
+```
+
+When `workspace` is omitted, Windows uses
+`C:/Users/<username>/Documents/LibeR/workspace`; Linux and macOS use
+`~/LibeR/workspace`. Client and remote-server settings are stored in user data
+locations rather than the installed package directory, so reinstalling the
+package does not erase them.
+
+The left panel creates projects and model versions and opens estimation,
+simulation, diagnostic, and comparison dialogs. The centre panel shows code,
+data, run information, covariance, GOF, and generated predictive diagnostics.
+The Jobs tab reconciles persistent local or remote queue states with model
+runs.
+
+## Local and remote execution
+
+With LibeRties installed, `liber_gui()` creates a persistent local queue under
+the workspace. Remote queues use the same typed job contract. A completed
+queue result is attached to its originating model version through stored queue
+and job identifiers, preventing duplicate run entries during repeated polls.
+
+See the LibeRties vignettes for service deployment, authentication, resource
+limits, cancellation, logs, and reverse-proxy guidance.
+
+## Import a NONMEM control stream
+
+The importer translates the supported semantic subset and preserves
+unsupported records in a compatibility report instead of silently discarding
+them.
+
+```{r import-control, eval=FALSE}
+control <- nm_control_read("run001.ctl", strict = FALSE)
+control$model
+control$compatibility
+
+fit <- nm_est(control$model, data, method = "FOCEI")
+```
+
+Supported records include `$INPUT`, `$DATA`, `$SUBROUTINES`, `$MODEL`,
+`$PK`/`$PRED`, `$DES`, `$ERROR`, `$THETA`, diagonal or block `$OMEGA`,
+`$SIGMA`, `$ESTIMATION`, `$COVARIANCE`, and `$TABLE`.
+
+## Write a control stream
+
+```{r export-control, eval=FALSE}
+text <- nm_control_write(
+  model,
+  data = "theo.csv IGNORE=@",
+  estimation = "METHOD=1 INTERACTION MAXEVAL=9999 PRINT=10",
+  covariance = "UNCONDITIONAL"
+)
+cat(text)
+
+nm_control_write(model, file = "exported.ctl", data = "theo.csv")
+```
+
+Round-tripping means that a supported control stream can be imported into the
+structured LibeRation representation, edited or run, and exported again while
+retaining preserved unsupported text and an explicit compatibility report.
+Numerical equivalence should still be checked for the particular model,
+dataset, estimation options, and NONMEM version.
+
+## Reports
+
+`nm_report()` creates a deterministic PDF through base R graphics and a JSON
+manifest containing numerical summaries and provenance.
+
+```{r report, eval=FALSE}
+report <- nm_report(
+  fit,
+  file = "run001-report.pdf",
+  sections = c("summary", "parameters", "gof", "eta", "vpc"),
+  vpc = vpc,
+  manifest = TRUE
+)
+```

@@ -723,12 +723,24 @@
           evaluator$noninteraction_tape$pointer
       })
       if (approximation %in% c("foce", "focei", "laplace")) {
-        invisible(lapply(context$subjects, function(evaluator) {
+        curvature_anchors <- if (approximation == "laplace" && context$n_eta) {
+          initial_modes <- .nm_subject_modes(
+            context, parameters, maxit = eta_maxit, tolerance = tolerance,
+            interaction = TRUE, exact_hessian = TRUE
+          )
+          if (any(vapply(initial_modes, `[[`, integer(1), "convergence") != 0L)) {
+            .nm_stop("Initial conditional modes did not converge for the compiled Laplace objective.")
+          }
+          lapply(initial_modes, `[[`, "par")
+        } else {
+          rep(list(rep(0, context$n_eta)), context$n_subjects)
+        }
+        invisible(Map(function(evaluator, eta) {
           evaluator$ensure_curvature_tape(
-            parameters$theta, rep(0, context$n_eta), parameters$sigma,
+            parameters$theta, eta, parameters$sigma,
             parameters$omega, approximation
           )
-        }))
+        }, context$subjects, curvature_anchors))
         curvature <- lapply(context$subjects, function(evaluator) {
           evaluator$curvature_tapes[[approximation]]$pointer
         })
@@ -812,6 +824,7 @@
   evaluations <- 0L
   gradient_evaluations <- 0L
   pending_log <- NULL
+  objective_scale <- 1
   raw <- function(parameters) {
     if (!map$in_bounds(parameters)) return(1e100)
     value <- tryCatch(
@@ -848,6 +861,20 @@
       error = function(error) rep(NA_real_, length(parameters))
     )
     if (length(value) != length(parameters) || any(!is.finite(value))) {
+      # L-BFGS-B evaluates the gradient at its generalized Cauchy point before
+      # line-searching back. A large likelihood gradient can put that point on
+      # a numerically invalid boundary even when the starting point is sound.
+      # Return a finite inward barrier direction there; retain the hard error
+      # for a non-finite derivative at a finite objective value.
+      point_value <- raw(parameters)
+      if (is.finite(point_value) && point_value >= 1e99) {
+        parameter_scale <- pmax(abs(map$start), 1)
+        inward <- (parameters - map$start) / parameter_scale
+        largest <- max(abs(inward))
+        if (is.finite(largest) && largest > 0) {
+          return(objective_scale * inward / largest)
+        }
+      }
       .nm_stop("The population objective gradient is not finite.")
     }
     if (!is.null(pending_log) &&
@@ -892,11 +919,18 @@
     return(result)
   }
   bounded <- any(is.finite(map$lower)) || any(is.finite(map$upper))
+  initial_value <- raw(map$start)
+  if (is.finite(initial_value) && initial_value < 1e99) {
+    objective_scale <- max(abs(initial_value), 1)
+  }
   arguments <- list(
     par = map$start, fn = safe,
     method = if (bounded) "L-BFGS-B" else if (is.function(safe_gradient) ||
       length(map$start) == 1L) "BFGS" else "Nelder-Mead",
-    control = list(maxit = as.integer(maxit), reltol = tolerance, trace = trace)
+    control = list(
+      maxit = as.integer(maxit), reltol = tolerance, trace = trace,
+      fnscale = objective_scale
+    )
   )
   if (is.function(safe_gradient)) arguments$gr <- safe_gradient
   if (bounded) {
@@ -924,6 +958,7 @@
   result$population_objective <- if (compiled) {
     .liberation_population_objective_telemetry(compiled_pointer)
   } else NULL
+  result$objective_scale <- objective_scale
   result$elapsed_seconds <- unname(proc.time()[["elapsed"]] - started)
   result
 }
@@ -1558,10 +1593,12 @@
 #'   sandwich (`"sandwich"`). `"r"` and `"s"` are accepted aliases.
 #' @param covariance_tolerance Positive-definite regularization tolerance for
 #'   the covariance step.
-#' @param covariance_samples Importance samples for an IMP or SAEM covariance
-#'   step. The default reuses the IMP sample count or uses 200 for SAEM.
-#' @param covariance_seed Common-random-number seed for an IMP or SAEM
-#'   covariance step. The default reuses the estimation seed.
+#' @param covariance_samples Target integration budget for an IMP or SAEM
+#'   covariance step. Low-dimensional ETA integrals use tensor Gauss--Hermite
+#'   quadrature near this budget; higher-dimensional integrals use random-normal
+#'   importance samples. The default reuses the IMP count or uses 200 for SAEM.
+#' @param covariance_seed Common-random-number seed for the random-normal
+#'   covariance fallback. The default reuses the estimation seed.
 #' @param ... Method-specific controls.
 #' @export
 nm_est <- function(model, data,

@@ -143,6 +143,9 @@
 #'
 #' @param path Workspace directory.
 #' @return An `nm_workspace` object.
+#' @examples
+#' workspace <- nm_workspace(tempfile("liber-workspace-"))
+#' workspace
 #' @export
 nm_workspace <- function(path = file.path(tools::R_user_dir("LibeRation", "data"), "workspace")) {
   path <- path.expand(as.character(path))
@@ -173,6 +176,9 @@ nm_workspace <- function(path = file.path(tools::R_user_dir("LibeRation", "data"
 #' @param id Optional stable project identifier.
 #' @param description Optional project description.
 #' @return Project metadata.
+#' @examples
+#' workspace <- nm_workspace(tempfile("liber-workspace-"))
+#' nm_project_create(workspace, "Example project")
 #' @export
 nm_project_create <- function(workspace, name, id = NULL, description = NULL) {
   workspace <- if (inherits(workspace, "nm_workspace")) workspace else nm_workspace(workspace)

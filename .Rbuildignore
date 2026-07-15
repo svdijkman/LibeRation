@@ -1,2 +1,2 @@
+^\.gitignore$
 ^src/.*[.](o|obj|dll|so|dylib|a|def)$
-^TODO[.]md$

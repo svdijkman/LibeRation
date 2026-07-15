@@ -14,6 +14,25 @@ test_that("fit diagnostics expose predictions, residuals, ETAs, and shrinkage", 
   expect_s3_class(summary(fit), "summary.nm_fit")
 })
 
+test_that("GOF population and individual predictions use independent ETA values", {
+  fixture <- estimation_fixture()
+  data <- nm_dataset(fixture$data)
+  eta <- matrix(c(-0.35, 0.05, 0.4), ncol = 1L)
+  fit <- structure(list(
+    model = fixture$model, data = data,
+    theta = fixture$model$THETAS$Value,
+    omega = fixture$model$OMEGAS$Value,
+    sigma = fixture$model$SIGMAS$Value,
+    eta = eta
+  ), class = "nm_fit")
+  gof <- nm_gof(fit)
+  population <- nm_simulate(fixture$model, data, eta = matrix(0, 3L, 1L))
+  individual <- nm_simulate(fixture$model, data, eta = eta)
+  expect_equal(gof$PRED, population$IPRED)
+  expect_equal(gof$IPRED, individual$IPRED)
+  expect_gt(max(abs(gof$IPRED - gof$PRED)), 0.1)
+})
+
 test_that("OPG covariance uses exact subject score tapes", {
   fixture <- estimation_fixture()
   fixture$model$THETAS$FIX <- c(FALSE, TRUE)
@@ -96,6 +115,16 @@ test_that("IMP and SAEM covariance use marginal importance information", {
   expect_equal(imp$covariance$seed, 41L)
   expect_named(imp$covariance$se, "THETA1")
   expect_true(is.finite(imp$covariance$se[[1]]) && imp$covariance$se[[1]] > 0)
+  expect_equal(
+    imp$covariance$objective_backend, "fixed-proposal-importance-score"
+  )
+  expect_equal(imp$covariance$objective_telemetry$proposals, 3L)
+  expect_equal(imp$covariance$sampling, "tensor-gauss-hermite")
+  expect_equal(
+    imp$covariance$actual_samples,
+    imp$covariance$quadrature_order^fixture$model$n_eta
+  )
+  expect_gte(imp$covariance$objective_telemetry$parameter_evaluations, 1L)
 
   saem <- nm_est(
     fixture$model, fixture$data, method = "SAEM",
@@ -107,6 +136,45 @@ test_that("IMP and SAEM covariance use marginal importance information", {
   expect_equal(saem$covariance$status, "completed")
   expect_named(saem$covariance$rse, "THETA1")
   expect_true(is.finite(saem$covariance$rse[[1]]))
+  expect_equal(
+    saem$covariance$objective_backend, "fixed-proposal-importance-score"
+  )
+})
+
+test_that("fixed-proposal importance gradients match their marginal objective", {
+  fixture <- estimation_fixture()
+  fixture$model$THETAS$FIX <- c(FALSE, TRUE)
+  context <- LibeRation:::.nm_estimation_context(fixture$model, fixture$data)
+  map <- LibeRation:::.nm_outer_map(context$model)
+  normals <- LibeRation:::.nm_imp_normals(context, 30L, 91L)
+  objective <- LibeRation:::.nm_imp_information_objective(
+    context, map, normals, map$start, eta_maxit = 60L, tolerance = 1e-7
+  )
+  analytic <- attr(objective, "gradient")(map$start)
+  numerical <- LibeRation:::.nm_numeric_gradient(
+    objective, map$start, relative_step = 1e-5
+  )
+  expect_equal(analytic, numerical, tolerance = 2e-4)
+  scores <- attr(objective, "subject_scores")(map$start)
+  expect_equal(colSums(scores), -0.5 * analytic, tolerance = 1e-10)
+})
+
+test_that("marginal covariance designs use bounded quadrature and random fallback", {
+  low <- LibeRation:::.nm_imp_covariance_design(
+    list(n_eta = 3L, n_subjects = 2L), 200L, 17L
+  )
+  expect_equal(low$method, "tensor-gauss-hermite")
+  expect_equal(low$actual_samples, 216L)
+  expect_equal(dim(low$normals[[1L]]), c(216L, 3L))
+  expect_equal(sum(exp(attr(low$normals[[1L]], "log_measure"))), 1,
+               tolerance = 1e-12)
+
+  high <- LibeRation:::.nm_imp_covariance_design(
+    list(n_eta = 7L, n_subjects = 2L), 20L, 17L
+  )
+  expect_equal(high$method, "random-normal")
+  expect_equal(high$actual_samples, 20L)
+  expect_equal(dim(high$normals[[1L]]), c(20L, 7L))
 })
 
 test_that("Bayesian posterior uncertainty is distinct from covariance", {

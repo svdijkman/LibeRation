@@ -38,3 +38,6 @@ Shiny app object without launching it.}
 This is the interactive workbench used to manage model versions, datasets,
 simulations, estimations, diagnostics, reports, and local or remote jobs.
 }
+\examples{
+if (interactive()) liber_gui()
+}

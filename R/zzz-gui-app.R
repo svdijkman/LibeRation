@@ -15,6 +15,8 @@
 #' @param launch.browser Passed to [shiny::runApp()]. Use `NULL` to return the
 #'   Shiny app object without launching it.
 #' @param ... Additional arguments passed to [shiny::runApp()].
+#' @examples
+#' if (interactive()) liber_gui()
 #' @export
 liber_gui <- function(model = NULL, data = NULL, queue = NULL,
                       workspace = NULL, project = NULL,

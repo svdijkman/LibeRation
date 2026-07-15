@@ -33,6 +33,10 @@
     min_eigenvalue = if (length(covariance$eigenvalues)) min(covariance$eigenvalues) else NULL,
     max_eigenvalue = if (length(covariance$eigenvalues)) max(covariance$eigenvalues) else NULL,
     samples = covariance$samples %||% NULL,
+    actual_samples = covariance$actual_samples %||% NULL,
+    sampling = covariance$sampling %||% NULL,
+    quadrature_order = covariance$quadrature_order %||% NULL,
+    objective_backend = covariance$objective_backend %||% NULL,
     seed = covariance$seed %||% NULL,
     covariance = .liber_gui_matrix_rows(covariance$covariance),
     correlation = .liber_gui_matrix_rows(covariance$correlation)
@@ -345,6 +349,10 @@
         if (identical(covariance$status, "failed")) "Failed" else "Completed",
       `Covariance method` = if (is.null(covariance)) "" else
         toupper(as.character(covariance$type %||% "")),
+      `Covariance integration` = if (is.null(covariance)) "" else
+        as.character(covariance$sampling %||% ""),
+      `Covariance integration points` = if (is.null(covariance)) "" else
+        covariance$actual_samples %||% "",
       `Covariance step time` = if (is.null(covariance)) "" else
         .liber_gui_duration(timing$covariance_seconds),
       `Total estimation time` = .liber_gui_duration(timing$total_seconds),
@@ -780,12 +788,16 @@ renderLiberWorkbench <- function(expr, env = parent.frame(), quoted = FALSE) {
     )
   })
   design <- nm_dataset(do.call(rbind, blocks))
-  predicted <- nm_simulate(model, design)
-  set.seed(as.integer(seed))
-  observed <- predicted$EVID == 0L & is.finite(predicted$IPRED)
-  design$DV[observed] <- pmax(
-    0, predicted$IPRED[observed] * exp(stats::rnorm(sum(observed), 0, 0.08))
+  simulated <- nm_simulate(
+    model, design, random_effects = TRUE, residual = TRUE,
+    seed = as.integer(seed)
   )
+  design$DV <- simulated$DV
+  eta_columns <- grep("^ETA[0-9]+$", names(simulated), value = TRUE)
+  if (length(eta_columns)) {
+    truth <- unique(simulated[c("ID", ".ID_INDEX", eta_columns)])
+    attr(design, "simulation_eta") <- as.data.frame(truth)
+  }
   attr(design, "name") <- switch(
     as.character(example), sparse = "Sparse oral PK example",
     rich = "Rich oral PK example", "Theophylline-style example"

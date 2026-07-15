@@ -38,9 +38,12 @@ LinkingTo:
     BH,
     LibeRtAD
 Suggests:
-    testthat (>= 3.0.0),
+    callr,
+    knitr,
     LibeRties (>= 0.6.0),
-    callr
+    rmarkdown,
+    testthat (>= 3.0.0)
+VignetteBuilder: knitr
 SystemRequirements: C++17
 Config/testthat/edition: 3
 Config/roxygen2/version: 8.0.0

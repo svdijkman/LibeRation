@@ -94,6 +94,33 @@ test_that("conditional methods use exact ETA modes and curvature", {
   }
 })
 
+test_that("Laplace curvature tapes are anchored at conditional modes", {
+  model <- LibeRation:::.liber_model_template(2L, trans = 2L)
+  data <- LibeRation:::.liber_builtin_dataset(
+    model, "theophylline", n_subjects = 3L, seed = 1L
+  )
+  context <- LibeRation:::.nm_estimation_context(model, data)
+  map <- LibeRation:::.nm_outer_map(context$model)
+
+  expect_error(
+    context$subjects[[2L]]$ensure_curvature_tape(
+      model$THETAS$Value, rep(0, context$n_eta), model$SIGMAS$Value,
+      model$OMEGAS$Value, "laplace"
+    ),
+    "not positive definite"
+  )
+  compiled <- LibeRation:::.nm_cpp_population_objective(
+    context, map, "laplace", eta_maxit = 100L, tolerance = 1e-7
+  )
+  expect_false(is.null(compiled$pointer), info = compiled$reason)
+  fit <- nm_est(
+    model, data, method = "LAPLACE", maxit = 2L,
+    eta_maxit = 100L, tolerance = 1e-7
+  )
+  expect_true(is.finite(fit$objective))
+  expect_true(all(fit$diagnostics$eta_convergence == 0L))
+})
+
 test_that("FOCE freezes residual variance at ETA zero while FOCEI interacts", {
   fixture <- estimation_fixture()
   fixture$model$ERROR <- "Y=F+F*ERR(1)"
@@ -167,6 +194,21 @@ test_that("SAEM and BAYES return reproducible stochastic diagnostics", {
   expect_true(all(is.finite(bayes$posterior$mean)))
   expect_true(bayes$diagnostics$eta_acceptance >= 0 &&
                 bayes$diagnostics$eta_acceptance <= 1)
+})
+
+test_that("SAEM scales steep M-steps before L-BFGS-B boundary searches", {
+  model <- LibeRation:::.liber_model_template(2L, trans = 2L)
+  data <- LibeRation:::.liber_builtin_dataset(
+    model, "theophylline", n_subjects = 3L, seed = 1L
+  )
+  fit <- nm_est(
+    model, data, method = "SAEM", n_iter = 3L, burn = 1L,
+    mcmc_steps = 1L, mstep_maxit = 3L, seed = 20260713L
+  )
+  expect_true(is.finite(fit$objective))
+  expect_true(all(is.finite(fit$theta)))
+  expect_true(all(is.finite(fit$omega)))
+  expect_true(all(is.finite(fit$sigma)))
 })
 
 test_that("native population optimizer and structural tape pool report telemetry", {

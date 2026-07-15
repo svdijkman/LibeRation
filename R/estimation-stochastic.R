@@ -3,6 +3,11 @@
   maximum + log(mean(exp(values - maximum)))
 }
 
+.nm_log_sum_exp <- function(values) {
+  maximum <- max(values)
+  maximum + log(sum(exp(values - maximum)))
+}
+
 .nm_imp_normals <- function(context, n_imp, seed) {
   n_imp <- as.integer(n_imp)
   seed <- as.integer(seed)
@@ -22,6 +27,50 @@
   lapply(seq_len(context$n_subjects), function(subject) {
     matrix(stats::rnorm(n_imp * context$n_eta), n_imp, context$n_eta)
   })
+}
+
+.nm_imp_covariance_design <- function(context, samples, seed) {
+  samples <- as.integer(samples)
+  dimension <- as.integer(context$n_eta)
+  if (!dimension) {
+    normals <- rep(list(matrix(numeric(), 1L, 0L)), context$n_subjects)
+    return(list(
+      normals = normals, method = "none", actual_samples = 1L,
+      quadrature_order = 0L
+    ))
+  }
+  order <- min(15L, max(3L, as.integer(ceiling(samples^(1 / dimension)))))
+  nodes_required <- order^dimension
+  use_quadrature <- nodes_required <= max(4L * samples, 1024L)
+  if (!use_quadrature) {
+    return(list(
+      normals = .nm_imp_normals(context, samples, seed),
+      method = "random-normal", actual_samples = samples,
+      quadrature_order = NA_integer_
+    ))
+  }
+  jacobi <- matrix(0, order, order)
+  if (order > 1L) {
+    off_diagonal <- sqrt(seq_len(order - 1L))
+    jacobi[cbind(seq_len(order - 1L), 2:order)] <- off_diagonal
+    jacobi[cbind(2:order, seq_len(order - 1L))] <- off_diagonal
+  }
+  decomposition <- eigen(jacobi, symmetric = TRUE)
+  nodes <- decomposition$values
+  weights <- decomposition$vectors[1L, ]^2
+  grid <- expand.grid(
+    rep(list(seq_len(order)), dimension), KEEP.OUT.ATTRS = FALSE
+  )
+  normals <- do.call(cbind, lapply(grid, function(index) nodes[index]))
+  measure <- apply(
+    do.call(cbind, lapply(grid, function(index) weights[index])), 1L, prod
+  )
+  attr(normals, "log_measure") <- log(measure)
+  list(
+    normals = rep(list(normals), context$n_subjects),
+    method = "tensor-gauss-hermite", actual_samples = nrow(normals),
+    quadrature_order = order
+  )
 }
 
 .nm_est_its <- function(context, map, maxit, eta_maxit, tolerance, trace,
@@ -83,56 +132,160 @@
   )$value
 }
 
+.nm_imp_subject_proposal <- function(evaluator, parameters, normals,
+                                     eta_maxit, tolerance) {
+  mode <- evaluator$eta_mode(
+    parameters$theta, parameters$sigma, parameters$omega,
+    maxit = eta_maxit, tolerance = tolerance
+  )
+  if (mode$convergence != 0L) {
+    return(list(valid = FALSE, mode = mode, eta = NULL, log_proposal = NULL))
+  }
+  dimension <- length(mode$par)
+  if (!dimension) {
+    return(list(
+      valid = TRUE, mode = mode, eta = matrix(numeric(), 1L, 0L),
+      log_proposal = 0, log_measure = 0, sampling = "none"
+    ))
+  }
+  covariance <- 2 * solve(mode$hessian)
+  covariance <- .nm_positive_definite(covariance, "IMP proposal covariance")$matrix
+  root <- t(chol(covariance))
+  logdet <- as.numeric(determinant(covariance, logarithm = TRUE)$modulus)
+  z <- normals
+  log_measure <- attr(normals, "log_measure", exact = TRUE)
+  sampling <- if (is.null(log_measure)) "random-normal" else "tensor-gauss-hermite"
+  if (is.null(log_measure)) log_measure <- rep(-log(nrow(z)), nrow(z))
+  list(
+    valid = TRUE, mode = mode,
+    eta = sweep(z %*% t(root), 2L, mode$par, `+`),
+    log_proposal = -0.5 * (
+      dimension * log(2 * pi) + logdet + rowSums(z^2)
+    ),
+    log_measure = as.numeric(log_measure), sampling = sampling
+  )
+}
+
+.nm_imp_subject_from_proposal <- function(evaluator, parameters, proposal,
+                                          gradient = TRUE) {
+  if (!isTRUE(proposal$valid)) {
+    return(list(value = Inf, native_gradient = NULL, mode = proposal$mode))
+  }
+  dimension <- ncol(proposal$eta)
+  if (!dimension) {
+    evaluated <- evaluator$objective(
+      parameters$theta, numeric(), parameters$sigma, parameters$omega,
+      gradient = gradient
+    )
+    return(list(
+      value = evaluated$value,
+      native_gradient = if (isTRUE(gradient)) as.numeric(evaluated$gradient) else NULL,
+      mode = proposal$mode, effective_sample_size = 1
+    ))
+  }
+  evaluated <- if (isTRUE(gradient)) {
+    evaluator$objective_eta_batch(
+      parameters$theta, proposal$eta, parameters$sigma, parameters$omega
+    )
+  } else list(value = evaluator$objective_eta_values(
+    parameters$theta, proposal$eta, parameters$sigma, parameters$omega
+  ))
+  log_weight <- -0.5 * evaluated$value - proposal$log_proposal
+  log_integrand <- log_weight + proposal$log_measure
+  value <- -2 * .nm_log_sum_exp(log_integrand)
+  native_gradient <- NULL
+  effective_sample_size <- NA_real_
+  if (isTRUE(gradient)) {
+    shifted <- log_integrand - max(log_integrand)
+    weights <- exp(shifted) / sum(exp(shifted))
+    native_gradient <- colSums(evaluated$gradient * weights)
+    effective_sample_size <- 1 / sum(weights^2)
+  }
+  list(
+    value = value, native_gradient = native_gradient, mode = proposal$mode,
+    effective_sample_size = effective_sample_size
+  )
+}
+
 .nm_imp_subject_state <- function(evaluator, parameters, normals,
                                   eta_maxit, tolerance, gradient = TRUE) {
-    mode <- evaluator$eta_mode(
-      parameters$theta, parameters$sigma, parameters$omega,
-      maxit = eta_maxit, tolerance = tolerance
-    )
-    if (mode$convergence != 0L) {
-      return(list(value = Inf, native_gradient = NULL, mode = mode))
-    }
-    dimension <- length(mode$par)
-    if (!dimension) {
-      evaluated <- evaluator$objective(
-        parameters$theta, numeric(), parameters$sigma, parameters$omega,
-        gradient = gradient
+  proposal <- .nm_imp_subject_proposal(
+    evaluator, parameters, normals, eta_maxit, tolerance
+  )
+  .nm_imp_subject_from_proposal(evaluator, parameters, proposal, gradient)
+}
+
+.nm_imp_prepare_proposals <- function(context, parameters, normals,
+                                      eta_maxit, tolerance) {
+  prepare_chunk <- function(evaluators, chunk_normals) {
+    lapply(seq_along(evaluators), function(subject) {
+      .nm_imp_subject_proposal(
+        evaluators[[subject]], parameters, chunk_normals[[subject]],
+        eta_maxit, tolerance
       )
-      return(list(
-        value = mode$value,
-        native_gradient = if (isTRUE(gradient)) as.numeric(evaluated$gradient) else NULL,
-        mode = mode
-      ))
-    }
-    covariance <- 2 * solve(mode$hessian)
-    covariance <- .nm_positive_definite(covariance, "IMP proposal covariance")$matrix
-    root <- t(chol(covariance))
-    logdet <- as.numeric(determinant(covariance, logarithm = TRUE)$modulus)
-    z <- normals
-    eta <- sweep(z %*% t(root), 2L, mode$par, `+`)
-    evaluated <- if (isTRUE(gradient)) {
-      evaluator$objective_eta_batch(
-        parameters$theta, eta, parameters$sigma, parameters$omega
+    })
+  }
+  if (is.null(context$parallel)) {
+    return(prepare_chunk(context$subjects, normals))
+  }
+  chunks <- context$parallel$chunks
+  normal_chunks <- lapply(chunks, function(rows) normals[rows])
+  pieces <- parallel::clusterApply(
+    context$parallel$cluster, seq_along(chunks),
+    function(index, chunks, parameters, eta_maxit, tolerance) {
+      evaluators <- get(".liber_parallel_subjects", envir = .GlobalEnv)
+      prepare <- get(".nm_imp_subject_proposal", envir = asNamespace("LibeRation"))
+      lapply(seq_along(evaluators), function(subject) {
+        prepare(
+          evaluators[[subject]], parameters, chunks[[index]][[subject]],
+          eta_maxit, tolerance
+        )
+      })
+    }, chunks = normal_chunks, parameters = parameters,
+    eta_maxit = eta_maxit, tolerance = tolerance
+  )
+  unlist(pieces, recursive = FALSE)
+}
+
+.nm_imp_evaluate_fixed <- function(context, parameters, proposals,
+                                   gradient = TRUE) {
+  evaluate_chunk <- function(evaluators, chunk_proposals) {
+    lapply(seq_along(evaluators), function(subject) {
+      .nm_imp_subject_from_proposal(
+        evaluators[[subject]], parameters, chunk_proposals[[subject]], gradient
       )
-    } else list(value = evaluator$objective_eta_values(
-      parameters$theta, eta, parameters$sigma, parameters$omega
-    ))
-    nll <- evaluated$value
-    log_proposal <- -0.5 * (
-      dimension * log(2 * pi) + logdet + rowSums(z^2)
+    })
+  }
+  if (is.null(context$parallel)) {
+    states <- evaluate_chunk(context$subjects, proposals)
+  } else {
+    chunks <- context$parallel$chunks
+    proposal_chunks <- lapply(chunks, function(rows) proposals[rows])
+    pieces <- parallel::clusterApply(
+      context$parallel$cluster, seq_along(chunks),
+      function(index, chunks, parameters, gradient) {
+        evaluators <- get(".liber_parallel_subjects", envir = .GlobalEnv)
+        evaluate <- get(
+          ".nm_imp_subject_from_proposal", envir = asNamespace("LibeRation")
+        )
+        lapply(seq_along(evaluators), function(subject) {
+          evaluate(
+            evaluators[[subject]], parameters, chunks[[index]][[subject]], gradient
+          )
+        })
+      }, chunks = proposal_chunks, parameters = parameters, gradient = gradient
     )
-    log_weight <- -0.5 * nll - log_proposal
-    value <- -2 * .nm_log_mean_exp(log_weight)
-    native_gradient <- NULL
-    if (isTRUE(gradient)) {
-      shifted <- log_weight - max(log_weight)
-      weights <- exp(shifted) / sum(exp(shifted))
-      native_gradient <- colSums(evaluated$gradient * weights)
-    }
-    list(
-      value = value, native_gradient = native_gradient, mode = mode,
-      effective_sample_size = if (isTRUE(gradient)) 1 / sum(weights^2) else NA_real_
-    )
+    states <- unlist(pieces, recursive = FALSE)
+  }
+  value <- sum(vapply(states, `[[`, numeric(1), "value"))
+  if (!isTRUE(gradient)) return(list(value = value, states = states))
+  gradients <- lapply(states, `[[`, "native_gradient")
+  if (any(vapply(gradients, is.null, logical(1)))) {
+    return(list(value = value, native_gradient = NULL, states = states))
+  }
+  list(
+    value = value, native_gradient = Reduce(`+`, gradients), states = states
+  )
 }
 
 .nm_imp_objective <- function(context, parameters, normals,

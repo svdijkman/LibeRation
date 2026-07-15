@@ -195,8 +195,82 @@ nm_etab <- function(fit) {
   jacobian
 }
 
+.nm_imp_information_objective <- function(context, map, normals, anchor,
+                                          eta_maxit, tolerance) {
+  anchor <- as.numeric(anchor)
+  parameters <- map$decode(anchor)
+  proposal_started <- proc.time()[["elapsed"]]
+  proposals <- .nm_imp_prepare_proposals(
+    context, parameters, normals, eta_maxit, tolerance
+  )
+  if (any(!vapply(proposals, function(proposal) isTRUE(proposal$valid), logical(1)))) {
+    .nm_stop("Unable to construct finite importance proposals for covariance.")
+  }
+  telemetry <- new.env(parent = emptyenv())
+  telemetry$proposal_seconds <- unname(proc.time()[["elapsed"]] - proposal_started)
+  telemetry$parameter_evaluations <- 0L
+  telemetry$cache_hits <- 0L
+  telemetry$sample_evaluations <- 0
+  cache <- new.env(parent = emptyenv())
+  cache$key <- NULL
+  evaluate <- function(outer) {
+    outer <- as.numeric(outer)
+    if (!is.null(cache$key) && identical(cache$key, outer)) {
+      telemetry$cache_hits <- telemetry$cache_hits + 1L
+      return(cache$result)
+    }
+    candidate <- map$decode(outer)
+    evaluated <- .nm_imp_evaluate_fixed(
+      context, candidate, proposals, gradient = TRUE
+    )
+    native <- lapply(evaluated$states, `[[`, "native_gradient")
+    if (any(vapply(native, is.null, logical(1)))) {
+      .nm_stop("The fixed-proposal importance gradient is unavailable.")
+    }
+    native <- do.call(rbind, native)
+    n_theta <- length(candidate$theta)
+    n_sigma <- length(candidate$sigma)
+    n_omega <- length(candidate$omega)
+    population_positions <- c(
+      seq_len(n_theta), n_theta + context$n_eta + seq_len(n_sigma),
+      n_theta + context$n_eta + n_sigma + seq_len(n_omega)
+    )
+    transform <- map$jacobian(candidate)
+    subject_gradient <- native[, population_positions, drop = FALSE] %*% transform
+    prior_gradient <- as.vector(
+      .nm_prior_nll_native_gradient(context$model, candidate) %*% transform
+    )
+    result <- list(
+      value = evaluated$value + .nm_prior_nll(context$model, candidate),
+      gradient = colSums(subject_gradient) + prior_gradient,
+      scores = -0.5 * subject_gradient
+    )
+    telemetry$parameter_evaluations <- telemetry$parameter_evaluations + 1L
+    telemetry$sample_evaluations <- telemetry$sample_evaluations + sum(vapply(
+      proposals, function(proposal) nrow(proposal$eta), integer(1)
+    ))
+    cache$key <- outer
+    cache$result <- result
+    result
+  }
+  objective <- function(outer) evaluate(outer)$value
+  attr(objective, "gradient") <- function(outer) evaluate(outer)$gradient
+  attr(objective, "subject_scores") <- function(outer) evaluate(outer)$scores
+  attr(objective, "objective_backend") <- "fixed-proposal-importance-score"
+  attr(objective, "telemetry") <- function() list(
+    proposal_seconds = telemetry$proposal_seconds,
+    parameter_evaluations = telemetry$parameter_evaluations,
+    cache_hits = telemetry$cache_hits,
+    sample_evaluations = telemetry$sample_evaluations,
+    proposals = length(proposals), samples = nrow(proposals[[1L]]$eta),
+    sampling = proposals[[1L]]$sampling %||% "unknown"
+  )
+  objective
+}
+
 .nm_cov_objective <- function(fit, context, map, normals = NULL,
-                              eta_maxit = 100L, tolerance = 1e-7) {
+                              anchor = NULL, eta_maxit = 100L,
+                              tolerance = 1e-7) {
   method <- fit$method
   deterministic <- switch(
     method, FO = "fo", FOCE = "foce", FOCEI = "focei",
@@ -225,12 +299,9 @@ nm_etab <- function(fit) {
     return(result)
   }
   if (method %in% c("IMP", "SAEM")) {
-    return(function(outer) {
-      .nm_imp_objective(
-        context, map$decode(outer), normals,
-        eta_maxit = eta_maxit, tolerance = tolerance
-      )
-    })
+    return(.nm_imp_information_objective(
+      context, map, normals, anchor %||% map$start, eta_maxit, tolerance
+    ))
   }
   approximation <- switch(
     method, FOCE = "foce", FOCEI = "focei", LAPLACE = "laplace",
@@ -357,9 +428,12 @@ nm_etab <- function(fit) {
 #'   subject-score matrix, and `sandwich` uses R-inverse S R-inverse. `auto`
 #'   prefers a well-conditioned R matrix and falls back to sandwich or S.
 #' @param tolerance Positive-definite regularization tolerance.
-#' @param samples Importance samples used for IMP/SAEM marginal information.
+#' @param samples Target integration budget for IMP/SAEM marginal information.
+#'   Low-dimensional ETA integrals use a tensor Gauss--Hermite design near this
+#'   budget; higher-dimensional integrals use this many random-normal samples.
 #'   The default reuses the IMP fit sample count or uses 200 for SAEM.
-#' @param seed Common-random-number seed used for IMP/SAEM information.
+#' @param seed Common-random-number seed used by the random-normal fallback for
+#'   IMP/SAEM information.
 #' @param eta_maxit Maximum conditional ETA iterations for IMP/SAEM information.
 #' @return Covariance, correlation, standard errors, relative standard errors,
 #'   eigenvalues, and conditioning diagnostics.
@@ -390,6 +464,7 @@ nm_cov_step <- function(fit,
   at <- map$encode(parameters)
   marginal <- fit$method %in% c("IMP", "SAEM")
   normals <- NULL
+  marginal_design <- NULL
   if (marginal) {
     samples <- as.integer(samples %||%
       if (fit$method == "IMP") fit$diagnostics$n_imp %||% 200L else 200L)
@@ -402,7 +477,8 @@ nm_cov_step <- function(fit,
     if (length(eta_maxit) != 1L || is.na(eta_maxit) || eta_maxit < 1L) {
       .nm_stop("`eta_maxit` must be one positive integer.")
     }
-    normals <- .nm_imp_normals(context, samples, seed)
+    marginal_design <- .nm_imp_covariance_design(context, samples, seed)
+    normals <- marginal_design$normals
   }
   if (!length(at)) {
     empty <- matrix(numeric(), 0L, 0L, dimnames = list(character(), character()))
@@ -417,11 +493,21 @@ nm_cov_step <- function(fit,
   bread <- meat <- scores <- NULL
   bread_compiled <- NULL
   bread_error <- meat_error <- NULL
-  if (need_bread) {
+  objective <- NULL
+  if (marginal && (need_bread || need_meat)) {
     objective <- .nm_cov_objective(
-      fit, context, map, normals = normals, eta_maxit = eta_maxit %||% 100L,
-      tolerance = fit$diagnostics$tolerance %||% 1e-7
+      fit, context, map, normals = normals, anchor = at,
+      eta_maxit = eta_maxit, tolerance = fit$diagnostics$tolerance %||% 1e-7
     )
+  }
+  if (need_bread) {
+    if (is.null(objective)) {
+      objective <- .nm_cov_objective(
+        fit, context, map, normals = normals, anchor = at,
+        eta_maxit = eta_maxit %||% 100L,
+        tolerance = fit$diagnostics$tolerance %||% 1e-7
+      )
+    }
     bread_compiled <- attr(objective, "compiled_objective", exact = TRUE)
     bread <- tryCatch(
       0.5 * stats::optimHess(
@@ -441,16 +527,11 @@ nm_cov_step <- function(fit,
     scores <- tryCatch({
       result <- matrix(0, context$n_subjects, length(at))
       if (marginal) {
-      for (subject in seq_len(context$n_subjects)) {
-        subject_objective <- function(outer) {
-          .nm_imp_subject_objective(
-            context$subjects[[subject]], map$decode(outer), normals[[subject]],
-            eta_maxit = eta_maxit,
-            tolerance = fit$diagnostics$tolerance %||% 1e-7
-          )
+        subject_scores <- attr(objective, "subject_scores", exact = TRUE)
+        if (!is.function(subject_scores)) {
+          .nm_stop("Marginal subject scores are unavailable.")
         }
-          result[subject, ] <- -0.5 * .nm_numeric_gradient(subject_objective, at)
-        }
+        result <- subject_scores(at)
       } else {
         result <- .nm_deterministic_subject_scores(
           fit, context, map, parameters
@@ -523,13 +604,21 @@ nm_cov_step <- function(fit,
     bread_regularization = bread_info$regularization %||% NA_real_,
     meat_regularization = meat_info$regularization %||% NA_real_,
     fallback = if (requested_type == "auto") type else NULL,
-    objective_backend = if (!is.null(bread_compiled$pointer)) {
-      "persistent-cpp-population-objective"
-    } else "r-orchestrated-population-objective",
-    objective_telemetry = if (!is.null(bread_compiled$pointer)) {
-      .liberation_population_objective_telemetry(bread_compiled$pointer)
-    } else NULL,
+    objective_backend = attr(objective, "objective_backend", exact = TRUE) %||%
+      if (!is.null(bread_compiled$pointer)) {
+        "persistent-cpp-population-objective"
+      } else "r-orchestrated-population-objective",
+    objective_telemetry = {
+      importance_telemetry <- attr(objective, "telemetry", exact = TRUE)
+      if (is.function(importance_telemetry)) importance_telemetry()
+      else if (!is.null(bread_compiled$pointer)) {
+        .liberation_population_objective_telemetry(bread_compiled$pointer)
+      } else NULL
+    },
     samples = if (marginal) samples else NULL,
+    actual_samples = if (marginal) marginal_design$actual_samples else NULL,
+    sampling = if (marginal) marginal_design$method else NULL,
+    quadrature_order = if (marginal) marginal_design$quadrature_order else NULL,
     seed = if (marginal) seed else NULL
   ), class = "nm_covariance")
 }

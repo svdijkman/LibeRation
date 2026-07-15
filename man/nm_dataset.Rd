@@ -17,3 +17,10 @@ An `nm_dataset` data frame with stable event ordering.
 \description{
 Normalize a NONMEM event dataset
 }
+\examples{
+events <- data.frame(
+  ID = 1, TIME = c(0, 1, 2), EVID = c(1, 0, 0),
+  AMT = c(100, 0, 0), DV = c(NA, 4.2, 3.1), MDV = c(1, 0, 0)
+)
+nm_dataset(events)
+}

@@ -22,6 +22,10 @@ test_that("legacy workbench layout and workflow controls are present", {
     system.file("htmlwidgets", "liberWorkbench.js", package = "LibeRation"),
     warn = FALSE
   ), collapse = "\n")
+  style <- paste(readLines(
+    system.file("htmlwidgets", "liberWorkbench.css", package = "LibeRation"),
+    warn = FALSE
+  ), collapse = "\n")
   expect_match(source, 'label:"Home"', fixed = TRUE)
   expect_match(source, 'label:"Jobs"', fixed = TRUE)
   expect_match(source, 'label:"Data"', fixed = TRUE)
@@ -32,7 +36,7 @@ test_that("legacy workbench layout and workflow controls are present", {
   expect_match(source, 'label:"Covariance"', fixed = TRUE)
   expect_match(source, 'label:"Posterior"', fixed = TRUE)
   expect_match(source, 'Posterior SDs, posterior CVs and 95% credible intervals', fixed = TRUE)
-  expect_match(source, 'Observed marginal information is estimated after SAEM', fixed = TRUE)
+  expect_match(source, 'Observed marginal information uses deterministic Gauss-Hermite', fixed = TRUE)
   expect_match(source, '"Run diagnostic"', fixed = TRUE)
   expect_match(source, '"New project"', fixed = TRUE)
   expect_match(source, '"Empty project"', fixed = TRUE)
@@ -41,6 +45,9 @@ test_that("legacy workbench layout and workflow controls are present", {
   expect_match(source, '"Edit server"', fixed = TRUE)
   expect_match(source, 'Manual X breaks', fixed = TRUE)
   expect_match(source, 'function CodeEditor', fixed = TRUE)
+  expect_match(style, 'lw-syntax-parameter', fixed = TRUE)
+  expect_match(style, 'lw-syntax-definition', fixed = TRUE)
+  expect_match(style, 'lw-syntax-function', fixed = TRUE)
   expect_match(source, 'OMEGA matrix', fixed = TRUE)
   expect_match(source, 'Print gradients every N (0 = off)', fixed = TRUE)
   expect_match(source, 'Open the saved model run and its results', fixed = TRUE)
@@ -163,6 +170,22 @@ test_that("theophylline GUI example is oral ADVAN2 TRANS2 with a delayed peak", 
   simulated <- nm_simulate(model, data, random_effects = FALSE, residual = FALSE)
   observations <- simulated[simulated$EVID == 0L, , drop = FALSE]
   expect_gt(observations$TIME[[which.max(observations$IPRED)]], min(observations$TIME))
+})
+
+test_that("GUI example datasets contain reproducible between-subject variability", {
+  model <- LibeRation:::.liber_model_template(2L, trans = 2L)
+  first <- LibeRation:::.liber_builtin_dataset(
+    model, "theophylline", n_subjects = 12L, seed = 417L
+  )
+  second <- LibeRation:::.liber_builtin_dataset(
+    model, "theophylline", n_subjects = 12L, seed = 417L
+  )
+  truth <- attr(first, "simulation_eta")
+  expect_s3_class(truth, "data.frame")
+  expect_equal(nrow(truth), 12L)
+  expect_true(any(abs(as.matrix(truth[grep("^ETA", names(truth))])) > 0.05))
+  expect_equal(first$DV, second$DV)
+  expect_equal(attr(first, "simulation_eta"), attr(second, "simulation_eta"))
 })
 
 test_that("GUI uses the high-resolution blue LibeRation favicon", {

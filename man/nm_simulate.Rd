@@ -57,3 +57,19 @@ Input records augmented with `IPRED`, compartment amounts, and—when
 \description{
 Simulate or predict a LibeRation model
 }
+\examples{
+\donttest{
+model <- nm_model(
+  INPUT = c("ID", "TIME", "EVID", "AMT", "CMT", "DV", "MDV"),
+  ADVAN = 1,
+  PRED = "CL=THETA(1); V=THETA(2); S1=V",
+  ERROR = "Y=F",
+  THETAS = data.frame(THETA = 1:2, Value = c(2, 20))
+)
+events <- data.frame(
+  ID = 1, TIME = c(0, 1, 2), EVID = c(1, 0, 0),
+  AMT = c(100, 0, 0), CMT = 1, DV = NA_real_, MDV = c(1, 0, 0)
+)
+nm_simulate(model, events)
+}
+}
