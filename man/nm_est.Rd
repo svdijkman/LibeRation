@@ -7,7 +7,8 @@
 nm_est(
   model,
   data,
-  method = c("FOCEI", "FOCE", "FO", "LAPLACE", "ITS", "IMP", "SAEM", "BAYES"),
+  method = c("FOCEI", "FOCE", "FO", "LAPLACE", "ITS", "GQ", "IMP", "SAEM", "BAYES",
+    "HMC", "NUTS", "NPML", "NPAG"),
   maxit = 200L,
   eta_maxit = 100L,
   tolerance = 1e-06,
@@ -20,6 +21,8 @@ nm_est(
   covariance_tolerance = 1e-08,
   covariance_samples = NULL,
   covariance_seed = NULL,
+  initial_eta = NULL,
+  collect_output = TRUE,
   ...
 )
 }
@@ -67,14 +70,44 @@ importance samples. The default reuses the IMP count or uses 200 for SAEM.}
 \item{covariance_seed}{Common-random-number seed for the random-normal
 covariance fallback. The default reuses the estimation seed.}
 
-\item{...}{Method-specific controls.}
+\item{initial_eta}{Optional finite subject-by-ETA matrix used to warm-start
+compatible conditional or SAEM estimation steps.}
+
+\item{collect_output}{Whether selected generated OUTPUT columns should be
+evaluated and retained with the completed fit.}
+
+\item{...}{Method-specific controls. For `method = "GQ"`, use `gq_grid`
+(`"auto"`, `"tensor"`, or `"smolyak"`), `gq_order` (tensor nodes per ETA
+dimension, default 5), `gq_level` (Smolyak level, default 3),
+`gq_adaptive` (default `TRUE`), `gq_max_points` (retained-grid allocation
+guard, default 100000), and `gq_gradient` (`"score"` or the slower
+`"finite_grid"`). Automatic selection uses tensor quadrature through
+three ETAs and Smolyak quadrature for higher-dimensional models.
+For `method = "HMC"` or `"NUTS"`, controls include `n_warmup` (500),
+`n_sample` (1000 per chain), `n_thin` (1), `n_chains` (4), `seed`,
+optional `step_size`, `target_acceptance` (0.8), `adapt_mass` (`TRUE`),
+`n_leapfrog` (10; HMC), `max_depth` (10; NUTS), and
+`divergence_threshold` (1000). For `method = "NPML"` or `"NPAG"`, use
+`np_supports` for an optional fixed starting matrix, `np_points` (25),
+`np_max_support` (100), `np_min_weight` (1e-5), `np_weight_maxit` (1000),
+`np_cycles` (3), and, for NPAG, `np_grid_step` (1), `np_grid_decay`
+(0.5), and `np_max_candidates` (500). `np_estimate_population` controls
+alternating THETA/SIGMA updates. Ordinary covariance is not regular for a
+discrete support distribution; use bootstrap uncertainty for NPML/NPAG.}
 }
 \description{
 Deterministic conditional methods use exact CppAD gradients for ETA modes.
 LAPLACE uses the exact conditional Hessian; FOCE/FOCEI use the
 interaction-aware Gauss-Newton curvature; FO integrates the first-order
-Gaussian linearization analytically. Stochastic methods use the same C++
-joint objective and are implemented in the stochastic estimation module.
+Gaussian linearization analytically. GQ integrates the exact joint
+objective over ETAs with adaptive tensor or Smolyak sparse
+Gauss--Hermite quadrature.
+Stochastic methods use the same C++ joint objective and are implemented in
+the stochastic estimation module. HMC and NUTS use exact joint CppAD
+gradients with unconstrained parameter transforms, dual-averaged step-size
+adaptation, and a diagonal mass matrix. NPML and NPAG replace the Gaussian
+random-effect distribution with a discrete ETA support distribution; NPAG
+adapts, expands, and prunes that support.
 Serial FO, FOCE, FOCEI, Laplace, and ITS fits expose a persistent C++
 population objective through thin callbacks to R's L-BFGS-B/BFGS optimizer;
 PSOCK fits retain R coordination across their persistent C++ workers.

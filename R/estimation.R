@@ -46,26 +46,48 @@
   list(matrix = adjusted, logdet = as.numeric(determinant$modulus), jitter = jitter)
 }
 
-.nm_prediction_structure <- function(model, data) {
-  ignored <- c(
-    "DV", "MDV", "LLOQ", "BLQ", "CENS", ".source_row", ".generated",
-    ".sort_priority", ".ID_INDEX"
+.nm_prediction_dynamic_columns <- function(model, data) {
+  inputs <- unique(c(
+    model$pred_ir$input_names %||% character(),
+    model$des_ir$input_names %||% character()
+  ))
+  structural <- c(
+    "ID", "TIME", "AMT", "RATE", "II", "ADDL", "EVID", "CMT",
+    "SS", "MIXNUM", "DVID", "DV", "MDV", "LLOQ", "BLQ", "CENS",
+    ".ID_INDEX", ".OCC_INDEX", "F", "T"
   )
-  source <- paste(model$PRED %||% "", model$DES %||% "")
-  if (!grepl("\\bID\\b", source, perl = TRUE)) ignored <- c(ignored, "ID")
-  columns <- setdiff(names(data), ignored)
-  value <- as.data.frame(data[columns], stringsAsFactors = FALSE)
+  parameter <- grepl("^(THETA|ETA|SIGMA|ERR|A)_", inputs)
+  intersect(inputs[!parameter & !inputs %in% structural], names(data))
+}
+
+.nm_structure_key <- function(value) {
   raw <- serialize(value, NULL, version = 2L)
   bytes <- as.integer(raw)
   weight <- (seq_along(bytes) %% 65521L) + 1L
-  hash <- paste(
+  paste(
     length(bytes),
     format(sum(bytes) %% 2147483647, scientific = FALSE, trim = TRUE),
     format(sum((bytes * weight) %% 2147483629) %% 2147483647,
            scientific = FALSE, trim = TRUE),
     sep = "-"
   )
-  list(key = hash, value = value)
+}
+
+.nm_prediction_structure <- function(model, data) {
+  dynamic <- .nm_prediction_dynamic_columns(model, data)
+  ignored <- c(
+    "DV", "MDV", "LLOQ", "BLQ", "CENS", ".source_row", ".generated",
+    ".sort_priority", ".ID_INDEX", dynamic
+  )
+  source <- paste(model$PRED %||% "", model$DES %||% "")
+  if (!grepl("\\bID\\b", source, perl = TRUE)) ignored <- c(ignored, "ID")
+  columns <- setdiff(names(data), ignored)
+  value <- list(
+    dynamic_columns = dynamic,
+    structural_data = as.data.frame(data[columns], stringsAsFactors = FALSE),
+    rows = nrow(data)
+  )
+  list(key = .nm_structure_key(value), value = value)
 }
 
 .nm_prediction_pool_tape <- function(pool, engine, data, theta, sigma, n_eta) {
@@ -85,6 +107,34 @@
   tape
 }
 
+.nm_fo_structure <- function(model, data) {
+  prediction <- .nm_prediction_structure(model, data)
+  observed <- data$EVID == 0L & data$MDV == 0L & is.finite(data$DV)
+  value <- c(prediction$value, list(
+    observed = as.logical(observed),
+    dvid = if ("DVID" %in% names(data)) as.integer(data$DVID) else rep.int(1L, nrow(data))
+  ))
+  list(key = .nm_structure_key(value), value = value)
+}
+
+.nm_fo_pool_tape <- function(pool, evaluator, theta, sigma, omega) {
+  structure <- .nm_fo_structure(evaluator$engine$model, evaluator$data)
+  bucket <- pool[[structure$key]] %||% list()
+  if (length(bucket)) {
+    for (entry in bucket) {
+      if (identical(entry$structure, structure$value)) {
+        evaluator$fo_tape <- entry$tape
+        return(invisible(entry$tape))
+      }
+    }
+  }
+  evaluator$ensure_fo_tape(theta, sigma, omega)
+  pool[[structure$key]] <- c(
+    bucket, list(list(structure = structure$value, tape = evaluator$fo_tape))
+  )
+  invisible(evaluator$fo_tape)
+}
+
 .NMSubjectEvaluator <- R6::R6Class(
   ".NMSubjectEvaluator",
   public = list(
@@ -100,12 +150,15 @@
     tape_records = 0L,
     tape_retapes = 0L,
     tape_checks = 0L,
+    tape_profile = "full",
     n_theta = 0L,
     n_eta = 0L,
     n_sigma = 0L,
 
     initialize = function(engine, data, theta, sigma, omega, n_eta = NULL,
-                          prediction_tape = NULL) {
+                          prediction_tape = NULL,
+                          tape_profile = c("full", "fo")) {
+      self$tape_profile <- match.arg(tape_profile)
       self$engine <- engine
       self$data <- .nm_engine_data(engine$model, data)
       self$n_theta <- length(theta)
@@ -126,13 +179,17 @@
       self$prediction_tape <- prediction_tape %||% self$engine$prediction_tape(
         self$data, theta = theta, eta = eta, sigma = sigma
       )
+      .liberation_prediction_tape_new_dynamic(
+        self$prediction_tape$pointer, self$data
+      )
       self$objective_tape <- self$engine$objective_tape(
         self$data, theta = theta, eta = eta, sigma = sigma, omega = omega
       )
-      self$noninteraction_tape <- self$engine$objective_tape(
-        self$data, theta = theta, eta = eta, sigma = sigma, omega = omega,
-        interaction = FALSE
-      )
+      self$noninteraction_tape <- if (identical(self$tape_profile, "fo")) NULL else
+        self$engine$objective_tape(
+          self$data, theta = theta, eta = eta, sigma = sigma, omega = omega,
+          interaction = FALSE
+        )
       self$tape_anchor <- c(theta, as.numeric(eta), sigma, omega)
       self$tape_records <- self$tape_records + 1L
       if (isTRUE(retape)) self$tape_retapes <- self$tape_retapes + 1L
@@ -175,6 +232,9 @@
         self$ensure_valid_tapes(theta, sigma, omega)
       }
       if (is.null(self$fo_tape)) {
+        .liberation_prediction_tape_new_dynamic(
+          self$prediction_tape$pointer, self$data
+        )
         self$fo_tape <- list(
           pointer = .liberation_fo_tape_create(
             self$engine$pointer, self$prediction_tape$pointer, self$data,
@@ -182,15 +242,20 @@
           )
         )
       }
+      .liberation_fo_tape_new_dynamic(self$fo_tape$pointer, self$data)
       invisible(self$fo_tape)
     },
 
     fo_objective = function(theta, sigma, omega,
                             gradient = FALSE, hessian = FALSE) {
-      self$ensure_fo_tape(theta, sigma, omega)
-      .liberation_objective_tape_eval(
-        self$fo_tape$pointer, self$fo_point(theta, sigma, omega),
-        gradient, hessian
+      private$with_retape(
+        function() {
+          self$ensure_fo_tape(theta, sigma, omega)
+          .liberation_objective_tape_eval(
+            self$fo_tape$pointer, self$fo_point(theta, sigma, omega),
+            gradient, hessian
+          )
+        }, theta, sigma, omega, rep(0, self$n_eta)
       )
     },
 
@@ -200,6 +265,16 @@
       }
       approximation <- match.arg(approximation, c("foce", "focei", "laplace"))
       if (is.null(self$curvature_tapes[[approximation]])) {
+        # Validate the primary tape at the curvature anchor first. A changed
+        # pivot or adaptive trajectory is retaped by objective() before the
+        # nested base2ad curvature tape is recorded.
+        self$objective(
+          theta, eta, sigma, omega, gradient = FALSE,
+          interaction = TRUE
+        )
+        .liberation_prediction_tape_new_dynamic(
+          self$prediction_tape$pointer, self$data
+        )
         self$curvature_tapes[[approximation]] <- list(
           pointer = .liberation_curvature_tape_create(
             self$engine$pointer, self$prediction_tape$pointer,
@@ -214,11 +289,15 @@
 
     curvature = function(theta, eta, sigma, omega, approximation,
                          gradient = TRUE) {
-      self$ensure_curvature_tape(theta, eta, sigma, omega, approximation)
-      .liberation_objective_tape_eval(
-        self$curvature_tapes[[approximation]]$pointer,
-        self$objective_point(theta, eta, sigma, omega),
-        isTRUE(gradient), FALSE
+      private$with_retape(
+        function() {
+          self$ensure_curvature_tape(theta, eta, sigma, omega, approximation)
+          .liberation_objective_tape_eval(
+            self$curvature_tapes[[approximation]]$pointer,
+            self$objective_point(theta, eta, sigma, omega),
+            isTRUE(gradient), FALSE
+          )
+        }, theta, sigma, omega, eta
       )
     },
 
@@ -228,10 +307,14 @@
       if (isTRUE(self$engine$model$USE_ODE)) {
         self$ensure_valid_tapes(theta, sigma, omega, eta)
       }
-      .liberation_objective_tape_eval(
-        if (isTRUE(interaction)) self$objective_tape$pointer else self$noninteraction_tape$pointer,
-        self$objective_point(theta, eta, sigma, omega),
-        gradient, hessian
+      private$with_retape(
+        function() {
+          .liberation_objective_tape_eval(
+            if (isTRUE(interaction)) self$objective_tape$pointer else self$noninteraction_tape$pointer,
+            self$objective_point(theta, eta, sigma, omega),
+            gradient, hessian
+          )
+        }, theta, sigma, omega, eta
       )
     },
 
@@ -244,11 +327,15 @@
       if (isTRUE(self$engine$model$USE_ODE)) {
         self$ensure_valid_tapes(theta, sigma, omega, eta[1L, ])
       }
-      tape <- if (isTRUE(interaction)) self$objective_tape else self$noninteraction_tape
-      .liberation_objective_tape_eta_values(
-        tape$pointer,
-        self$objective_point(theta, rep(0, self$n_eta), sigma, omega),
-        self$n_theta + seq_len(self$n_eta), eta
+      private$with_retape(
+        function() {
+          tape <- if (isTRUE(interaction)) self$objective_tape else self$noninteraction_tape
+          .liberation_objective_tape_eta_values(
+            tape$pointer,
+            self$objective_point(theta, rep(0, self$n_eta), sigma, omega),
+            self$n_theta + seq_len(self$n_eta), eta
+          )
+        }, theta, sigma, omega, eta[1L, ]
       )
     },
 
@@ -266,8 +353,12 @@
         matrix(sigma, nrow(eta), length(sigma), byrow = TRUE),
         matrix(omega, nrow(eta), length(omega), byrow = TRUE)
       )
-      tape <- if (isTRUE(interaction)) self$objective_tape else self$noninteraction_tape
-      .liberation_objective_tape_point_gradients(tape$pointer, points)
+      private$with_retape(
+        function() {
+          tape <- if (isTRUE(interaction)) self$objective_tape else self$noninteraction_tape
+          .liberation_objective_tape_point_gradients(tape$pointer, points)
+        }, theta, sigma, omega, eta[1L, ]
+      )
     },
 
     objective_hessian_subset = function(theta, eta, sigma, omega,
@@ -276,29 +367,40 @@
       if (isTRUE(self$engine$model$USE_ODE)) {
         self$ensure_valid_tapes(theta, sigma, omega, eta)
       }
-      tape <- if (isTRUE(interaction)) self$objective_tape else self$noninteraction_tape
-      .liberation_objective_tape_hessian_subset(
-        tape$pointer, self$objective_point(theta, eta, sigma, omega),
-        as.integer(rows), as.integer(columns)
+      private$with_retape(
+        function() {
+          tape <- if (isTRUE(interaction)) self$objective_tape else self$noninteraction_tape
+          .liberation_objective_tape_hessian_subset(
+            tape$pointer, self$objective_point(theta, eta, sigma, omega),
+            as.integer(rows), as.integer(columns)
+          )
+        }, theta, sigma, omega, eta
       )
     },
 
     prediction = function(theta, eta, sigma, jacobian = FALSE, columns = NULL) {
+      omega_offset <- length(theta) + self$n_eta + length(sigma)
+      omega <- self$tape_anchor[omega_offset + seq_len(
+        length(self$tape_anchor) - omega_offset
+      )]
       if (isTRUE(self$engine$model$USE_ODE)) {
-        self$ensure_valid_tapes(theta, sigma, self$tape_anchor[
-          length(theta) + self$n_eta + length(sigma) + seq_len(
-            length(self$tape_anchor) - length(theta) - self$n_eta - length(sigma)
+        self$ensure_valid_tapes(theta, sigma, omega, eta)
+      }
+      private$with_retape(
+        function() {
+          .liberation_prediction_tape_new_dynamic(
+            self$prediction_tape$pointer, self$data
           )
-        ], eta)
-      }
-      point <- self$prediction_point(theta, eta, sigma)
-      if (isTRUE(jacobian) && !is.null(columns)) {
-        return(.liberation_prediction_tape_eval_subset(
-          self$prediction_tape$pointer, point, as.integer(columns)
-        ))
-      }
-      .liberation_prediction_tape_eval(
-        self$prediction_tape$pointer, point, jacobian
+          point <- self$prediction_point(theta, eta, sigma)
+          if (isTRUE(jacobian) && !is.null(columns)) {
+            return(.liberation_prediction_tape_eval_subset(
+              self$prediction_tape$pointer, point, as.integer(columns)
+            ))
+          }
+          .liberation_prediction_tape_eval(
+            self$prediction_tape$pointer, point, jacobian
+          )
+        }, theta, sigma, omega, eta
       )
     },
 
@@ -377,6 +479,22 @@
         evaluations = as.integer(fit$counts[["function"]]), backend = "r-fallback"
       )
     }
+  ),
+  private = list(
+    with_retape = function(fun, theta, sigma, omega,
+                           eta = rep(0, self$n_eta)) {
+      tryCatch(
+        fun(),
+        error = function(error) {
+          if (!grepl("CppAD tape path changed", conditionMessage(error),
+                     fixed = TRUE)) stop(error)
+          self$record_tapes(
+            theta, sigma, omega, eta = eta, retape = TRUE
+          )
+          fun()
+        }
+      )
+    }
   )
 )
 
@@ -434,7 +552,7 @@
   .liberation_objective_tape_collection_gradients(tapes, points)
 }
 
-.nm_estimation_context <- function(model, data, n_cores = 1L) {
+.nm_estimation_context <- function(model, data, n_cores = 1L, method = NULL) {
   engine <- if (inherits(model, "NMEngine")) model else nm_compile(model)
   model <- engine$model
   data <- .nm_engine_data(model, data)
@@ -452,6 +570,7 @@
   }
   n_cores <- min(n_cores, max(n_subjects, 1L))
   expanded_n_eta <- .nm_eta_columns(model, data)
+  tape_profile <- if (!is.null(method) && identical(toupper(method), "FO")) "fo" else "full"
   subject_data <- lapply(seq_len(n_subjects), function(index) .nm_subject_data(data, index))
   prediction_pool <- new.env(parent = emptyenv())
   subjects <- lapply(seq_len(n_subjects), function(index) {
@@ -462,7 +581,7 @@
     .NMSubjectEvaluator$new(
       engine, subject_data[[index]], model$THETAS$Value,
       model$SIGMAS$Value, model$OMEGAS$Value, n_eta = expanded_n_eta,
-      prediction_tape = prediction_tape
+      prediction_tape = prediction_tape, tape_profile = tape_profile
     )
   })
   parallel_state <- NULL
@@ -485,7 +604,7 @@
       parallel::clusterApply(
         cluster, seq_along(chunks),
         function(index, data_chunks, specification, theta, sigma, omega,
-                 n_eta, library_paths) {
+                 n_eta, tape_profile, library_paths) {
           .libPaths(unique(c(library_paths, .libPaths())))
           namespace <- asNamespace("LibeRation")
           compiler <- get("nm_compile", envir = namespace)
@@ -499,7 +618,7 @@
             )
             evaluator_class$new(
               compiled, subject_data, theta, sigma, omega, n_eta = n_eta,
-              prediction_tape = prediction_tape
+              prediction_tape = prediction_tape, tape_profile = tape_profile
             )
           })
           assign(".liber_parallel_subjects", evaluators, envir = .GlobalEnv)
@@ -509,7 +628,8 @@
         data_chunks = lapply(chunks, function(rows) subject_data[rows]),
         specification = model, theta = model$THETAS$Value,
         sigma = model$SIGMAS$Value, omega = model$OMEGAS$Value,
-        n_eta = expanded_n_eta, library_paths = .libPaths()
+        n_eta = expanded_n_eta, tape_profile = tape_profile,
+        library_paths = .libPaths()
       )
       TRUE
     }, error = identity)
@@ -619,6 +739,27 @@
       (model$n_eta + 2L - seq_len(model$n_eta)) * log(diag(lower))
     )
   }
+  log_jacobian_gradient <- function(parameters) {
+    result <- numeric(length(start))
+    cursor <- length(theta_free)
+    if (length(sigma_free)) {
+      result[cursor + seq_len(length(sigma_free))] <- 1
+      cursor <- cursor + length(sigma_free)
+    }
+    if (!length(omega_free)) return(result)
+    if (!omega_full) {
+      result[cursor + seq_len(length(omega_free))] <- 1
+      return(result)
+    }
+    for (encoded in seq_len(nrow(model$OMEGAS))) {
+      row <- model$OMEGAS$ROW[[encoded]]
+      column <- model$OMEGAS$COL[[encoded]]
+      if (row == column) {
+        result[cursor + encoded] <- model$n_eta + 2L - row
+      }
+    }
+    result
+  }
   in_bounds <- function(parameters) {
     length(parameters) == length(lower) &&
       all(parameters >= lower) && all(parameters <= upper)
@@ -669,7 +810,7 @@
        decode = decode, encode = encode, in_bounds = in_bounds, theta_free = theta_free,
        sigma_free = sigma_free, omega_free = omega_free,
        omega_full = omega_full, log_jacobian = log_jacobian,
-       jacobian = jacobian)
+       log_jacobian_gradient = log_jacobian_gradient, jacobian = jacobian)
 }
 
 .nm_cpp_prior_config <- function(model) {
@@ -695,7 +836,8 @@
 }
 
 .nm_cpp_population_objective <- function(context, map, approximation,
-                                          eta_maxit, tolerance) {
+                                          eta_maxit, tolerance,
+                                          initial_eta = NULL) {
   if (!isTRUE(getOption("LibeRation.cpp_population_objective", TRUE))) {
     return(list(pointer = NULL, reason = "disabled by option"))
   }
@@ -712,8 +854,11 @@
   # structurally shared prediction tapes used to construct curvature tapes.
   if (!isTRUE(context$model$USE_ODE)) {
     if (approximation == "fo") {
+      fo_pool <- new.env(parent = emptyenv())
       invisible(lapply(context$subjects, function(evaluator) {
-        evaluator$ensure_fo_tape(parameters$theta, parameters$sigma, parameters$omega)
+        .nm_fo_pool_tape(
+          fo_pool, evaluator, parameters$theta, parameters$sigma, parameters$omega
+        )
       }))
       primary <- lapply(context$subjects, function(evaluator) evaluator$fo_tape$pointer)
     } else {
@@ -725,7 +870,8 @@
       if (approximation %in% c("foce", "focei", "laplace")) {
         curvature_anchors <- if (approximation == "laplace" && context$n_eta) {
           initial_modes <- .nm_subject_modes(
-            context, parameters, maxit = eta_maxit, tolerance = tolerance,
+            context, parameters, starts = initial_eta,
+            maxit = eta_maxit, tolerance = tolerance,
             interaction = TRUE, exact_hessian = TRUE
           )
           if (any(vapply(initial_modes, `[[`, integer(1), "convergence") != 0L)) {
@@ -733,7 +879,11 @@
           }
           lapply(initial_modes, `[[`, "par")
         } else {
-          rep(list(rep(0, context$n_eta)), context$n_subjects)
+          if (is.null(initial_eta)) {
+            rep(list(rep(0, context$n_eta)), context$n_subjects)
+          } else {
+            lapply(seq_len(context$n_subjects), function(subject) initial_eta[subject, ])
+          }
         }
         invisible(Map(function(evaluator, eta) {
           evaluator$ensure_curvature_tape(
@@ -760,9 +910,14 @@
     use_ode = isTRUE(context$model$USE_ODE),
     guard_radius = as.numeric(getOption("LibeRation.tape_guard_radius", 0.5)),
     start = map$start,
+    eta_start = initial_eta %||% matrix(0, context$n_subjects, context$n_eta),
     prior_index = priors$index, prior_family = priors$family,
     prior_mean = priors$mean, prior_sd = priors$sd,
-    prior_shape = priors$shape, prior_rate = priors$rate
+    prior_shape = priors$shape, prior_rate = priors$rate,
+    fo_population_batch = isTRUE(getOption("LibeRation.fo_population_batch", TRUE)),
+    fo_population_max_operations = as.numeric(getOption(
+      "LibeRation.fo_population_max_operations", 2e6
+    ))
   )
   tryCatch(
     list(
@@ -814,7 +969,8 @@
 .nm_outer_optim <- function(map, objective, maxit, tolerance, trace = 0L,
                             print_every = 0L, gradient = NULL,
                             optimizer_backend = c("auto", "native", "r"),
-                            compiled_objective = NULL) {
+                            compiled_objective = NULL,
+                            strict_convergence = FALSE) {
   optimizer_backend <- match.arg(optimizer_backend)
   if (optimizer_backend == "auto") optimizer_backend <- "r"
   compiled_pointer <- compiled_objective$pointer %||% NULL
@@ -901,6 +1057,10 @@
         .liberation_population_objective_telemetry(compiled_pointer)
       } else NULL
     )
+    if (compiled) {
+      result$objective_backend <- result$population_objective$backend %||%
+        result$objective_backend
+    }
     return(result)
   }
   if (optimizer_backend == "native" && is.function(safe_gradient)) {
@@ -915,6 +1075,10 @@
     result$population_objective <- if (compiled) {
       .liberation_population_objective_telemetry(compiled_pointer)
     } else NULL
+    if (compiled) {
+      result$objective_backend <- result$population_objective$backend %||%
+        result$objective_backend
+    }
     result$elapsed_seconds <- unname(proc.time()[["elapsed"]] - started)
     return(result)
   }
@@ -936,7 +1100,16 @@
   if (bounded) {
     arguments$lower <- map$lower
     arguments$upper <- map$upper
-    arguments$control$factr <- max(tolerance / .Machine$double.eps, 1)
+    if (isTRUE(strict_convergence)) {
+      # Exact FO gradients can be very large at the initial point. A loose
+      # function-reduction test stopped before OMEGA reached the same solution
+      # under mathematically equivalent summation orders. Keep the function
+      # test at machine accuracy and use a squared scaled-gradient target.
+      arguments$control$factr <- 1
+      arguments$control$pgtol <- tolerance^2
+    } else {
+      arguments$control$factr <- max(tolerance / .Machine$double.eps, 1)
+    }
     arguments$control$reltol <- NULL
   }
   result <- do.call(stats::optim, arguments)
@@ -952,12 +1125,12 @@
   result$backend <- if (compiled) {
     paste0("r-", tolower(arguments$method), "-cpp-objective")
   } else if (is.function(safe_gradient)) "r-optim-gradient" else "r-optim"
-  result$objective_backend <- if (compiled) {
-    "persistent-cpp-population-objective"
-  } else "r-orchestrated-population-objective"
   result$population_objective <- if (compiled) {
     .liberation_population_objective_telemetry(compiled_pointer)
   } else NULL
+  result$objective_backend <- if (compiled) {
+    result$population_objective$backend %||% "persistent-cpp-population-objective"
+  } else "r-orchestrated-population-objective"
   result$objective_scale <- objective_scale
   result$elapsed_seconds <- unname(proc.time()[["elapsed"]] - started)
   result
@@ -985,10 +1158,24 @@
       if (isTRUE(interaction)) evaluator$objective_tape$pointer else
         evaluator$noninteraction_tape$pointer
     })
-    raw <- .liberation_objective_tape_eta_modes(
-      tapes, points, length(parameters$theta) + seq_len(context$n_eta), starts,
-      as.integer(maxit), as.numeric(tolerance), isTRUE(exact_hessian)
+    raw <- tryCatch(
+      .liberation_objective_tape_eta_modes(
+        tapes, points, length(parameters$theta) + seq_len(context$n_eta), starts,
+        as.integer(maxit), as.numeric(tolerance), isTRUE(exact_hessian)
+      ), error = identity
     )
+    if (inherits(raw, "error")) {
+      if (!grepl("CppAD tape path changed", conditionMessage(raw), fixed = TRUE)) {
+        stop(raw)
+      }
+      return(lapply(seq_along(evaluators), function(subject) {
+        evaluators[[subject]]$eta_mode(
+          parameters$theta, parameters$sigma, parameters$omega,
+          start = starts[subject, ], maxit = maxit, tolerance = tolerance,
+          interaction = interaction, exact_hessian = exact_hessian
+        )
+      }))
+    }
     lapply(seq_along(raw), function(subject) {
       mode <- raw[[subject]]
       if (!identical(as.integer(mode$convergence), 0L)) {
@@ -1064,10 +1251,24 @@
     if (isTRUE(interaction)) evaluator$objective_tape$pointer else
       evaluator$noninteraction_tape$pointer
   })
-  raw <- .liberation_objective_tape_eta_modes(
-    tapes, points, length(parameters$theta) + seq_len(context$n_eta), starts,
-    as.integer(maxit), as.numeric(tolerance), isTRUE(exact_hessian)
+  raw <- tryCatch(
+    .liberation_objective_tape_eta_modes(
+      tapes, points, length(parameters$theta) + seq_len(context$n_eta), starts,
+      as.integer(maxit), as.numeric(tolerance), isTRUE(exact_hessian)
+    ), error = identity
   )
+  if (inherits(raw, "error")) {
+    if (!grepl("CppAD tape path changed", conditionMessage(raw), fixed = TRUE)) {
+      stop(raw)
+    }
+    return(lapply(seq_along(evaluators), function(subject) {
+      evaluators[[subject]]$eta_mode(
+        parameters$theta, parameters$sigma, parameters$omega,
+        start = starts[subject, ], maxit = maxit, tolerance = tolerance,
+        interaction = interaction, exact_hessian = exact_hessian
+      )
+    }))
+  }
   lapply(seq_along(raw), function(subject) {
     mode <- raw[[subject]]
     if (!identical(as.integer(mode$convergence), 0L) ||
@@ -1256,10 +1457,11 @@
   )
 }
 
-.nm_nested_objective <- function(context, approximation, eta_maxit, tolerance) {
+.nm_nested_objective <- function(context, approximation, eta_maxit, tolerance,
+                                 initial_eta = NULL) {
   force(context); force(approximation)
   state <- new.env(parent = emptyenv())
-  state$starts <- matrix(0, context$n_subjects, context$n_eta)
+  state$starts <- initial_eta %||% matrix(0, context$n_subjects, context$n_eta)
   state$key <- NULL
   state$value <- NULL
   state$modes <- NULL
@@ -1374,14 +1576,15 @@
 
 .nm_fo_collection_gradient <- function(evaluators, parameters) {
   if (!length(evaluators)) return(matrix(numeric(), 0L, 0L))
-  invisible(lapply(evaluators, function(evaluator) {
-    evaluator$ensure_fo_tape(parameters$theta, parameters$sigma, parameters$omega)
+  # Shared FO tapes hold subject data as CppAD dynamic parameters. Select each
+  # subject immediately before differentiating; collecting duplicate pointers
+  # first would leave all rows on the final subject's dynamic values.
+  do.call(rbind, lapply(evaluators, function(evaluator) {
+    unname(evaluator$fo_objective(
+      parameters$theta, parameters$sigma, parameters$omega,
+      gradient = TRUE
+    )$gradient)
   }))
-  point <- c(parameters$theta, parameters$sigma, parameters$omega)
-  points <- matrix(point, nrow = length(evaluators), ncol = length(point),
-                   byrow = TRUE)
-  tapes <- lapply(evaluators, function(evaluator) evaluator$fo_tape$pointer)
-  .liberation_objective_tape_collection_gradients(tapes, points)
 }
 
 .nm_fo_native_gradient <- function(context, parameters) {
@@ -1490,7 +1693,8 @@
   )
   optimizer <- .nm_outer_optim(
     map, objective, maxit, tolerance, trace, print_every, gradient = gradient,
-    optimizer_backend = optimizer_backend, compiled_objective = compiled
+    optimizer_backend = optimizer_backend, compiled_objective = compiled,
+    strict_convergence = TRUE
   )
   parameters <- map$decode(optimizer$par)
   modes <- .nm_subject_modes(
@@ -1504,16 +1708,19 @@
 }
 
 .nm_est_nested <- function(context, map, method, maxit, eta_maxit, tolerance, trace,
-                           print_every = 0L, optimizer_backend = "auto") {
+                           print_every = 0L, optimizer_backend = "auto",
+                           initial_eta = NULL) {
   approximation <- switch(
     method, FOCE = "foce", FOCEI = "focei", LAPLACE = "laplace", "laplace"
   )
-  objective <- .nm_nested_objective(context, approximation, eta_maxit, tolerance)
+  objective <- .nm_nested_objective(
+    context, approximation, eta_maxit, tolerance, initial_eta = initial_eta
+  )
   gradient <- function(parameters) .nm_nested_outer_gradient(
     context, map, objective, parameters, approximation
   )
   compiled <- .nm_cpp_population_objective(
-    context, map, approximation, eta_maxit, tolerance
+    context, map, approximation, eta_maxit, tolerance, initial_eta = initial_eta
   )
   optimizer <- .nm_outer_optim(
     map, objective, maxit, tolerance, trace, print_every,
@@ -1526,7 +1733,8 @@
     error = function(error) NULL
   ) else NULL
   modes <- cached$modes %||% .nm_subject_modes(
-    context, parameters, maxit = eta_maxit, tolerance = tolerance,
+    context, parameters, starts = initial_eta,
+    maxit = eta_maxit, tolerance = tolerance,
     interaction = approximation != "foce",
     exact_hessian = approximation == "laplace"
   )
@@ -1565,8 +1773,15 @@
 #' Deterministic conditional methods use exact CppAD gradients for ETA modes.
 #' LAPLACE uses the exact conditional Hessian; FOCE/FOCEI use the
 #' interaction-aware Gauss-Newton curvature; FO integrates the first-order
-#' Gaussian linearization analytically. Stochastic methods use the same C++
-#' joint objective and are implemented in the stochastic estimation module.
+#' Gaussian linearization analytically. GQ integrates the exact joint
+#' objective over ETAs with adaptive tensor or Smolyak sparse
+#' Gauss--Hermite quadrature.
+#' Stochastic methods use the same C++ joint objective and are implemented in
+#' the stochastic estimation module. HMC and NUTS use exact joint CppAD
+#' gradients with unconstrained parameter transforms, dual-averaged step-size
+#' adaptation, and a diagonal mass matrix. NPML and NPAG replace the Gaussian
+#' random-effect distribution with a discrete ETA support distribution; NPAG
+#' adapts, expands, and prunes that support.
 #' Serial FO, FOCE, FOCEI, Laplace, and ITS fits expose a persistent C++
 #' population objective through thin callbacks to R's L-BFGS-B/BFGS optimizer;
 #' PSOCK fits retain R coordination across their persistent C++ workers.
@@ -1599,18 +1814,41 @@
 #'   importance samples. The default reuses the IMP count or uses 200 for SAEM.
 #' @param covariance_seed Common-random-number seed for the random-normal
 #'   covariance fallback. The default reuses the estimation seed.
-#' @param ... Method-specific controls.
+#' @param initial_eta Optional finite subject-by-ETA matrix used to warm-start
+#'   compatible conditional or SAEM estimation steps.
+#' @param collect_output Whether selected generated OUTPUT columns should be
+#'   evaluated and retained with the completed fit.
+#' @param ... Method-specific controls. For `method = "GQ"`, use `gq_grid`
+#'   (`"auto"`, `"tensor"`, or `"smolyak"`), `gq_order` (tensor nodes per ETA
+#'   dimension, default 5), `gq_level` (Smolyak level, default 3),
+#'   `gq_adaptive` (default `TRUE`), `gq_max_points` (retained-grid allocation
+#'   guard, default 100000), and `gq_gradient` (`"score"` or the slower
+#'   `"finite_grid"`). Automatic selection uses tensor quadrature through
+#'   three ETAs and Smolyak quadrature for higher-dimensional models.
+#'   For `method = "HMC"` or `"NUTS"`, controls include `n_warmup` (500),
+#'   `n_sample` (1000 per chain), `n_thin` (1), `n_chains` (4), `seed`,
+#'   optional `step_size`, `target_acceptance` (0.8), `adapt_mass` (`TRUE`),
+#'   `n_leapfrog` (10; HMC), `max_depth` (10; NUTS), and
+#'   `divergence_threshold` (1000). For `method = "NPML"` or `"NPAG"`, use
+#'   `np_supports` for an optional fixed starting matrix, `np_points` (25),
+#'   `np_max_support` (100), `np_min_weight` (1e-5), `np_weight_maxit` (1000),
+#'   `np_cycles` (3), and, for NPAG, `np_grid_step` (1), `np_grid_decay`
+#'   (0.5), and `np_max_candidates` (500). `np_estimate_population` controls
+#'   alternating THETA/SIGMA updates. Ordinary covariance is not regular for a
+#'   discrete support distribution; use bootstrap uncertainty for NPML/NPAG.
 #' @export
 nm_est <- function(model, data,
                    method = c("FOCEI", "FOCE", "FO", "LAPLACE", "ITS",
-                              "IMP", "SAEM", "BAYES"),
+                              "GQ", "IMP", "SAEM", "BAYES", "HMC", "NUTS",
+                              "NPML", "NPAG"),
                    maxit = 200L, eta_maxit = 100L, tolerance = 1e-6,
                    trace = 0L, print_every = 0L, n_cores = 1L,
                    optimizer_backend = c("auto", "native", "r"),
                    covariance = FALSE,
                    covariance_type = c("auto", "hessian", "opg", "sandwich", "r", "s"),
                    covariance_tolerance = 1e-8,
-                   covariance_samples = NULL, covariance_seed = NULL, ...) {
+                   covariance_samples = NULL, covariance_seed = NULL,
+                   initial_eta = NULL, collect_output = TRUE, ...) {
   estimation_started <- proc.time()[["elapsed"]]
   method <- match.arg(method)
   optimizer_backend <- match.arg(optimizer_backend)
@@ -1623,17 +1861,25 @@ nm_est <- function(model, data,
     .nm_stop("`covariance` must be TRUE or FALSE.")
   }
   covariance <- isTRUE(covariance)
-  if (covariance && method == "BAYES") {
-    .nm_stop("BAYES reports posterior SDs and credible intervals automatically; a frequentist covariance step is not applicable.")
+  if (covariance && method %in% c("BAYES", "HMC", "NUTS")) {
+    .nm_stop(method, " reports posterior SDs and credible intervals automatically; a frequentist covariance step is not applicable.")
   }
-  if (covariance && !method %in% c("FO", "FOCE", "FOCEI", "LAPLACE", "ITS", "IMP", "SAEM")) {
-    .nm_stop("Covariance is available for FO, FOCE, FOCEI, LAPLACE, ITS, IMP, and SAEM fits.")
+  if (covariance && !method %in% c("FO", "FOCE", "FOCEI", "LAPLACE", "ITS", "GQ", "IMP", "SAEM")) {
+    .nm_stop("Covariance is available for FO, FOCE, FOCEI, LAPLACE, ITS, GQ, IMP, and SAEM fits.")
   }
   if (!inherits(model, c("nm_model", "NMEngine"))) {
     .nm_stop("`model` must be an nm_model or NMEngine.")
   }
   if (missing(data)) .nm_stop("`data` is required.")
-  context <- .nm_estimation_context(model, data, n_cores = n_cores)
+  context <- .nm_estimation_context(model, data, n_cores = n_cores, method = method)
+  if (!is.null(initial_eta)) {
+    initial_eta <- as.matrix(initial_eta)
+    expected <- c(context$n_subjects, context$n_eta)
+    if (!identical(dim(initial_eta), expected) || any(!is.finite(initial_eta))) {
+      .nm_stop("`initial_eta` must be a finite ", expected[[1L]], " x ",
+               expected[[2L]], " matrix for this dataset.")
+    }
+  }
   if (!is.null(context$parallel)) {
     on.exit(try(parallel::stopCluster(context$parallel$cluster), silent = TRUE),
             add = TRUE)
@@ -1646,13 +1892,13 @@ nm_est <- function(model, data,
   } else if (method %in% c("FOCE", "FOCEI", "LAPLACE")) {
     .nm_est_nested(
       context, map, method, maxit, eta_maxit, tolerance, trace, print_every,
-      optimizer_backend
+      optimizer_backend, initial_eta = initial_eta
     )
   } else {
     .nm_est_stochastic(
       context, map, method, maxit = maxit, eta_maxit = eta_maxit,
       tolerance = tolerance, trace = trace, print_every = print_every,
-      optimizer_backend = optimizer_backend, ...
+      optimizer_backend = optimizer_backend, initial_eta = initial_eta, ...
     )
   }
   model_fit_seconds <- unname(proc.time()[["elapsed"]] - estimation_started)
@@ -1681,13 +1927,16 @@ nm_est <- function(model, data,
     covariance_seconds = as.numeric(covariance_seconds),
     total_seconds = as.numeric(proc.time()[["elapsed"]] - estimation_started)
   )
+  if (isTRUE(collect_output) && length(fit$model$OUTPUT %||% character())) {
+    fit$output <- .nm_fit_selected_outputs(fit)
+  }
   fit
 }
 
 #' @export
 print.nm_fit <- function(x, ...) {
   cat("LibeRation fit\n")
-  cat("  method:", x$method, " objective:", format(x$objective),
+  cat("  method:", .nm_fit_method_label(x), " objective:", format(x$objective),
       " convergence:", x$convergence, "\n")
   invisible(x)
 }

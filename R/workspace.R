@@ -275,16 +275,22 @@ nm_project_list <- function(workspace, project = NULL) {
 #'   [nm_project_save_run()] so it is nested beneath a model version.
 #' @param label Model-version label. Empty labels are assigned `Mod001`,
 #'   `Mod002`, and so on.
+#' @param provenance Optional named provenance fields supplied by an integrated
+#'   LibeR package. Core runtime provenance cannot be overwritten.
 #' @return Model-version id, invisibly.
 #' @export
 nm_project_save <- function(workspace, project, model = NULL, data = NULL,
-                            result = NULL, label = NULL) {
+                            result = NULL, label = NULL, provenance = NULL) {
   workspace <- if (inherits(workspace, "nm_workspace")) workspace else nm_workspace(workspace)
   directory <- .nm_project_path(workspace, project)
   manifest <- .nm_project_manifest(workspace, project)
   if (inherits(model, "NMEngine")) model <- model$model
   if (!is.null(model) && !inherits(model, "nm_model")) .nm_stop("`model` must be an nm_model or NMEngine.")
   if (!is.null(data)) data <- if (inherits(data, "nm_dataset")) data else nm_dataset(data)
+  if (!is.null(provenance) && (!is.list(provenance) ||
+      (length(provenance) && is.null(names(provenance))))) {
+    .nm_stop("`provenance` must be a named list.")
+  }
   label <- trimws(as.character(label %||% ""))
   if (length(label) != 1L || is.na(label) || !nzchar(label)) {
     label <- sprintf("Mod%03d", sum(manifest$snapshots$entry_type == "version") + 1L)
@@ -296,17 +302,17 @@ nm_project_save <- function(workspace, project, model = NULL, data = NULL,
   snapshot <- list(
     version = 1L, id = id, project = manifest$id, label = label, created = now,
     model = model, data = data, result = result,
-    provenance = list(
+    provenance = utils::modifyList(provenance %||% list(), list(
       R = R.version.string, platform = R.version$platform,
       LibeRation = as.character(utils::packageVersion("LibeRation"))
-    )
+    ))
   )
   .nm_workspace_atomic_save(snapshot, file.path(directory, "snapshots", paste0(id, ".rds")))
   manifest$snapshots <- rbind(manifest$snapshots, data.frame(
     id = id, label = label, created = now,
     has_model = !is.null(model), has_data = !is.null(data), has_result = !is.null(result),
     result_type = .nm_snapshot_result_type(result),
-    method = if (inherits(result, "nm_fit")) as.character(result$method) else "",
+    method = if (inherits(result, "nm_fit")) .nm_fit_method_label(result) else "",
     entry_type = "version", parent_id = "", run_number = NA_integer_,
     has_vpc = FALSE, has_npc = FALSE, has_npde = FALSE,
     has_vpc_categorical = FALSE, has_vpc_tte = FALSE,
@@ -383,7 +389,7 @@ nm_project_save_run <- function(workspace, project, version, result, label = NUL
     id = id, label = label, created = now,
     has_model = !is.null(model), has_data = !is.null(data), has_result = TRUE,
     result_type = kind,
-    method = if (inherits(result, "nm_fit")) as.character(result$method) else "",
+    method = if (inherits(result, "nm_fit")) .nm_fit_method_label(result) else "",
     entry_type = "run", parent_id = version, run_number = as.integer(number),
     has_vpc = FALSE, has_npc = FALSE, has_npde = FALSE,
     has_vpc_categorical = FALSE, has_vpc_tte = FALSE,

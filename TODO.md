@@ -1,6 +1,6 @@
 # LibeR engineering TODO
 
-Last reviewed: 2026-07-14
+Last reviewed: 2026-07-19
 
 Legend: completed work is checked and struck through; partially completed work
 retains an unchecked parent item with completed sub-items checked.
@@ -11,12 +11,19 @@ retains an unchecked parent item with completed sub-items checked.
   values are identical.~~
 - [x] ~~Exclude observation-specific DV/MDV/BLQ/LLOQ fields from the prediction
   structure key.~~
-- [ ] Replace record-specific observations, covariates, doses, and event times
-  with CppAD dynamic parameters where the event topology is identical.
-- [ ] Permit one structural tape to serve heterogeneous values without changing
-  model semantics, derivatives, event ordering, or ODE retaping rules.
-- [ ] Benchmark compilation time and memory on studies with thousands of
-  subjects and heterogeneous covariates/dosing.
+- [x] ~~Represent numeric PRED/DES covariates as CppAD dynamic parameters and
+  share a prediction tape across subjects with the same event topology.~~
+- [x] ~~Permit one prediction tape to serve heterogeneous covariate values
+  without changing active derivatives or event ordering.~~
+- [ ] Extend dynamic-parameter sharing to observation/objective tapes where it
+  gives a measured benefit.
+- [ ] Investigate dynamic dose magnitudes and event times only for layouts whose
+  event order, dose compartment, ADDL expansion, and infusion topology are
+  provably unchanged; retain separate tapes when topology differs.
+- [x] ~~Exercise a 1,000-subject heterogeneous-WT pool and verify that all
+  subjects use one dynamic prediction tape.~~
+- [ ] Add peak-memory and worker-payload measurements for complex studies with
+  thousands of subjects and heterogeneous covariates/dosing.
 
 ## 2. Batched population kernels - complete
 
@@ -39,17 +46,20 @@ retains an unchecked parent item with completed sub-items checked.
 - [ ] Revisit a fully native L-BFGS-B or trust-region implementation only if it
   can beat the current callback path on the scenario matrix.
 
-## 4. Tape validity and automatic retaping - partial
+## 4. Tape validity and automatic retaping - complete
 
 - [x] ~~Compile model `ifelse()` expressions as CppAD conditional expressions so
   branch outcomes can change without retaping.~~
 - [x] ~~Guard ADVAN6/13 tapes against material parameter movement and retape the
   accepted adaptive ODE trajectory.~~
 - [x] ~~Report tape records, validity checks, and retapes.~~
-- [ ] Record and compare matrix-pivot signatures at later parameter points.
-- [ ] Replace or supplement the ODE parameter-distance heuristic with a direct
-  accepted-step/path validity signature.
-- [ ] Add an explicit nonlinear steady-state convergence-path signature.
+- [x] ~~Record and compare matrix-pivot and matrix-exponential scaling paths at
+  later parameter points.~~
+- [x] ~~Guard adaptive ODE accepted-step and implicit-Newton convergence paths,
+  while retaining the parameter-distance guard as a proactive heuristic.~~
+- [x] ~~Guard nonlinear steady-state convergence paths.~~
+- [x] ~~Reject invalid or extreme conditional-mode trials as retape anchors and
+  move incrementally to a finite, pharmacologically valid anchor.~~
 
 ## 5. IMP gradients - partial
 
@@ -146,3 +156,17 @@ MU modelling should remain optional. Existing expressions such as
 `CL = THETA(1) * exp(ETA(1))` are already valid; explicit MU metadata is useful
 only when the estimator exploits the additive individual-parameter structure or
 when NONMEM control-stream compatibility requires it.
+
+## 11. Advanced CppAD execution - implemented / monitored
+
+- [x] ~~Use multi-direction Forward sweeps for suitable dense Jacobians.~~
+- [x] ~~Use subgraph Reverse for sufficiently large sparse Jacobians and report
+  the selected derivative strategy and nonzero count.~~
+- [x] ~~Persist optimized CppAD graphs with exact version/commit provenance and
+  reconstruct worker tapes without parsing or retaping.~~
+- [x] ~~Prototype nested-AD-safe `chkpoint_two` ADVAN1 and 2x2 matrix kernels and
+  verify values and Jacobians against their direct forms.~~
+- [ ] Promote checkpoint/atomic kernels to the production path only if a
+  representative benchmark overcomes their current small-kernel overhead.
+- [ ] Revisit sparsity thresholds and cache policy using large population
+  models, ODE systems, and remote-worker startup benchmarks.

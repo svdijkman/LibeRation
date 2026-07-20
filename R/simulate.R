@@ -125,6 +125,16 @@ nm_simulate <- function(model, data, theta = NULL, eta = NULL, sigma = NULL,
     result <- engine$simulate(
       replicate_data, theta = theta, eta = eta_value, sigma = sigma
     )
+    if ("PRED" %in% (engine$model$OUTPUT %||% character())) {
+      if (!length(eta_value) || all(eta_value == 0)) {
+        result$PRED <- result$IPRED
+      } else {
+        population_eta <- matrix(0, n_subjects, n_eta)
+        result$PRED <- engine$simulate(
+          replicate_data, theta = theta, eta = population_eta, sigma = sigma
+        )$IPRED
+      }
+    }
     if (n_eta) {
       for (column in seq_len(n_eta)) {
         result[[paste0("ETA", column)]] <- eta_value[result$.ID_INDEX, column]

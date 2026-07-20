@@ -89,6 +89,49 @@ test_that("specialized ADVAN tapes preserve values and exact derivatives", {
   expect_true(any(operation_reductions > 0))
 })
 
+test_that("subjects with the same topology share a dynamic-covariate tape", {
+  model <- nm_model(
+    INPUT = c("ID", "TIME", "EVID", "AMT", "WT"), ADVAN = 1,
+    DOSECMP = 1, OBSCMP = 1,
+    PRED = "CL=THETA(1)*(WT/70)^0.75; V=THETA(2); S1=V",
+    ERROR = "Y=F", THETAS = theta_table_ad(c(2, 20))
+  )
+  data <- data.frame(
+    ID = rep(1:2, each = 4), TIME = rep(c(0, 1, 4, 12), 2),
+    EVID = rep(c(1, 0, 0, 0), 2), AMT = rep(c(100, 0, 0, 0), 2),
+    WT = rep(c(50, 100), each = 4)
+  )
+  normalized <- LibeRation:::.nm_engine_data(model, data)
+  first <- LibeRation:::.nm_subject_data(normalized, 1L)
+  second <- LibeRation:::.nm_subject_data(normalized, 2L)
+  engine <- LibeRation:::NMEngine$new(model)
+  pool <- new.env(parent = emptyenv())
+  first_tape <- LibeRation:::.nm_prediction_pool_tape(
+    pool, engine, first, model$THETAS$Value, numeric(), 0L
+  )
+  second_tape <- LibeRation:::.nm_prediction_pool_tape(
+    pool, engine, second, model$THETAS$Value, numeric(), 0L
+  )
+
+  expect_identical(first_tape$pointer, second_tape$pointer)
+  expect_identical(first_tape$dynamic_columns, "WT")
+  expect_equal(first_tape$dynamic_parameters, nrow(first))
+
+  evaluate <- function(subject) {
+    LibeRation:::.liberation_prediction_tape_new_dynamic(
+      first_tape$pointer, subject
+    )
+    LibeRation:::.liberation_prediction_tape_eval(
+      first_tape$pointer, first_tape$point, FALSE
+    )$value
+  }
+  expect_equal(evaluate(first), nm_simulate(model, first)$IPRED,
+               tolerance = 2e-12, ignore_attr = TRUE)
+  expect_equal(evaluate(second), nm_simulate(model, second)$IPRED,
+               tolerance = 2e-12, ignore_attr = TRUE)
+  expect_false(isTRUE(all.equal(evaluate(first), evaluate(second))))
+})
+
 test_that("specialized affine propagation covers steady-state infusions", {
   previous <- getOption("LibeRation.specialized_advan")
   on.exit(options(LibeRation.specialized_advan = previous), add = TRUE)

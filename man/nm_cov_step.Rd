@@ -25,12 +25,15 @@ prefers a well-conditioned R matrix and falls back to sandwich or S.}
 \item{samples}{Target integration budget for IMP/SAEM marginal information.
 Low-dimensional ETA integrals use a tensor Gauss--Hermite design near this
 budget; higher-dimensional integrals use this many random-normal samples.
-The default reuses the IMP fit sample count or uses 200 for SAEM.}
+The default reuses the IMP fit sample count or uses 200 for SAEM. GQ fits
+reuse their estimation grid, tensor order or Smolyak level, and point
+limit.}
 
 \item{seed}{Common-random-number seed used by the random-normal fallback for
 IMP/SAEM information.}
 
-\item{eta_maxit}{Maximum conditional ETA iterations for IMP/SAEM information.}
+\item{eta_maxit}{Maximum conditional ETA iterations for GQ/IMP/SAEM
+information.}
 }
 \value{
 Covariance, correlation, standard errors, relative standard errors,

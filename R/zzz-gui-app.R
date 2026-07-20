@@ -21,6 +21,7 @@
 liber_gui <- function(model = NULL, data = NULL, queue = NULL,
                       workspace = NULL, project = NULL,
                       launch.browser = getOption("shiny.launch.browser", interactive()), ...) {
+  dots <- list(...)
   workspace <- if (inherits(workspace, "nm_workspace")) workspace else {
     nm_workspace(workspace %||% .liber_default_workspace())
   }
@@ -87,12 +88,49 @@ liber_gui <- function(model = NULL, data = NULL, queue = NULL,
     }
     paste0(prefix, "/favicon.svg")
   } else ""
+  widget_directory <- system.file("htmlwidgets", package = "LibeRation")
+  ai_worker_href <- ""
+  if (nzchar(widget_directory) && dir.exists(widget_directory)) {
+    widget_prefix <- paste0(
+      "liberation-widget-",
+      gsub("[^A-Za-z0-9_-]", "-", as.character(utils::packageVersion("LibeRation")))
+    )
+    if (!widget_prefix %in% names(shiny::resourcePaths())) {
+      shiny::addResourcePath(widget_prefix, widget_directory)
+    }
+    ai_worker_href <- paste0(widget_prefix, "/liber-ai-worker.js")
+  }
+  ai_models <- .liber_ai_models()
+  allowed_ai_models <- vapply(ai_models, `[[`, character(1), "id")
+  if (!client_settings$ai$help_model %in% allowed_ai_models) {
+    client_settings$ai$help_model <- .liber_ai_default_help_model()
+  }
+  if (!client_settings$ai$report_model %in%
+      c("same_as_help", allowed_ai_models)) {
+    client_settings$ai$report_model <- .liber_ai_default_report_model()
+  }
+  client_settings$ai$model <- client_settings$ai$help_model
+  saved_report_design <- function(project_id) {
+    if (is.null(project_id) || !length(project_id) || !nzchar(project_id)) return(NULL)
+    metadata <- tryCatch(
+      nm_report_design_load(workspace, project_id),
+      error = function(error) NULL
+    )
+    if (is.null(metadata) || !nrow(metadata)) return(NULL)
+    tryCatch(
+      nm_report_design_load(workspace, project_id, metadata$id[[1L]]),
+      error = function(error) NULL
+    )
+  }
   state <- shiny::reactiveValues(
     model = if (inherits(model, "NMEngine")) model$model else model,
     data = data, result = initial_result, fit = initial_fit,
     fit_payload = .liber_gui_fit(initial_fit, include_gof = FALSE),
     diagnostics = initial_diagnostics,
     report = NULL,
+    report_design = saved_report_design(project),
+    ai_config = client_settings$ai,
+    diagram_candidate = NULL,
     jobs = initial_jobs, job_log = character(), project = project,
     snapshot = initial_snapshot, run = initial_run,
     queue_id = selected_queue, remote_queues = saved_remote_queues,
@@ -100,6 +138,7 @@ liber_gui <- function(model = NULL, data = NULL, queue = NULL,
     job_context = client_settings$pending_jobs %||% list(),
     hidden_jobs = character(), selected_job = NULL,
     active_page = "home", comparison_open = FALSE,
+    draft_outputs = NULL,
     data_payload = FALSE, gof_payload = FALSE,
     diagnostic_payload = character(),
     refreshed = "Queue ready", log_level = "info",
@@ -145,7 +184,8 @@ liber_gui <- function(model = NULL, data = NULL, queue = NULL,
       })
       .liber_client_settings_write(
         workspace, selected_queue = state$queue_id,
-        remotes = state$remote_config, pending_jobs = persistent_jobs
+        remotes = state$remote_config, pending_jobs = persistent_jobs,
+        ai = state$ai_config
       )
     }
     append_log <- function(message, level = "info") {
@@ -162,6 +202,57 @@ liber_gui <- function(model = NULL, data = NULL, queue = NULL,
       state$fit_payload <- .liber_gui_fit(state$fit, include_gof = FALSE)
       invisible(state$fit)
     }
+    diagram_from_event <- function(graph) {
+      if (!is.list(graph)) .nm_stop("The visual model payload is invalid.")
+      nm_model_diagram(
+        compartments = graph$compartments,
+        flows = graph$flows,
+        parameters = graph$parameters,
+        advan = as.integer(graph$advan %||% 6L),
+        residual = as.character(graph$residual %||% "additive"),
+        covariates = as.character(unlist(graph$covariates %||% character())),
+        title = as.character(graph$title %||%
+          attr(state$model, "name", exact = TRUE) %||% "Diagram model")
+      )
+    }
+    report_design_from_event <- function(event) {
+      blocks <- lapply(event$blocks %||% list(), function(block) {
+        nm_report_block(
+          type = as.character(block$type),
+          title = as.character(block$title %||% NULL),
+          source = as.character(block$source %||% "user"),
+          text = as.character(block$text %||% ""),
+          run_ids = as.character(unlist(block$run_ids %||% character())),
+          elements = as.character(unlist(block$elements %||% character())),
+          options = as.list(block$options %||% list()),
+          id = as.character(block$id)
+        )
+      })
+      nm_report_design(
+        blocks = blocks,
+        title = as.character(event$title %||% "LibeRation modelling report"),
+        formats = as.character(unlist(event$formats %||% c("docx", "pdf"))),
+        style = list(filename = as.character(event$name %||% "liberation-report")),
+        id = if (nzchar(as.character(event$id %||% ""))) as.character(event$id) else NULL
+      )
+    }
+    report_uploaded_text <- function(name, data) {
+      name <- basename(as.character(name %||% "source.txt"))
+      raw <- jsonlite::base64_dec(sub("^data:[^,]*,", "", as.character(data %||% "")))
+      if (!length(raw)) .nm_stop("The uploaded report source is empty.")
+      path <- tempfile(fileext = paste0(".", tolower(tools::file_ext(name))))
+      on.exit(unlink(path, force = TRUE), add = TRUE)
+      connection <- file(path, open = "wb")
+      tryCatch(writeBin(raw, connection), finally = close(connection))
+      extension <- tolower(tools::file_ext(path))
+      if (extension == "pdf") {
+        if (!requireNamespace("pdftools", quietly = TRUE)) {
+          .nm_stop("Reading PDF source documents requires the optional `pdftools` package.")
+        }
+        return(paste(pdftools::pdf_text(path), collapse = "\n\n"))
+      }
+      .nm_report_document_text(path)
+    }
     reset_lazy_payloads <- function(data = TRUE, diagnostics = TRUE) {
       if (isTRUE(data)) state$data_payload <- FALSE
       state$gof_payload <- FALSE
@@ -172,7 +263,9 @@ liber_gui <- function(model = NULL, data = NULL, queue = NULL,
       value <- tryCatch(force(value), error = identity)
       if (isTRUE(update_result) || inherits(value, "error")) state$result <- value
       if (inherits(value, "nm_fit")) update_fit(value)
-      if (inherits(value, "nm_report")) state$report <- value
+      if (inherits(value, "nm_report") || inherits(value, "nm_report_bundle")) {
+        state$report <- value
+      }
       if (inherits(value, "error")) {
         append_log(conditionMessage(value), "error")
       } else {
@@ -313,8 +406,10 @@ liber_gui <- function(model = NULL, data = NULL, queue = NULL,
     load_snapshot <- function(project_id, snapshot_id = "latest") {
       opened <- nm_project_load(workspace, project_id, snapshot = snapshot_id)
       state$model <- opened$model
+      state$draft_outputs <- NULL
       state$data <- opened$data
       state$project <- opened$project
+      state$report_design <- saved_report_design(opened$project)
       state$snapshot <- opened$id
       state$run <- NULL
       state$diagnostics <- list()
@@ -332,8 +427,10 @@ liber_gui <- function(model = NULL, data = NULL, queue = NULL,
       opened$parent_id <- opened$parent_id %||% metadata$parent_id[[1L]]
       opened$run_number <- opened$run_number %||% metadata$run_number[[1L]]
       state$model <- opened$model
+      state$draft_outputs <- NULL
       state$data <- opened$data
       state$project <- opened$project
+      state$report_design <- saved_report_design(opened$project)
       state$snapshot <- opened$parent_id
       state$run <- opened$id
       state$diagnostics <- nm_project_load_diagnostics(workspace, project_id, opened$id)
@@ -441,9 +538,22 @@ liber_gui <- function(model = NULL, data = NULL, queue = NULL,
         icon = favicon_href,
         job_count = nrow(as.data.frame(state$jobs %||% data.frame()))
       )
+      run_output <- NULL
+      if (isTRUE(state$data_payload)) {
+        if (inherits(state$fit, "nm_fit")) {
+          run_output <- state$fit$output
+        } else if (is.data.frame(state$result) && length(state$model$OUTPUT %||% character())) {
+          selected <- intersect(state$model$OUTPUT, names(state$result))
+          if (length(selected)) {
+            run_output <- state$result[, selected, drop = FALSE]
+            run_output$.ROW <- seq_len(nrow(run_output))
+          }
+        }
+      }
       liber_workbench(
         model = state$model, data = state$data, jobs = state$jobs,
         result = state$result, fit = state$fit_payload, report = state$report,
+        report_design = state$report_design,
         diagnostics = state$diagnostics,
         log = list(level = state$log_level, current = state$log_current,
                    history = state$log_history),
@@ -453,6 +563,14 @@ liber_gui <- function(model = NULL, data = NULL, queue = NULL,
           pending_jobs = state$job_context, jobs = state$jobs,
           queue_id = state$queue_id
         ),
+        library = .liber_gui_library(),
+        ai = c(state$ai_config, list(
+          worker_url = ai_worker_href, models = ai_models,
+          secure_context = TRUE,
+          privacy = "Inference runs in a dedicated browser worker with no tools. Network APIs are disabled after the selected model has loaded."
+        )),
+        output_catalog = state$draft_outputs,
+        run_output = run_output,
         data_payload = state$data_payload,
         gof_payload = state$gof_payload,
         diagnostic_payload = state$diagnostic_payload,
@@ -463,6 +581,117 @@ liber_gui <- function(model = NULL, data = NULL, queue = NULL,
     shiny::observeEvent(input$liber_workbench_event, {
       event <- input$liber_workbench_event
       action <- as.character(event$action %||% "")
+
+      if (identical(action, "ai_settings")) {
+        allowed_models <- vapply(ai_models, `[[`, character(1), "id")
+        requested_help <- as.character(event$help_model %||% event$model %||%
+          state$ai_config$help_model %||% state$ai_config$model)[[1L]]
+        requested_report <- as.character(event$report_model %||%
+          state$ai_config$report_model)[[1L]]
+        if (!requested_help %in% allowed_models) {
+          requested_help <- .liber_ai_default_help_model()
+        }
+        if (!requested_report %in% c("same_as_help", allowed_models)) {
+          requested_report <- .liber_ai_default_report_model()
+        }
+        state$ai_config <- list(
+          activated = isTRUE(event$activated),
+          consented = isTRUE(event$consented),
+          help_model = requested_help,
+          report_model = requested_report,
+          model = requested_help
+        )
+        save_client_settings()
+        append_log(if (state$ai_config$activated) {
+          paste0(
+            "Browser-local AI enabled; Help and Report models remain unloaded ",
+            "until first use"
+          )
+        } else {
+          "Browser-local AI settings saved; AI remains disabled"
+        }, "info")
+        return(invisible(NULL))
+      }
+      if (identical(action, "diagram_preview")) {
+        return(record("Diagram code preview generated", {
+          diagram <- diagram_from_event(event$graph)
+          preview <- nm_diagram_preview(diagram)
+          state$diagram_candidate <- diagram
+          baseline <- if (is.null(state$model)) "" else {
+            as.character(state$model$GRAPH$generated$DES %||% "")
+          }
+          structure(list(
+            nonce = as.character(event$nonce %||% format(Sys.time(), "%OS6")),
+            preview = list(
+              pred = preview$PRED, des = preview$DES, error = preview$ERROR,
+              theta = .liber_gui_rows(preview$THETAS),
+              omega = .liber_gui_rows(preview$OMEGAS),
+              sigma = .liber_gui_rows(preview$SIGMAS)
+            ),
+            code_changed = nzchar(baseline) && !identical(trimws(baseline), trimws(state$model$DES))
+          ), class = "liber_gui_diagram_preview")
+        }))
+      }
+      if (identical(action, "diagram_apply")) {
+        return(record("Visual model code generated and applied", {
+          diagram <- if (is.list(event$graph)) diagram_from_event(event$graph) else state$diagram_candidate
+          if (!inherits(diagram, "nm_model_diagram")) {
+            .nm_stop("Preview the diagram before applying generated code.")
+          }
+          generated <- nm_diagram_generate(
+            diagram,
+            input = state$model$INPUT %||% c("ID", "TIME", "EVID", "AMT", "CMT", "DV", "MDV"),
+            output = state$model$OUTPUT %||% c("PRED", "IPRED", "CWRES")
+          )
+          nm_compile(generated)
+          state$model <- generated
+          state$diagram_candidate <- NULL
+          state$draft_outputs <- NULL
+          state$snapshot <- NULL
+          state$run <- NULL
+          state$diagnostics <- list()
+          reset_lazy_payloads(data = FALSE)
+          update_fit(NULL)
+          structure(list(), class = "liber_gui_validation")
+        }))
+      }
+      if (identical(action, "report_document")) {
+        value <- tryCatch(report_uploaded_text(event$name, event$data), error = identity)
+        if (inherits(value, "error")) {
+          append_log(conditionMessage(value), "error")
+        } else {
+          session$sendCustomMessage("liber-report-document", list(
+            input_id = "liber_workbench", nonce = as.character(event$nonce %||% ""),
+            block_id = as.character(event$blockId),
+            name = basename(as.character(event$name)), text = value
+          ))
+          append_log(paste("Loaded report source", basename(as.character(event$name))), "info")
+        }
+        return(invisible(NULL))
+      }
+      if (identical(action, "report_design_save")) {
+        return(record("Report workflow saved", {
+          if (is.null(state$project)) .nm_stop("Open a project before saving a report workflow.")
+          design <- report_design_from_event(event)
+          nm_report_design_save(workspace, state$project, design)
+          state$report_design <- design
+          structure(list(), class = "liber_gui_validation")
+        }))
+      }
+      if (identical(action, "report_design_render")) {
+        return(record("DOCX/PDF report generated", {
+          if (is.null(state$project)) .nm_stop("Open a project before generating a report.")
+          design <- report_design_from_event(event)
+          nm_report_design_save(workspace, state$project, design)
+          state$report_design <- design
+          name <- as.character(event$name %||% "liberation-report")
+          directory <- file.path(workspace$path, "reports", state$project)
+          nm_report_design_render(
+            design, workspace, state$project, directory = directory,
+            name = name, formats = design$formats
+          )
+        }))
+      }
 
       if (identical(action, "load_payload")) {
         kind <- tolower(as.character(event$kind %||% ""))
@@ -511,8 +740,13 @@ liber_gui <- function(model = NULL, data = NULL, queue = NULL,
       if (identical(action, "validate")) {
         return(record("Model validation completed", {
           if (is.null(state$model)) .nm_stop("Load a model before validation.")
-          nm_compile(state$model)
-          structure(list(), class = "liber_gui_validation")
+          draft <- .liber_model_from_event(state$model, event)
+          nm_compile(draft)
+          state$draft_outputs <- nm_model_outputs(draft)
+          structure(
+            list(outputs = state$draft_outputs),
+            class = "liber_gui_validation"
+          )
         }))
       }
       if (identical(action, "load_csv")) {
@@ -552,7 +786,9 @@ liber_gui <- function(model = NULL, data = NULL, queue = NULL,
             attr(imported_data, "name") <- basename(filename)
           }
           state$project <- project_id
+          state$report_design <- saved_report_design(project_id)
           state$model <- control$model
+          state$draft_outputs <- NULL
           state$data <- imported_data
           state$snapshot <- nm_project_save(
             workspace, project_id, control$model, imported_data, NULL,
@@ -565,6 +801,38 @@ liber_gui <- function(model = NULL, data = NULL, queue = NULL,
           if (length(control$compatibility$warnings)) {
             append_log(paste(control$compatibility$warnings, collapse = " | "), "warning")
           }
+          structure(list(), class = "liber_gui_validation")
+        }))
+      }
+      if (identical(action, "library_import")) {
+        return(record("LibeRary model imported", {
+          if (!requireNamespace("LibeRary", quietly = TRUE)) {
+            .nm_stop("Install LibeRary to import catalogue models.")
+          }
+          library_id <- as.character(event$libraryId %||% "")
+          if (!nzchar(library_id)) .nm_stop("Select a LibeRary model.")
+          target <- state$project
+          if (isTRUE(event$newProject) || is.null(target)) {
+            requested_name <- trimws(as.character(event$projectName %||% ""))
+            if (nzchar(requested_name)) {
+              target <- nm_project_create(workspace, requested_name)$id
+            } else target <- paste0("lib_", library_id)
+          }
+          imported <- LibeRary::library_use_in_workspace(
+            library_id, project = target, workspace = workspace,
+            version_label = as.character(event$label %||% "")
+          )
+          opened <- nm_project_load(workspace, imported$project, imported$version_id)
+          state$project <- imported$project
+          state$report_design <- saved_report_design(imported$project)
+          state$snapshot <- imported$version_id
+          state$run <- NULL
+          state$model <- opened$model
+          state$draft_outputs <- NULL
+          state$data <- opened$data
+          state$diagnostics <- list()
+          reset_lazy_payloads()
+          update_fit(NULL)
           structure(list(), class = "liber_gui_validation")
         }))
       }
@@ -590,6 +858,7 @@ liber_gui <- function(model = NULL, data = NULL, queue = NULL,
             n_state = event$nState,
             problem = as.character(event$problem %||% "Template model")
           )
+          state$draft_outputs <- NULL
           state$snapshot <- if (!is.null(workspace) && !is.null(state$project)) {
             nm_project_save(
               workspace, state$project, state$model, state$data, NULL,
@@ -606,47 +875,10 @@ liber_gui <- function(model = NULL, data = NULL, queue = NULL,
       if (identical(action, "update_model") || identical(action, "update_parameters")) {
         return(record("Model changes applied", {
           if (is.null(state$model)) .nm_stop("Load a model before editing it.")
-          arguments <- state$model[intersect(names(state$model), names(formals(nm_model)))]
-          old_advan <- state$model$ADVAN
-          arguments$ADVAN <- as.integer(event$advan %||% old_advan)
-          arguments$TRANS <- as.integer(event$trans %||% state$model$TRANS)
-          arguments$PRED <- as.character(event$pred %||% state$model$PRED)
-          arguments$ERROR <- as.character(event$error %||% state$model$ERROR)
-          arguments$DES <- as.character(event$des %||% state$model$DES)
-          arguments$INPUT <- unique(as.character(unlist(event$input %||% state$model$INPUT)))
-          arguments$THETAS <- .liber_parameter_table_update(
-            state$model$THETAS, event$theta, "THETA"
-          )
-          arguments$OMEGAS <- .liber_parameter_table_update(
-            state$model$OMEGAS, event$omega, "OMEGA"
-          )
-          arguments$SIGMAS <- .liber_parameter_table_update(
-            state$model$SIGMAS, event$sigma, "SIGMA"
-          )
-          likelihood <- as.list(state$model$LIK_CONFIG)
-          likelihood$version <- NULL
-          likelihood$omega <- as.character(
-            event$omega_structure %||% state$model$LIK_CONFIG$omega %||% "diagonal"
-          )
-          likelihood$priors <- if (is.null(event$priors)) {
-            state$model$LIK_CONFIG$priors
-          } else {
-            .liber_prior_table_update(event$priors)
-          }
-          arguments$LIK_CONFIG <- do.call(nm_lik_config, likelihood)
-          if (!identical(arguments$ADVAN, old_advan)) arguments$GRAPH <- NULL
-          arguments$ERROR_TYPE <- "auto"
-          edited <- do.call(nm_model, arguments)
-          requested_states <- as.integer(event$n_state %||% edited$n_state)
-          if (edited$ADVAN %in% c(6L, 13L) && requested_states != edited$n_state) {
-            .nm_stop("The compartment count is derived from $DES. Define DADT(1) through DADT(",
-                     requested_states, ") to use that count.")
-          }
-          attr(edited, "name") <- trimws(as.character(
-            event$problem %||% attr(state$model, "name", exact = TRUE) %||% "Untitled model"
-          ))
+          edited <- .liber_model_from_event(state$model, event)
           nm_compile(edited)
           state$model <- edited
+          state$draft_outputs <- NULL
           state$snapshot <- NULL
           state$run <- NULL
           state$diagnostics <- list()
@@ -709,39 +941,23 @@ liber_gui <- function(model = NULL, data = NULL, queue = NULL,
           if (is.null(state$model) || is.null(state$data)) {
             .nm_stop("Load both a model and dataset before estimation.")
           }
-          arguments <- list(
-            method = as.character(event$method %||% "FOCEI"),
-            maxit = as.integer(event$maxit %||% 200L),
-            eta_maxit = as.integer(event$etaMaxit %||% 100L),
-            tolerance = as.numeric(event$tolerance %||% 1e-6),
-            n_cores = max(1L, as.integer(event$nCores %||% 1L)),
-            print_every = max(0L, as.integer(event$printEvery %||% 0L)),
-            covariance = isTRUE(event$covariance),
-            covariance_type = as.character(event$covarianceType %||% "hessian"),
-            covariance_tolerance = as.numeric(event$covarianceTolerance %||% 1e-8),
-            covariance_samples = as.integer(event$covarianceSamples %||% 200L),
-            covariance_seed = as.integer(event$covarianceSeed %||%
-              event$methodSeed %||% 20260713L)
-          )
-          if (identical(arguments$method, "IMP")) {
-            arguments$n_imp <- as.integer(event$nImp %||% 200L)
-            arguments$seed <- as.integer(event$methodSeed %||% 20260713L)
-          } else if (identical(arguments$method, "SAEM")) {
-            arguments$n_iter <- as.integer(event$nIter %||% 200L)
-            arguments$burn <- as.integer(event$burn %||% floor(arguments$n_iter / 3))
-            arguments$mcmc_steps <- as.integer(event$mcmcSteps %||% 2L)
-            arguments$seed <- as.integer(event$methodSeed %||% 20260713L)
-          } else if (identical(arguments$method, "BAYES")) {
-            arguments$n_burn <- as.integer(event$nBurn %||% 500L)
-            arguments$n_sample <- as.integer(event$nSample %||% 1000L)
-            arguments$n_thin <- as.integer(event$nThin %||% 1L)
-            arguments$seed <- as.integer(event$methodSeed %||% 20260713L)
+          stages <- .liber_estimation_stages(event)
+          sequential <- length(stages) > 1L
+          methods <- vapply(stages, `[[`, character(1), "method")
+          arguments <- if (sequential) {
+            list(stages = stages)
+          } else {
+            c(list(method = stages[[1L]]$method), stages[[1L]]$arguments)
           }
           q <- active_queue()
           run_label <- trimws(as.character(event$label %||% ""))
-          if (!nzchar(run_label)) run_label <- paste(arguments$method, "estimation")
+          method_label <- paste(methods, collapse = " -> ")
+          if (!nzchar(run_label)) run_label <- paste(method_label, "estimation")
           if (is.null(q)) {
-            result <- do.call(nm_est, c(list(model = state$model, data = state$data), arguments))
+            result <- do.call(
+              if (sequential) nm_est_sequence else nm_est,
+              c(list(model = state$model, data = state$data), arguments)
+            )
             persist_run(result, run_label)
             result
           } else {
@@ -750,14 +966,15 @@ liber_gui <- function(model = NULL, data = NULL, queue = NULL,
             }
             parent_version <- ensure_parent_version()
             id <- q$submit(LibeRties::ls_job(
-              "estimate", state$model, state$data, arguments = arguments,
+              if (sequential) "estimate_sequence" else "estimate",
+              state$model, state$data, arguments = arguments,
               label = run_label
             ))
             contexts <- state$job_context
             contexts[[job_context_key(id)]] <- list(
               project = state$project, model = state$model, data = state$data,
               label = run_label, version = parent_version,
-              type = "estimate", method = arguments$method,
+              type = "estimate", method = method_label,
               queue_id = state$queue_id, job_id = as.character(id), status = "queued"
             )
             state$job_context <- contexts
@@ -880,6 +1097,7 @@ liber_gui <- function(model = NULL, data = NULL, queue = NULL,
             workspace, state$project, run, list(scm = scm)
           )
           state$model <- scm$final_model
+          state$draft_outputs <- NULL
           state$snapshot <- version
           state$run <- run
           reset_lazy_payloads(data = FALSE)
@@ -951,10 +1169,12 @@ liber_gui <- function(model = NULL, data = NULL, queue = NULL,
             stop(error)
           })
           state$project <- created$id
+          state$report_design <- NULL
           state$snapshot <- initial$snapshot %||% NULL
           state$run <- NULL
           state$diagnostics <- list()
           state$model <- initial$model %||% NULL
+          state$draft_outputs <- NULL
           state$data <- initial$data %||% NULL
           reset_lazy_payloads()
           update_fit(NULL)
@@ -985,9 +1205,11 @@ liber_gui <- function(model = NULL, data = NULL, queue = NULL,
           versions <- records[records$entry_type == "version", , drop = FALSE]
           if (!nrow(versions)) {
             state$project <- project_id
+            state$report_design <- saved_report_design(project_id)
             state$snapshot <- NULL
             state$run <- NULL
             state$model <- NULL
+            state$draft_outputs <- NULL
             state$data <- NULL
             state$diagnostics <- list()
             reset_lazy_payloads()
@@ -1146,6 +1368,7 @@ liber_gui <- function(model = NULL, data = NULL, queue = NULL,
             state$snapshot <- NULL
             state$run <- NULL
             state$model <- NULL
+            state$draft_outputs <- NULL
             state$data <- NULL
             state$diagnostics <- list()
             reset_lazy_payloads()
@@ -1169,11 +1392,16 @@ liber_gui <- function(model = NULL, data = NULL, queue = NULL,
       if (identical(action, "project_delete")) {
         return(record("Project deleted", {
           if (is.null(workspace)) .nm_stop("Launch with `workspace` to delete projects.")
+          if (!identical(as.character(event$confirmation %||% ""), "YES")) {
+            .nm_stop('Type "YES" in the confirmation field before deleting a project.')
+          }
           nm_project_delete(workspace, as.character(event$id %||% state$project))
           state$project <- NULL
+          state$report_design <- NULL
           state$snapshot <- NULL
           state$run <- NULL
           state$model <- NULL
+          state$draft_outputs <- NULL
           state$data <- NULL
           state$diagnostics <- list()
           reset_lazy_payloads()
@@ -1347,5 +1575,10 @@ liber_gui <- function(model = NULL, data = NULL, queue = NULL,
   }
   app <- shiny::shinyApp(ui, server)
   if (is.null(launch.browser)) return(app)
-  shiny::runApp(app, launch.browser = launch.browser, ...)
+  if (is.null(dots$port) && is.null(getOption("shiny.port"))) {
+    # Browser model storage is origin-scoped. A stable default port lets the
+    # downloaded WebLLM weights persist across ordinary GUI sessions.
+    dots$port <- 38764L
+  }
+  do.call(shiny::runApp, c(list(appDir = app, launch.browser = launch.browser), dots))
 }

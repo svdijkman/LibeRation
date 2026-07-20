@@ -12,6 +12,51 @@
   object$eta
 }
 
+.nm_np_predict <- function(object, data, type) {
+  distribution <- object$nonparametric
+  supports <- as.matrix(distribution$supports)
+  n_subjects <- length(unique(data$.ID_INDEX))
+  n_eta <- .nm_eta_columns(object$model, data)
+  if (ncol(supports) != n_eta) {
+    .nm_stop("The nonparametric support dimension does not match the requested occasion layout.")
+  }
+  probabilities <- if (type == "population") {
+    matrix(distribution$weights, n_subjects, nrow(supports), byrow = TRUE)
+  } else {
+    value <- as.matrix(distribution$posterior_probabilities)
+    if (!identical(dim(value), c(n_subjects, nrow(supports)))) {
+      .nm_stop("Individual nonparametric predictions require the estimation dataset's subject layout.")
+    }
+    value
+  }
+  predictions <- lapply(seq_len(nrow(supports)), function(index) {
+    nm_simulate(
+      object$model, data, theta = object$theta,
+      eta = matrix(supports[index, ], n_subjects, n_eta, byrow = TRUE),
+      sigma = object$sigma, omega = object$omega
+    )
+  })
+  result <- predictions[[1L]]
+  generated <- setdiff(names(result), names(data))
+  prediction_columns <- generated[
+    vapply(result[generated], is.numeric, logical(1)) & !grepl("^ETA[0-9]+$", generated)
+  ]
+  row_probabilities <- probabilities[data$.ID_INDEX, , drop = FALSE]
+  for (column in prediction_columns) {
+    values <- do.call(cbind, lapply(predictions, `[[`, column))
+    result[[column]] <- rowSums(values * row_probabilities)
+  }
+  eta <- probabilities %*% supports
+  if (n_eta) {
+    for (column in seq_len(n_eta)) {
+      result[[paste0("ETA", column)]] <- eta[data$.ID_INDEX, column]
+    }
+  }
+  attr(result, "solver") <- attr(predictions[[1L]], "solver")
+  attr(result, "state_names") <- attr(predictions[[1L]], "state_names")
+  result
+}
+
 #' Predictions from a fitted LibeRation model
 #'
 #' @param object An `nm_fit`.
@@ -25,6 +70,9 @@ predict.nm_fit <- function(object, newdata = NULL,
                            type = c("individual", "population"), ...) {
   type <- match.arg(type)
   data <- .nm_engine_data(object$model, newdata %||% object$data)
+  if (object$method %in% c("NPML", "NPAG") && !is.null(object$nonparametric)) {
+    return(.nm_np_predict(object, data, type))
+  }
   eta <- .nm_fit_eta_for_data(object, data, type)
   nm_simulate(
     object$model, data, theta = object$theta, eta = eta,
@@ -117,7 +165,27 @@ nm_gof <- function(fit) {
     }
   }
   output[unavailable, c("RES", "IRES", "WRES", "IWRES", "CWRES")] <- NA_real_
+  selected <- fit$model$OUTPUT %||% character()
+  generated <- setdiff(selected, names(output))
+  for (name in intersect(generated, names(individual))) {
+    output[[name]] <- individual[[name]]
+  }
   output
+}
+
+.nm_fit_selected_outputs <- function(fit) {
+  selected <- fit$model$OUTPUT %||% character()
+  if (!length(selected)) return(NULL)
+  table <- nm_gof(fit)
+  available <- intersect(selected, names(table))
+  result <- data.frame(.ROW = seq_len(nrow(table)), check.names = FALSE)
+  for (name in available) result[[name]] <- table[[name]]
+  missing <- setdiff(selected, available)
+  if (length(missing)) {
+    for (name in missing) result[[name]] <- NA_real_
+    attr(result, "unavailable") <- missing
+  }
+  result
 }
 
 #' Empirical Bayes estimates and shrinkage
@@ -196,12 +264,14 @@ nm_etab <- function(fit) {
 }
 
 .nm_imp_information_objective <- function(context, map, normals, anchor,
-                                          eta_maxit, tolerance) {
+                                          eta_maxit, tolerance,
+                                          adaptive = TRUE) {
   anchor <- as.numeric(anchor)
   parameters <- map$decode(anchor)
   proposal_started <- proc.time()[["elapsed"]]
   proposals <- .nm_imp_prepare_proposals(
-    context, parameters, normals, eta_maxit, tolerance
+    context, parameters, normals, eta_maxit, tolerance,
+    adaptive = adaptive
   )
   if (any(!vapply(proposals, function(proposal) isTRUE(proposal$valid), logical(1)))) {
     .nm_stop("Unable to construct finite importance proposals for covariance.")
@@ -270,7 +340,7 @@ nm_etab <- function(fit) {
 
 .nm_cov_objective <- function(fit, context, map, normals = NULL,
                               anchor = NULL, eta_maxit = 100L,
-                              tolerance = 1e-7) {
+                              tolerance = 1e-7, adaptive = TRUE) {
   method <- fit$method
   deterministic <- switch(
     method, FO = "fo", FOCE = "foce", FOCEI = "focei",
@@ -298,9 +368,10 @@ nm_etab <- function(fit) {
     }
     return(result)
   }
-  if (method %in% c("IMP", "SAEM")) {
+  if (method %in% c("GQ", "IMP", "SAEM")) {
     return(.nm_imp_information_objective(
-      context, map, normals, anchor %||% map$start, eta_maxit, tolerance
+      context, map, normals, anchor %||% map$start, eta_maxit, tolerance,
+      adaptive = adaptive
     ))
   }
   approximation <- switch(
@@ -308,7 +379,7 @@ nm_etab <- function(fit) {
     ITS = "its", NULL
   )
   if (is.null(approximation)) {
-    .nm_stop("Covariance is available for FO, FOCE, FOCEI, LAPLACE, ITS, IMP, and SAEM fits.")
+    .nm_stop("Covariance is available for FO, FOCE, FOCEI, LAPLACE, ITS, GQ, IMP, and SAEM fits.")
   }
   objective <- .nm_nested_objective(
     context, approximation, eta_maxit = eta_maxit, tolerance = tolerance
@@ -431,10 +502,13 @@ nm_etab <- function(fit) {
 #' @param samples Target integration budget for IMP/SAEM marginal information.
 #'   Low-dimensional ETA integrals use a tensor Gauss--Hermite design near this
 #'   budget; higher-dimensional integrals use this many random-normal samples.
-#'   The default reuses the IMP fit sample count or uses 200 for SAEM.
+#'   The default reuses the IMP fit sample count or uses 200 for SAEM. GQ fits
+#'   reuse their estimation grid, tensor order or Smolyak level, and point
+#'   limit.
 #' @param seed Common-random-number seed used by the random-normal fallback for
 #'   IMP/SAEM information.
-#' @param eta_maxit Maximum conditional ETA iterations for IMP/SAEM information.
+#' @param eta_maxit Maximum conditional ETA iterations for GQ/IMP/SAEM
+#'   information.
 #' @return Covariance, correlation, standard errors, relative standard errors,
 #'   eigenvalues, and conditioning diagnostics.
 #' @export
@@ -447,10 +521,13 @@ nm_cov_step <- function(fit,
   requested_type <- type
   if (type == "r") type <- "hessian"
   if (type == "s") type <- "opg"
-  if (fit$method == "BAYES") {
-    .nm_stop("BAYES reports posterior uncertainty; a frequentist covariance step is not applicable.")
+  if (fit$method %in% c("BAYES", "HMC", "NUTS")) {
+    .nm_stop(fit$method, " reports posterior uncertainty; a frequentist covariance step is not applicable.")
   }
-  if (!fit$method %in% c("FO", "FOCE", "FOCEI", "LAPLACE", "ITS", "IMP", "SAEM")) {
+  if (fit$method %in% c("NPML", "NPAG")) {
+    .nm_stop("Nonparametric support uncertainty is non-regular; use bootstrap uncertainty for ", fit$method, ".")
+  }
+  if (!fit$method %in% c("FO", "FOCE", "FOCEI", "LAPLACE", "ITS", "GQ", "IMP", "SAEM")) {
     .nm_stop("The fitted method does not support a covariance step.")
   }
   tolerance <- as.numeric(tolerance)
@@ -462,22 +539,34 @@ nm_cov_step <- function(fit,
   map <- .nm_outer_map(fit$model)
   parameters <- .nm_fit_parameters(fit)
   at <- map$encode(parameters)
-  marginal <- fit$method %in% c("IMP", "SAEM")
+  marginal <- fit$method %in% c("GQ", "IMP", "SAEM")
   normals <- NULL
   marginal_design <- NULL
   if (marginal) {
-    samples <- as.integer(samples %||%
-      if (fit$method == "IMP") fit$diagnostics$n_imp %||% 200L else 200L)
-    seed <- as.integer(seed %||% fit$diagnostics$seed %||% 20260713L)
     eta_maxit <- as.integer(eta_maxit %||% fit$diagnostics$eta_maxit %||% 100L)
-    if (length(samples) != 1L || is.na(samples) || samples < 5L) {
-      .nm_stop("`samples` must be one integer greater than or equal to 5.")
-    }
-    if (length(seed) != 1L || is.na(seed)) .nm_stop("`seed` must be one integer.")
     if (length(eta_maxit) != 1L || is.na(eta_maxit) || eta_maxit < 1L) {
       .nm_stop("`eta_maxit` must be one positive integer.")
     }
-    marginal_design <- .nm_imp_covariance_design(context, samples, seed)
+    if (fit$method == "GQ") {
+      marginal_design <- .nm_gq_design(
+        context,
+        order = fit$diagnostics$quadrature_order %||% 5L,
+        max_points = fit$diagnostics$quadrature_max_points %||% 100000L,
+        grid = fit$diagnostics$quadrature_grid %||% "tensor",
+        level = fit$diagnostics$quadrature_level %||% 3L
+      )
+      samples <- marginal_design$actual_samples
+      seed <- NULL
+    } else {
+      samples <- as.integer(samples %||%
+        if (fit$method == "IMP") fit$diagnostics$n_imp %||% 200L else 200L)
+      seed <- as.integer(seed %||% fit$diagnostics$seed %||% 20260713L)
+      if (length(samples) != 1L || is.na(samples) || samples < 5L) {
+        .nm_stop("`samples` must be one integer greater than or equal to 5.")
+      }
+      if (length(seed) != 1L || is.na(seed)) .nm_stop("`seed` must be one integer.")
+      marginal_design <- .nm_imp_covariance_design(context, samples, seed)
+    }
     normals <- marginal_design$normals
   }
   if (!length(at)) {
@@ -497,7 +586,10 @@ nm_cov_step <- function(fit,
   if (marginal && (need_bread || need_meat)) {
     objective <- .nm_cov_objective(
       fit, context, map, normals = normals, anchor = at,
-      eta_maxit = eta_maxit, tolerance = fit$diagnostics$tolerance %||% 1e-7
+      eta_maxit = eta_maxit, tolerance = fit$diagnostics$tolerance %||% 1e-7,
+      adaptive = if (fit$method == "GQ") {
+        isTRUE(fit$diagnostics$adaptive)
+      } else TRUE
     )
   }
   if (need_bread) {
@@ -505,7 +597,10 @@ nm_cov_step <- function(fit,
       objective <- .nm_cov_objective(
         fit, context, map, normals = normals, anchor = at,
         eta_maxit = eta_maxit %||% 100L,
-        tolerance = fit$diagnostics$tolerance %||% 1e-7
+        tolerance = fit$diagnostics$tolerance %||% 1e-7,
+        adaptive = if (fit$method == "GQ") {
+          isTRUE(fit$diagnostics$adaptive)
+        } else TRUE
       )
     }
     bread_compiled <- attr(objective, "compiled_objective", exact = TRUE)
@@ -619,6 +714,8 @@ nm_cov_step <- function(fit,
     actual_samples = if (marginal) marginal_design$actual_samples else NULL,
     sampling = if (marginal) marginal_design$method else NULL,
     quadrature_order = if (marginal) marginal_design$quadrature_order else NULL,
+    quadrature_level = if (marginal) marginal_design$quadrature_level else NULL,
+    quadrature_grid = if (marginal) marginal_design$resolved_grid else NULL,
     seed = if (marginal) seed else NULL
   ), class = "nm_covariance")
 }

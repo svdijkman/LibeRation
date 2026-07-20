@@ -8,6 +8,65 @@
   maximum + log(sum(exp(values - maximum)))
 }
 
+.nm_gq_tensor_fits <- function(order, dimension, max_points) {
+  points <- 1
+  for (axis in seq_len(dimension)) {
+    if (points > max_points / order) return(FALSE)
+    points <- points * order
+  }
+  TRUE
+}
+
+.nm_gq_design <- function(context, order = 5L, max_points = 100000L,
+                          grid = c("auto", "tensor", "smolyak"), level = 3L) {
+  order <- as.integer(order)
+  level <- as.integer(level)
+  max_points <- as.integer(max_points)
+  if (!length(grid)) .nm_stop("`gq_grid` must contain one grid strategy.")
+  grid <- tolower(as.character(grid[[1L]] %||% "auto"))
+  if (length(grid) != 1L || is.na(grid)) {
+    .nm_stop("`gq_grid` must contain one grid strategy.")
+  }
+  if (identical(grid, "sparse")) grid <- "smolyak"
+  if (!grid %in% c("auto", "tensor", "smolyak")) {
+    .nm_stop("`gq_grid` must be one of auto, tensor, or smolyak.")
+  }
+  requested_grid <- grid
+  if (grid == "auto") {
+    tensor_fits <- .nm_gq_tensor_fits(order, context$n_eta, max_points)
+    grid <- if (tensor_fits && (context$n_eta <= 3L || order == 1L)) {
+      "tensor"
+    } else "smolyak"
+  }
+  rule <- if (grid == "tensor") {
+    LibeRtAD::ad_gauss_hermite(
+      order = order, dimension = context$n_eta, max_points = max_points
+    )
+  } else {
+    LibeRtAD::ad_smolyak_gauss_hermite(
+      level = level, dimension = context$n_eta, max_points = max_points
+    )
+  }
+  nodes <- rule$nodes
+  attr(nodes, "log_measure") <- as.numeric(
+    rule$log_abs_weights %||% rule$log_weights
+  )
+  attr(nodes, "measure_sign") <- as.numeric(rule$signs %||% sign(rule$weights))
+  attr(nodes, "quadrature_method") <- paste0(grid, "-gauss-hermite")
+  list(
+    normals = rep(list(nodes), context$n_subjects),
+    method = paste0(grid, "-gauss-hermite"),
+    actual_samples = as.integer(rule$points),
+    candidate_points = as.integer(rule$candidate_points %||% rule$points),
+    quadrature_order = if (grid == "tensor") as.integer(rule$order) else NA_integer_,
+    quadrature_level = if (grid == "smolyak") as.integer(rule$level) else NA_integer_,
+    requested_grid = requested_grid,
+    resolved_grid = grid,
+    negative_weights = as.integer(rule$negative_weights %||% 0L),
+    max_points = max_points
+  )
+}
+
 .nm_imp_normals <- function(context, n_imp, seed) {
   n_imp <- as.integer(n_imp)
   seed <- as.integer(seed)
@@ -49,28 +108,7 @@
       quadrature_order = NA_integer_
     ))
   }
-  jacobi <- matrix(0, order, order)
-  if (order > 1L) {
-    off_diagonal <- sqrt(seq_len(order - 1L))
-    jacobi[cbind(seq_len(order - 1L), 2:order)] <- off_diagonal
-    jacobi[cbind(2:order, seq_len(order - 1L))] <- off_diagonal
-  }
-  decomposition <- eigen(jacobi, symmetric = TRUE)
-  nodes <- decomposition$values
-  weights <- decomposition$vectors[1L, ]^2
-  grid <- expand.grid(
-    rep(list(seq_len(order)), dimension), KEEP.OUT.ATTRS = FALSE
-  )
-  normals <- do.call(cbind, lapply(grid, function(index) nodes[index]))
-  measure <- apply(
-    do.call(cbind, lapply(grid, function(index) weights[index])), 1L, prod
-  )
-  attr(normals, "log_measure") <- log(measure)
-  list(
-    normals = rep(list(normals), context$n_subjects),
-    method = "tensor-gauss-hermite", actual_samples = nrow(normals),
-    quadrature_order = order
-  )
+  .nm_gq_design(context, order = order, max_points = nodes_required)
 }
 
 .nm_est_its <- function(context, map, maxit, eta_maxit, tolerance, trace,
@@ -154,15 +192,60 @@
   logdet <- as.numeric(determinant(covariance, logarithm = TRUE)$modulus)
   z <- normals
   log_measure <- attr(normals, "log_measure", exact = TRUE)
-  sampling <- if (is.null(log_measure)) "random-normal" else "tensor-gauss-hermite"
+  measure_sign <- attr(normals, "measure_sign", exact = TRUE)
+  sampling <- attr(normals, "quadrature_method", exact = TRUE)
+  if (is.null(log_measure)) sampling <- "random-normal"
+  if (is.null(sampling)) sampling <- "tensor-gauss-hermite"
   if (is.null(log_measure)) log_measure <- rep(-log(nrow(z)), nrow(z))
+  if (is.null(measure_sign)) measure_sign <- rep(1, nrow(z))
   list(
     valid = TRUE, mode = mode,
     eta = sweep(z %*% t(root), 2L, mode$par, `+`),
     log_proposal = -0.5 * (
       dimension * log(2 * pi) + logdet + rowSums(z^2)
     ),
-    log_measure = as.numeric(log_measure), sampling = sampling
+    log_measure = as.numeric(log_measure),
+    measure_sign = as.numeric(measure_sign), sampling = sampling
+  )
+}
+
+.nm_gq_fixed_subject_proposal <- function(evaluator, parameters, normals) {
+  dimension <- evaluator$n_eta
+  mode <- list(
+    par = rep(0, dimension), convergence = 0L, iterations = 0L,
+    evaluations = 0L, backend = "fixed-omega"
+  )
+  if (!dimension) {
+    return(list(
+      valid = TRUE, mode = mode, eta = matrix(numeric(), 1L, 0L),
+      log_proposal = 0, log_measure = 0,
+      sampling = "fixed-tensor-gauss-hermite", measure_sign = 1
+    ))
+  }
+  covariance <- .nm_positive_definite(
+    .nm_omega_matrix(evaluator$engine$model, parameters$omega),
+    "Fixed GQ OMEGA covariance"
+  )$matrix
+  root <- t(chol(covariance))
+  logdet <- as.numeric(determinant(covariance, logarithm = TRUE)$modulus)
+  z <- normals
+  log_measure <- attr(normals, "log_measure", exact = TRUE)
+  measure_sign <- attr(normals, "measure_sign", exact = TRUE)
+  sampling <- attr(normals, "quadrature_method", exact = TRUE) %||%
+    "tensor-gauss-hermite"
+  if (is.null(log_measure)) {
+    .nm_stop("Fixed Gaussian quadrature requires deterministic node weights.")
+  }
+  if (is.null(measure_sign)) measure_sign <- rep(1, nrow(z))
+  list(
+    valid = TRUE, mode = mode,
+    eta = z %*% t(root),
+    log_proposal = -0.5 * (
+      dimension * log(2 * pi) + logdet + rowSums(z^2)
+    ),
+    log_measure = as.numeric(log_measure),
+    measure_sign = as.numeric(measure_sign),
+    sampling = paste0("fixed-", sampling)
   )
 }
 
@@ -192,18 +275,42 @@
   ))
   log_weight <- -0.5 * evaluated$value - proposal$log_proposal
   log_integrand <- log_weight + proposal$log_measure
-  value <- -2 * .nm_log_sum_exp(log_integrand)
+  measure_sign <- proposal$measure_sign %||% rep(1, length(log_integrand))
+  finite <- is.finite(log_integrand) & is.finite(measure_sign) & measure_sign != 0
+  if (!any(finite)) {
+    return(list(
+      value = Inf, native_gradient = NULL, mode = proposal$mode,
+      effective_sample_size = 0, cancellation_ratio = 0,
+      quadrature_valid = FALSE
+    ))
+  }
+  maximum <- max(log_integrand[finite])
+  scaled <- numeric(length(log_integrand))
+  scaled[finite] <- measure_sign[finite] * exp(log_integrand[finite] - maximum)
+  signed_total <- sum(scaled)
+  absolute_total <- sum(abs(scaled))
+  valid <- is.finite(signed_total) && is.finite(absolute_total) &&
+    signed_total > .Machine$double.eps * max(1, absolute_total)
+  if (!valid) {
+    return(list(
+      value = Inf, native_gradient = NULL, mode = proposal$mode,
+      effective_sample_size = 0, cancellation_ratio = 0,
+      quadrature_valid = FALSE
+    ))
+  }
+  value <- -2 * (maximum + log(signed_total))
   native_gradient <- NULL
-  effective_sample_size <- NA_real_
+  absolute_weights <- abs(scaled) / absolute_total
+  effective_sample_size <- 1 / sum(absolute_weights^2)
+  cancellation_ratio <- signed_total / absolute_total
   if (isTRUE(gradient)) {
-    shifted <- log_integrand - max(log_integrand)
-    weights <- exp(shifted) / sum(exp(shifted))
+    weights <- scaled / signed_total
     native_gradient <- colSums(evaluated$gradient * weights)
-    effective_sample_size <- 1 / sum(weights^2)
   }
   list(
     value = value, native_gradient = native_gradient, mode = proposal$mode,
-    effective_sample_size = effective_sample_size
+    effective_sample_size = effective_sample_size,
+    cancellation_ratio = cancellation_ratio, quadrature_valid = TRUE
   )
 }
 
@@ -216,13 +323,19 @@
 }
 
 .nm_imp_prepare_proposals <- function(context, parameters, normals,
-                                      eta_maxit, tolerance) {
+                                      eta_maxit, tolerance, adaptive = TRUE) {
   prepare_chunk <- function(evaluators, chunk_normals) {
     lapply(seq_along(evaluators), function(subject) {
-      .nm_imp_subject_proposal(
-        evaluators[[subject]], parameters, chunk_normals[[subject]],
-        eta_maxit, tolerance
-      )
+      if (isTRUE(adaptive)) {
+        .nm_imp_subject_proposal(
+          evaluators[[subject]], parameters, chunk_normals[[subject]],
+          eta_maxit, tolerance
+        )
+      } else {
+        .nm_gq_fixed_subject_proposal(
+          evaluators[[subject]], parameters, chunk_normals[[subject]]
+        )
+      }
     })
   }
   if (is.null(context$parallel)) {
@@ -232,17 +345,25 @@
   normal_chunks <- lapply(chunks, function(rows) normals[rows])
   pieces <- parallel::clusterApply(
     context$parallel$cluster, seq_along(chunks),
-    function(index, chunks, parameters, eta_maxit, tolerance) {
-      evaluators <- get(".liber_parallel_subjects", envir = .GlobalEnv)
-      prepare <- get(".nm_imp_subject_proposal", envir = asNamespace("LibeRation"))
-      lapply(seq_along(evaluators), function(subject) {
-        prepare(
-          evaluators[[subject]], parameters, chunks[[index]][[subject]],
-          eta_maxit, tolerance
+      function(index, chunks, parameters, eta_maxit, tolerance, adaptive) {
+        evaluators <- get(".liber_parallel_subjects", envir = .GlobalEnv)
+        prepare <- get(
+          if (isTRUE(adaptive)) ".nm_imp_subject_proposal" else
+            ".nm_gq_fixed_subject_proposal",
+          envir = asNamespace("LibeRation")
         )
-      })
-    }, chunks = normal_chunks, parameters = parameters,
-    eta_maxit = eta_maxit, tolerance = tolerance
+        lapply(seq_along(evaluators), function(subject) {
+          if (isTRUE(adaptive)) {
+            prepare(
+              evaluators[[subject]], parameters, chunks[[index]][[subject]],
+              eta_maxit, tolerance
+            )
+          } else {
+            prepare(evaluators[[subject]], parameters, chunks[[index]][[subject]])
+          }
+        })
+      }, chunks = normal_chunks, parameters = parameters,
+      eta_maxit = eta_maxit, tolerance = tolerance, adaptive = adaptive
   )
   unlist(pieces, recursive = FALSE)
 }
@@ -415,6 +536,132 @@
       population_gradient = if (imp_gradient == "score") {
         "normalized importance-score CppAD gradient (proposal derivative omitted)"
       } else "finite common-random-number objective"
+    )
+  )
+}
+
+.nm_gq_evaluate <- function(context, parameters, normals, eta_maxit, tolerance,
+                            adaptive = TRUE, gradient = TRUE) {
+  proposals <- .nm_imp_prepare_proposals(
+    context, parameters, normals, eta_maxit, tolerance, adaptive = adaptive
+  )
+  evaluated <- .nm_imp_evaluate_fixed(
+    context, parameters, proposals, gradient = gradient
+  )
+  value <- evaluated$value + .nm_prior_nll(context$model, parameters)
+  if (!isTRUE(gradient) || is.null(evaluated$native_gradient)) {
+    return(list(value = value, native_gradient = NULL, states = evaluated$states,
+                proposals = proposals))
+  }
+  n_theta <- length(parameters$theta)
+  n_sigma <- length(parameters$sigma)
+  n_omega <- length(parameters$omega)
+  population_positions <- c(
+    seq_len(n_theta), n_theta + context$n_eta + seq_len(n_sigma),
+    n_theta + context$n_eta + n_sigma + seq_len(n_omega)
+  )
+  list(
+    value = value,
+    native_gradient = as.numeric(evaluated$native_gradient[population_positions]) +
+      .nm_prior_nll_native_gradient(context$model, parameters),
+    states = evaluated$states, proposals = proposals
+  )
+}
+
+.nm_est_gq <- function(context, map, maxit, eta_maxit, tolerance, trace,
+                       gq_order = 5L, gq_adaptive = TRUE,
+                       gq_max_points = 100000L,
+                       gq_grid = c("auto", "tensor", "smolyak"),
+                       gq_level = 3L,
+                       gq_gradient = c("score", "finite_grid"),
+                       print_every = 0L, optimizer_backend = "auto") {
+  gq_order <- as.integer(gq_order)
+  gq_level <- as.integer(gq_level)
+  gq_max_points <- as.integer(gq_max_points)
+  if (length(gq_order) != 1L || is.na(gq_order) || gq_order < 1L) {
+    .nm_stop("`gq_order` must be one positive integer.")
+  }
+  if (length(gq_max_points) != 1L || is.na(gq_max_points) ||
+      gq_max_points < 1L) {
+    .nm_stop("`gq_max_points` must be one positive integer.")
+  }
+  if (length(gq_level) != 1L || is.na(gq_level) || gq_level < 1L) {
+    .nm_stop("`gq_level` must be one positive integer.")
+  }
+  if (length(gq_adaptive) != 1L || is.na(gq_adaptive)) {
+    .nm_stop("`gq_adaptive` must be TRUE or FALSE.")
+  }
+  gq_adaptive <- isTRUE(gq_adaptive)
+  if (length(gq_grid) > 1L) gq_grid <- gq_grid[[1L]]
+  if (length(gq_grid) != 1L || is.na(gq_grid)) {
+    .nm_stop("`gq_grid` must contain one grid strategy.")
+  }
+  gq_grid <- tolower(as.character(gq_grid))
+  if (identical(gq_grid, "sparse")) gq_grid <- "smolyak"
+  if (!gq_grid %in% c("auto", "tensor", "smolyak")) {
+    .nm_stop("`gq_grid` must be one of auto, tensor, or smolyak.")
+  }
+  gq_gradient <- match.arg(gq_gradient)
+  design <- .nm_gq_design(
+    context, order = gq_order, max_points = gq_max_points,
+    grid = gq_grid, level = gq_level
+  )
+  cache <- new.env(parent = emptyenv())
+  cache$key <- NULL
+  evaluate <- function(parameters) {
+    key <- c(parameters$theta, parameters$sigma, parameters$omega)
+    if (is.null(cache$key) || !identical(cache$key, key)) {
+      cache$result <- .nm_gq_evaluate(
+        context, parameters, design$normals, eta_maxit, tolerance,
+        adaptive = gq_adaptive, gradient = gq_gradient == "score"
+      )
+      cache$key <- key
+    }
+    cache$result
+  }
+  objective <- function(parameters) evaluate(parameters)$value
+  gradient <- if (gq_gradient == "score") function(parameters) {
+    result <- evaluate(parameters)
+    if (is.null(result$native_gradient)) return(NULL)
+    as.vector(result$native_gradient %*% map$jacobian(parameters))
+  } else NULL
+  optimizer <- .nm_outer_optim(
+    map, objective, maxit, tolerance, trace, print_every,
+    gradient = gradient, optimizer_backend = optimizer_backend
+  )
+  parameters <- map$decode(optimizer$par)
+  final <- evaluate(parameters)
+  modes <- .nm_subject_modes(
+    context, parameters, maxit = eta_maxit, tolerance = tolerance,
+    exact_hessian = FALSE
+  )
+  effective <- vapply(
+    final$states, function(state) state$effective_sample_size %||% NA_real_,
+    numeric(1)
+  )
+  cancellation <- vapply(
+    final$states, function(state) state$cancellation_ratio %||% 1,
+    numeric(1)
+  )
+  .nm_fit_result(
+    context, "GQ", parameters, optimizer$value, modes, optimizer,
+    diagnostics = list(
+      quadrature_order = design$quadrature_order,
+      quadrature_level = design$quadrature_level,
+      quadrature_points = design$actual_samples,
+      quadrature_candidate_points = design$candidate_points,
+      quadrature_max_points = design$max_points,
+      quadrature_grid_requested = design$requested_grid,
+      quadrature_grid = design$resolved_grid,
+      quadrature_negative_weights = design$negative_weights,
+      adaptive = gq_adaptive, gq_gradient = gq_gradient,
+      effective_quadrature_points = effective,
+      quadrature_cancellation_ratio = cancellation,
+      population_gradient = if (gq_gradient == "score") {
+        "normalized quadrature-score CppAD gradient (node derivative omitted)"
+      } else {
+        "finite adaptive-grid objective"
+      }
     )
   )
 }
@@ -606,7 +853,7 @@
                          mstep_maxit = 20L, seed = 20260713L,
                          print_every = 0L, adapt_proposal = TRUE,
                          target_acceptance = 0.3, closed_form_sigma = TRUE,
-                         optimizer_backend = "auto") {
+                         optimizer_backend = "auto", initial_eta = NULL) {
   n_iter <- as.integer(n_iter)
   burn <- as.integer(burn %||% floor(n_iter / 3))
   mcmc_steps <- as.integer(mcmc_steps)
@@ -620,7 +867,7 @@
   }
   set.seed(seed)
   parameters <- map$decode(map$start)
-  eta <- matrix(0, context$n_subjects, context$n_eta)
+  eta <- initial_eta %||% matrix(0, context$n_subjects, context$n_eta)
   accepted <- attempted <- 0L
   objective_trace <- numeric(n_iter)
   acceptance_trace <- numeric(n_iter)
@@ -910,7 +1157,7 @@
 
 .nm_est_stochastic <- function(context, map, method, maxit, eta_maxit,
                                tolerance, trace, print_every = 0L,
-                               optimizer_backend = "auto", ...) {
+                               optimizer_backend = "auto", initial_eta = NULL, ...) {
   controls <- list(...)
   if (method == "ITS") {
     return(.nm_est_its(context, map, maxit, eta_maxit, tolerance, trace,
@@ -923,17 +1170,37 @@
       optimizer_backend = optimizer_backend
     ), controls)))
   }
+  if (method == "GQ") {
+    return(do.call(.nm_est_gq, c(list(
+      context = context, map = map, maxit = maxit, eta_maxit = eta_maxit,
+      tolerance = tolerance, trace = trace, print_every = print_every,
+      optimizer_backend = optimizer_backend
+    ), controls)))
+  }
   if (method == "SAEM") {
     return(do.call(.nm_est_saem, c(list(
       context = context, map = map, maxit = maxit,
       tolerance = tolerance, trace = trace, print_every = print_every,
-      optimizer_backend = optimizer_backend
+      optimizer_backend = optimizer_backend, initial_eta = initial_eta
     ), controls)))
   }
   if (method == "BAYES") {
     return(do.call(.nm_est_bayes, c(list(
       context = context, map = map, tolerance = tolerance,
       print_every = print_every
+    ), controls)))
+  }
+  if (method %in% c("HMC", "NUTS")) {
+    return(do.call(.nm_est_hmc, c(list(
+      context = context, map = map, method = method,
+      print_every = print_every
+    ), controls)))
+  }
+  if (method %in% c("NPML", "NPAG")) {
+    return(do.call(.nm_est_nonparametric, c(list(
+      context = context, method = method, maxit = maxit,
+      tolerance = tolerance, trace = trace, print_every = print_every,
+      optimizer_backend = optimizer_backend, eta_maxit = eta_maxit
     ), controls)))
   }
   .nm_stop("Unknown stochastic estimation method: ", method)

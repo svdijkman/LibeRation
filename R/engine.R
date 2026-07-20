@@ -69,6 +69,9 @@
     omega_row = model$OMEGAS$ROW,
     omega_col = model$OMEGAS$COL,
     pred_ir = model$pred_ir,
+    output_names = intersect(
+      model$OUTPUT %||% character(), model$pred_ir$output_names %||% character()
+    ),
     des_ir = model$des_ir,
     n_state = model$n_state,
     ode_control = model$ODE_CONTROL,
@@ -127,6 +130,12 @@ NMEngine <- R6::R6Class(
       for (j in seq_len(ncol(raw$amounts))) {
         result[[paste0("A", j)]] <- raw$amounts[, j]
       }
+      if (!is.null(raw$generated) && ncol(raw$generated)) {
+        generated_names <- as.character(raw$output_names %||% colnames(raw$generated))
+        for (j in seq_len(ncol(raw$generated))) {
+          result[[generated_names[[j]]]] <- raw$generated[, j]
+        }
+      }
       attr(result, "solver") <- raw$solver
       attr(result, "state_names") <- raw$state_names
       result
@@ -158,6 +167,8 @@ NMEngine <- R6::R6Class(
       structure(
         list(pointer = pointer, point = point, domain = attr(pointer, "domain"),
              data = data, n_subjects = n_subjects, n_eta = n_eta,
+             dynamic_columns = attr(pointer, "dynamic_columns"),
+             dynamic_parameters = attr(pointer, "dynamic_parameters"),
              propagation_kernel = attr(pointer, "propagation_kernel"),
              operation_count = attr(pointer, "operation_count"),
              variable_count = attr(pointer, "variable_count")),
@@ -185,6 +196,8 @@ NMEngine <- R6::R6Class(
       result$propagation_kernel <- tape$propagation_kernel
       result$operation_count <- tape$operation_count
       result$variable_count <- tape$variable_count
+      result$derivative_strategy <- attr(result, "derivative_strategy")
+      result$jacobian_nonzeros <- attr(result, "jacobian_nonzeros")
       result
     },
 

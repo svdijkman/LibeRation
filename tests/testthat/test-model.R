@@ -105,3 +105,24 @@ test_that("mixture definitions normalize probabilities and expose MIXNUM", {
   )
   expect_true("MIXNUM" %in% model$pred_ir$input_names)
 })
+
+test_that("generated outputs are discovered statically and validated", {
+  model <- nm_model(
+    INPUT = c("ID", "TIME", "EVID", "AMT"), OUTPUT = c("PRED", "CL", "V", "A1"),
+    ADVAN = 1, PRED = "CL=THETA(1)*exp(ETA(1)); V=THETA(2); K=CL/V; S1=V",
+    ERROR = "Y=F", THETAS = data.frame(THETA = 1:2, Value = c(2, 20)),
+    OMEGAS = data.frame(OMEGA = 1, Value = 0.1)
+  )
+  catalog <- nm_model_outputs(model)
+  expect_true(all(c("PRED", "IPRED", "CWRES", "ETA1", "A1", "CL", "V", "K", "S1") %in%
+                    catalog$name))
+  expect_equal(catalog$name[catalog$selected], c("PRED", "A1", "CL", "V"))
+  expect_error(
+    nm_model(
+      INPUT = c("ID", "TIME"), OUTPUT = "NOT_CREATED", ADVAN = 1,
+      PRED = "CL=THETA(1); V=THETA(2)", ERROR = "Y=F",
+      THETAS = data.frame(THETA = 1:2, Value = c(2, 20))
+    ),
+    "Unknown OUTPUT"
+  )
+})

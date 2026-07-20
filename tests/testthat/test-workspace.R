@@ -38,6 +38,24 @@ test_that("workspaces preserve immutable serializable modelling snapshots", {
   expect_false(copied %in% nm_project_list(workspace, project$id)$id)
 })
 
+test_that("integrated package provenance is retained without replacing runtime provenance", {
+  root <- tempfile("liber-provenance-")
+  on.exit(unlink(root, recursive = TRUE, force = TRUE), add = TRUE)
+  workspace <- nm_workspace(root)
+  project <- nm_project_create(workspace, "Provenance")
+  model <- nm_model(
+    INPUT = c("ID", "TIME", "EVID", "AMT"), ADVAN = 1,
+    PRED = "CL=THETA(1);V=THETA(2);S1=V", ERROR = "Y=F",
+    THETAS = data.frame(THETA = 1:2, Value = c(2, 20))
+  )
+  id <- nm_project_save(workspace, project$id, model,
+                        provenance = list(LibeRary = list(library_id = "test-model", version = "1.0.0")))
+  saved <- nm_project_load(workspace, project$id, id)
+  expect_equal(saved$provenance$LibeRary$library_id, "test-model")
+  expect_equal(saved$provenance$LibeRation, as.character(utils::packageVersion("LibeRation")))
+  expect_match(saved$provenance$R, "R version")
+})
+
 test_that("projects can be removed without escaping their workspace", {
   root <- tempfile("liber-workspace-")
   on.exit(unlink(root, recursive = TRUE, force = TRUE), add = TRUE)

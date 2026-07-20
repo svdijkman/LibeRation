@@ -45,6 +45,14 @@
     .Call(`_LibeRation_liberation_prediction_tape_create`, engine_pointer, data, theta, eta, sigma)
 }
 
+.liberation_prediction_tape_new_dynamic <- function(tape_pointer, data) {
+    .Call(`_LibeRation_liberation_prediction_tape_new_dynamic`, tape_pointer, data)
+}
+
+.liberation_fo_tape_new_dynamic <- function(tape_pointer, data) {
+    .Call(`_LibeRation_liberation_fo_tape_new_dynamic`, tape_pointer, data)
+}
+
 .liberation_prediction_tape_eval <- function(tape_pointer, point, jacobian = TRUE) {
     .Call(`_LibeRation_liberation_prediction_tape_eval`, tape_pointer, point, jacobian)
 }

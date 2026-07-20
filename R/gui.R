@@ -36,6 +36,8 @@
     actual_samples = covariance$actual_samples %||% NULL,
     sampling = covariance$sampling %||% NULL,
     quadrature_order = covariance$quadrature_order %||% NULL,
+    quadrature_level = covariance$quadrature_level %||% NULL,
+    quadrature_grid = covariance$quadrature_grid %||% NULL,
     objective_backend = covariance$objective_backend %||% NULL,
     seed = covariance$seed %||% NULL,
     covariance = .liber_gui_matrix_rows(covariance$covariance),
@@ -44,7 +46,8 @@
 }
 
 .liber_gui_posterior <- function(fit) {
-  if (!inherits(fit, "nm_fit") || fit$method != "BAYES" || is.null(fit$posterior)) {
+  if (!inherits(fit, "nm_fit") ||
+      !fit$method %in% c("BAYES", "HMC", "NUTS") || is.null(fit$posterior)) {
     return(list(available = FALSE, parameters = list()))
   }
   names <- .nm_parameter_names(fit$theta, fit$sigma, fit$omega)
@@ -70,7 +73,9 @@
       posterior_cv = 100 * sd / max(abs(mean), 1e-12),
       median = unname(quantile[2L, name]),
       lower_95 = unname(quantile[1L, name]),
-      upper_95 = unname(quantile[3L, name])
+      upper_95 = unname(quantile[3L, name]),
+      rhat = unname(population$rhat[[name]] %||% NA_real_),
+      ess = unname(population$ess[[name]] %||% NA_real_)
     )
   }))
   list(
@@ -80,24 +85,69 @@
     thin = fit$diagnostics$n_thin %||% NULL,
     outer_acceptance = fit$diagnostics$outer_acceptance %||% NULL,
     eta_acceptance = fit$diagnostics$eta_acceptance %||% NULL,
+    divergences = fit$diagnostics$divergences %||% NULL,
+    mean_acceptance = fit$diagnostics$mean_acceptance %||% NULL,
+    max_depth_hits = fit$diagnostics$max_depth_hits %||% NULL,
     covariance = .liber_gui_matrix_rows(population$covariance),
     correlation = .liber_gui_matrix_rows(population$correlation)
   )
 }
 
-.liber_gui_model <- function(model) {
+.liber_gui_nonparametric <- function(fit) {
+  distribution <- fit$nonparametric
+  if (!inherits(fit, "nm_fit") || is.null(distribution) ||
+      !fit$method %in% c("NPML", "NPAG")) {
+    return(list(available = FALSE, supports = list()))
+  }
+  supports <- as.data.frame(distribution$supports, stringsAsFactors = FALSE)
+  supports <- data.frame(
+    support = seq_len(nrow(supports)), weight = distribution$weights,
+    supports, check.names = FALSE
+  )
+  list(
+    available = TRUE, supports = .liber_gui_rows(supports),
+    support_count = nrow(supports),
+    log_likelihood = distribution$log_likelihood,
+    interpretation = distribution$interpretation %||% ""
+  )
+}
+
+.liber_gui_model <- function(model, output_catalog = NULL) {
   if (is.null(model)) {
     return(list(
       loaded = FALSE, name = "Untitled model", advan = "--", trans = "--",
       solver = "auto", language = "R", pred = "# Define a model to begin",
       error = "Y = F", des = "", compartments = list(), flows = list(),
       theta = list(), omega = list(), sigma = list(), n_theta = 0L,
-      n_eta = 0L, n_sigma = 0L, n_state = 0L, input = character()
+      n_eta = 0L, n_sigma = 0L, n_state = 0L, input = character(),
+      output = character(), outputs = list(),
+      diagram = list(available = FALSE, graph = NULL, code_changed = FALSE)
     ))
   }
   if (inherits(model, "NMEngine")) model <- model$model
   if (!inherits(model, "nm_model")) .nm_stop("`model` must be an nm_model or NMEngine.")
   compartments <- model$GRAPH$compartments %||% data.frame()
+  output_catalog <- output_catalog %||% nm_model_outputs(model)
+  diagram <- nm_model_diagram_get(model)
+  diagram_payload <- if (is.null(diagram)) {
+    list(available = FALSE, graph = NULL, code_changed = FALSE)
+  } else {
+    generated <- diagram$generated %||% list()
+    list(
+      available = TRUE,
+      graph = list(
+        schema = diagram$schema, version = diagram$version,
+        title = diagram$title, advan = diagram$advan,
+        residual = diagram$residual, covariates = diagram$covariates,
+        compartments = .liber_gui_rows(diagram$compartments),
+        flows = .liber_gui_rows(diagram$flows),
+        parameters = .liber_gui_rows(diagram$parameters),
+        generated = generated
+      ),
+      code_changed = nzchar(as.character(generated$DES %||% "")) &&
+        !identical(trimws(model$DES), trimws(as.character(generated$DES)))
+    )
+  }
   list(
     loaded = TRUE,
     name = attr(model, "name", exact = TRUE) %||% paste0("ADVAN", model$ADVAN, " model"),
@@ -106,6 +156,8 @@
     solver = model$SOLVER,
     language = model$LANGUAGE,
     input = model$INPUT,
+    output = model$OUTPUT %||% character(),
+    outputs = .liber_gui_rows(output_catalog),
     n_state = model$n_state,
     dose_cmp = model$DOSECMP,
     obs_cmp = model$OBSCMP,
@@ -127,11 +179,12 @@
     priors = .liber_gui_rows(model$LIK_CONFIG$priors %||% data.frame()),
     n_theta = nrow(model$THETAS),
     n_eta = model$n_eta,
-    n_sigma = nrow(model$SIGMAS)
+    n_sigma = nrow(model$SIGMAS),
+    diagram = diagram_payload
   )
 }
 
-.liber_gui_data <- function(data, include_rows = TRUE) {
+.liber_gui_data <- function(data, include_rows = TRUE, run_output = NULL) {
   if (is.null(data)) {
     return(list(loaded = FALSE, records = 0L, subjects = 0L, observations = 0L,
                 columns = character(), numeric_columns = character(),
@@ -141,6 +194,23 @@
   }
   data <- if (inherits(data, "nm_dataset")) data else nm_dataset(data)
   frame <- as.data.frame(data)
+  if (isTRUE(include_rows) && !is.null(run_output)) {
+    run_output <- as.data.frame(run_output, stringsAsFactors = FALSE)
+    output_names <- setdiff(names(run_output), c(".ROW", names(frame)))
+    if (length(output_names)) {
+      rows <- if (".ROW" %in% names(run_output)) {
+        suppressWarnings(as.integer(run_output$.ROW))
+      } else if (nrow(run_output) == nrow(frame)) {
+        seq_len(nrow(frame))
+      } else integer()
+      valid <- is.finite(rows) & rows >= 1L & rows <= nrow(frame)
+      for (name in output_names) {
+        value <- rep(NA, nrow(frame))
+        value[rows[valid]] <- run_output[[name]][valid]
+        frame[[name]] <- value
+      }
+    }
+  }
   visible <- setdiff(names(frame), grep("^\\.", names(frame), value = TRUE))
   plot_frame <- frame[, visible, drop = FALSE]
   numeric_columns <- visible[vapply(plot_frame, is.numeric, logical(1))]
@@ -165,10 +235,104 @@
   file.path(.nm_workspace_path(workspace), ".liberation", "client-settings.rds")
 }
 
+.liber_ai_default_help_model <- function() {
+  "Qwen2.5-Coder-3B-Instruct-q4f16_1-MLC"
+}
+
+.liber_ai_default_report_model <- function() {
+  "Qwen2.5-7B-Instruct-q4f16_1-MLC"
+}
+
+.liber_ai_default_model <- function() {
+  .liber_ai_default_help_model()
+}
+
+.liber_ai_models <- function() {
+  list(
+    list(
+      id = "SmolLM2-360M-Instruct-q4f16_1-MLC",
+      label = "SmolLM2 360M - quickest (~0.4 GB)", tier = "minimal",
+      vram_mb = 376L,
+      description = "Very fast, but only suitable for simple workflow questions."
+    ),
+    list(
+      id = "Qwen2.5-0.5B-Instruct-q4f16_1-MLC",
+      label = "Qwen 2.5 0.5B - quick (~0.9 GB)", tier = "minimal",
+      vram_mb = 945L,
+      description = "Low-memory option; factual reliability is limited."
+    ),
+    list(
+      id = "Llama-3.2-1B-Instruct-q4f16_1-MLC",
+      label = "Llama 3.2 1B - light (~0.9 GB)", tier = "light",
+      vram_mb = 879L,
+      description = "A lightweight general assistant for short questions."
+    ),
+    list(
+      id = "Qwen2.5-1.5B-Instruct-q4f16_1-MLC",
+      label = "Qwen 2.5 1.5B - light (~1.6 GB)", tier = "light",
+      vram_mb = 1630L,
+      description = "Better instruction following than the minimal models."
+    ),
+    list(
+      id = "SmolLM2-1.7B-Instruct-q4f16_1-MLC",
+      label = "SmolLM2 1.7B - legacy (~1.8 GB)", tier = "light",
+      vram_mb = 1774L,
+      description = "Original LibeRation default; fast, but more prone to unsupported claims."
+    ),
+    list(
+      id = "gemma-2-2b-it-q4f16_1-MLC",
+      label = "Gemma 2 2B - balanced (~1.9 GB)", tier = "balanced",
+      vram_mb = 1895L,
+      description = "Compact general-purpose alternative."
+    ),
+    list(
+      id = "Qwen2.5-3B-Instruct-q4f16_1-MLC",
+      label = "Qwen 2.5 3B - balanced (~2.5 GB)", tier = "balanced",
+      vram_mb = 2505L,
+      description = "Recommended balance of reliability, speed, and memory use."
+    ),
+    list(
+      id = "Qwen2.5-Coder-3B-Instruct-q4f16_1-MLC",
+      label = "Qwen 2.5 Coder 3B - recommended for Help (~2.5 GB)", tier = "recommended",
+      vram_mb = 2505L,
+      description = "Prefer for model-code and syntax questions."
+    ),
+    list(
+      id = "Llama-3.2-3B-Instruct-q4f16_1-MLC",
+      label = "Llama 3.2 3B - balanced (~2.3 GB)", tier = "balanced",
+      vram_mb = 2264L,
+      description = "Strong compact general assistant and alternative to Qwen 3B."
+    ),
+    list(
+      id = "Qwen2.5-7B-Instruct-q4f16_1-MLC",
+      label = "Qwen 2.5 7B - recommended for Reports (~5.1 GB)", tier = "quality",
+      vram_mb = 5107L,
+      description = "Best practical quality option when the GPU has sufficient free memory."
+    ),
+    list(
+      id = "Llama-3.1-8B-Instruct-q4f16_1-MLC-1k",
+      label = "Llama 3.1 8B - higher quality, 1K context (~4.6 GB)", tier = "quality",
+      vram_mb = 4598L,
+      description = "Higher-capacity model with a shorter context window."
+    ),
+    list(
+      id = "gemma-2-9b-it-q4f16_1-MLC",
+      label = "Gemma 2 9B - largest (~6.4 GB)", tier = "large",
+      vram_mb = 6422L,
+      description = "Largest option; requires substantial free GPU memory and loads more slowly."
+    )
+  )
+}
+
 .liber_client_settings_read <- function(workspace) {
   path <- .liber_client_settings_path(workspace)
-  defaults <- list(version = 2L, selected_queue = "local", remotes = list(),
-                   pending_jobs = list())
+  defaults <- list(version = 4L, selected_queue = "local", remotes = list(),
+                   pending_jobs = list(), ai = list(
+                     activated = FALSE, consented = FALSE,
+                     help_model = .liber_ai_default_help_model(),
+                     report_model = .liber_ai_default_report_model(),
+                     model = .liber_ai_default_help_model()
+                   ))
   if (!file.exists(path)) return(defaults)
   value <- tryCatch(readRDS(path), error = function(error) NULL)
   if (!is.list(value)) return(defaults)
@@ -184,19 +348,43 @@
       nzchar(item$job_id) && length(item$queue_id) == 1L &&
       !is.na(item$queue_id) && nzchar(item$queue_id)
   }, pending_jobs)
+  ai <- value$ai
+  if (!is.list(ai)) ai <- defaults$ai
+  legacy_model <- as.character(ai$model %||% "")[[1L]]
+  help_model <- as.character(ai$help_model %||% legacy_model %||%
+    defaults$ai$help_model)[[1L]]
+  if (!nzchar(help_model)) help_model <- defaults$ai$help_model
+  report_model <- as.character(ai$report_model %||%
+    defaults$ai$report_model)[[1L]]
+  if (!nzchar(report_model)) report_model <- defaults$ai$report_model
   list(
-    version = 2L,
+    version = 4L,
     selected_queue = as.character(value$selected_queue %||% "local")[[1L]],
-    remotes = remotes, pending_jobs = pending_jobs
+    remotes = remotes, pending_jobs = pending_jobs,
+    ai = list(
+      activated = isTRUE(ai$activated), consented = isTRUE(ai$consented),
+      help_model = help_model, report_model = report_model,
+      model = help_model
+    )
   )
 }
 
 .liber_client_settings_write <- function(workspace, selected_queue = "local",
-                                         remotes = list(), pending_jobs = list()) {
+                                         remotes = list(), pending_jobs = list(),
+                                         ai = list()) {
   path <- .liber_client_settings_path(workspace)
   .nm_workspace_atomic_save(
-    list(version = 2L, selected_queue = as.character(selected_queue)[[1L]],
-         remotes = remotes, pending_jobs = pending_jobs),
+    list(version = 4L, selected_queue = as.character(selected_queue)[[1L]],
+         remotes = remotes, pending_jobs = pending_jobs,
+         ai = list(
+           activated = isTRUE(ai$activated), consented = isTRUE(ai$consented),
+           help_model = as.character(ai$help_model %||% ai$model %||%
+             .liber_ai_default_help_model())[[1L]],
+           report_model = as.character(ai$report_model %||%
+             .liber_ai_default_report_model())[[1L]],
+           model = as.character(ai$help_model %||% ai$model %||%
+             .liber_ai_default_help_model())[[1L]]
+         )),
     path
   )
   try(Sys.chmod(path, mode = "0600"), silent = TRUE)
@@ -210,6 +398,20 @@
     return(file.path(profile, "Documents", "LibeR", "workspace"))
   }
   file.path(home, "LibeR", "workspace")
+}
+
+.liber_gui_library <- function() {
+  if (!requireNamespace("LibeRary", quietly = TRUE)) {
+    return(list(available = FALSE, entries = list(),
+                message = "Install LibeRary to browse and import pharmacometric models."))
+  }
+  tryCatch({
+    root <- LibeRary::library_catalog_root()
+    entries <- LibeRary::library_list(root = root)
+    list(available = TRUE, root = root, entries = .liber_gui_rows(entries),
+         ingest_available = TRUE, message = if (nrow(entries)) "" else "The catalogue is empty.")
+  }, error = function(error) list(available = FALSE, entries = list(),
+                                  message = conditionMessage(error)))
 }
 
 .liber_gui_duration <- function(seconds) {
@@ -297,6 +499,7 @@
   names(parameters) <- .nm_parameter_names(fit$theta, fit$sigma, fit$omega)
   covariance <- fit$covariance
   posterior <- .liber_gui_posterior(fit)
+  nonparametric <- .liber_gui_nonparametric(fit)
   parameter_rows <- unname(lapply(seq_along(parameters), function(i) {
     name <- names(parameters)[[i]]
     row <- list(name = name, value = unname(parameters[[i]]))
@@ -328,11 +531,14 @@
     fit$objective_evaluations %||% fit$evaluations[["function"]] %||% NA_integer_
   ))
   list(
-    available = TRUE, method = fit$method, objective = fit$objective,
+    available = TRUE, method = .nm_fit_method_label(fit), final_method = fit$method,
+    method_sequence = as.character(fit$method_sequence %||% fit$method),
+    objective = fit$objective,
     convergence = fit$convergence,
     parameters = parameter_rows,
     covariance = .liber_gui_covariance(covariance),
     posterior = posterior,
+    nonparametric = nonparametric,
     shrinkage = unname(lapply(seq_along(etab$shrinkage), function(i) {
       list(name = names(etab$shrinkage)[[i]], value = etab$shrinkage[[i]])
     })),
@@ -344,6 +550,20 @@
       `Iterations to convergence` = if (length(iterations) && !is.na(iterations)) iterations else "",
       `Objective evaluations` = if (length(objective_evaluations) &&
         !is.na(objective_evaluations)) objective_evaluations else "",
+      `GQ grid` = if (fit$method == "GQ")
+        as.character(fit$diagnostics$quadrature_grid %||% "tensor") else "",
+      `GQ order / level` = if (fit$method == "GQ") {
+        if (identical(fit$diagnostics$quadrature_grid, "smolyak")) {
+          paste("level", fit$diagnostics$quadrature_level %||% "")
+        } else paste("order", fit$diagnostics$quadrature_order %||% "")
+      } else "",
+      `GQ points per subject` = if (fit$method == "GQ")
+        fit$diagnostics$quadrature_points %||% "" else "",
+      `GQ minimum cancellation ratio` = if (fit$method == "GQ" &&
+        length(fit$diagnostics$quadrature_cancellation_ratio)) {
+        ratios <- fit$diagnostics$quadrature_cancellation_ratio
+        if (any(is.finite(ratios))) min(ratios[is.finite(ratios)]) else ""
+      } else "",
       `Model fit time` = .liber_gui_duration(timing$model_fit_seconds),
       `Covariance step` = if (is.null(covariance)) "Not requested" else
         if (identical(covariance$status, "failed")) "Failed" else "Completed",
@@ -357,6 +577,8 @@
         .liber_gui_duration(timing$covariance_seconds),
       `Total estimation time` = .liber_gui_duration(timing$total_seconds),
       `Posterior samples` = if (isTRUE(posterior$available)) posterior$samples else "",
+      `Nonparametric support points` = if (isTRUE(nonparametric$available))
+        nonparametric$support_count else "",
       Subjects = length(unique(fit$data$.ID_INDEX)), Records = nrow(fit$data),
       ADVAN = fit$model$ADVAN, TRANS = fit$model$TRANS,
       Solver = fit$model$SOLVER, Language = fit$model$LANGUAGE
@@ -365,14 +587,34 @@
 }
 
 .liber_gui_report <- function(report) {
+  if (inherits(report, "nm_report_bundle")) {
+    return(list(docx = report$docx, pdf = report$pdf, json = report$json,
+                design_id = report$design$id %||% NULL))
+  }
   if (!inherits(report, "nm_report")) return(NULL)
-  list(pdf = report$pdf, json = report$json)
+  list(docx = NULL, pdf = report$pdf, json = report$json)
 }
 
 .liber_gui_result <- function(result) {
   if (is.null(result)) return(list(status = "idle", message = "Ready"))
   if (inherits(result, "liber_gui_validation")) {
     return(list(status = "validated", message = "Model validation completed"))
+  }
+  if (inherits(result, "liber_gui_diagram_preview")) {
+    return(list(
+      status = "validated", kind = "diagram_preview",
+      message = "Diagram code preview is ready",
+      nonce = result$nonce, preview = result$preview,
+      code_changed = isTRUE(result$code_changed)
+    ))
+  }
+  if (inherits(result, "liber_gui_report_document")) {
+    return(list(
+      status = "completed", kind = "report_document",
+      message = paste("Loaded report source", result$name),
+      nonce = result$nonce, block_id = result$block_id,
+      name = result$name, text = result$text
+    ))
   }
   if (inherits(result, "liber_gui_control_export")) {
     return(list(status = "completed", kind = "control_export",
@@ -449,7 +691,7 @@
       plots = result$plots %||% list()
     ))
   }
-  if (inherits(result, "nm_report")) {
+  if (inherits(result, "nm_report") || inherits(result, "nm_report_bundle")) {
     return(list(status = "completed", kind = "report", message = "Report generated"))
   }
   if (inherits(result, "nm_fit")) {
@@ -514,6 +756,24 @@
   )
 }
 
+.liber_gui_report_design <- function(design = NULL) {
+  if (!inherits(design, "nm_report_design")) return(NULL)
+  list(
+    id = design$id,
+    title = design$title,
+    name = design$style$filename %||% "liberation-report",
+    formats = unname(as.character(design$formats)),
+    updated = design$updated,
+    blocks = unname(lapply(design$blocks, function(block) list(
+      id = block$id, type = block$type, title = block$title,
+      source = block$source, text = block$text,
+      run_ids = unname(as.character(block$run_ids)),
+      elements = unname(as.character(block$elements)),
+      options = block$options %||% list()
+    )))
+  )
+}
+
 #' React workbench for LibeRation
 #'
 #' @param model Optional [nm_model()] or [NMEngine].
@@ -522,12 +782,21 @@
 #' @param result Optional latest simulation/result summary.
 #' @param fit Optional fitted model used for parameter and diagnostic panels.
 #' @param report Optional generated [nm_report()].
+#' @param report_design Optional saved [nm_report_design()] restored by the
+#'   visual report designer.
 #' @param diagnostics Optional saved VPC, NPC, and NPDE results for the selected
 #'   estimation run.
 #' @param log Optional application-log payload.
 #' @param job_log Optional stdout/stderr lines for the selected queued job.
 #' @param server Optional runtime/server status passed to the workbench.
 #' @param workspace Optional [nm_workspace()] and current project metadata.
+#' @param library Optional LibeRary catalogue payload.
+#' @param ai Optional browser-local WebGPU AI settings and model catalogue.
+#' @param output_catalog Optional draft output catalogue used by the GUI after
+#'   validation but before editor changes are applied.
+#' @param run_output Optional selected model-run output columns, aligned by a
+#'   `.ROW` column or by row position. These are loaded into Data explorer only
+#'   when its row payload is requested.
 #' @param data_payload Whether dataset rows are included in the browser payload.
 #'   When false, only dataset metadata and column names are included.
 #' @param gof_payload Whether GOF rows are generated when `fit` is an [nm_fit].
@@ -538,27 +807,42 @@
 #' @param elementId Optional HTML widget element id.
 #' @export
 liber_workbench <- function(model = NULL, data = NULL, jobs = NULL, result = NULL,
-                             fit = NULL, report = NULL, diagnostics = NULL,
+                             fit = NULL, report = NULL, report_design = NULL,
+                             diagnostics = NULL,
                              log = NULL, job_log = NULL,
                              server = NULL,
                              workspace = NULL,
+                             library = NULL, ai = NULL, output_catalog = NULL,
+                             run_output = if (inherits(fit, "nm_fit")) fit$output else NULL,
                              data_payload = TRUE, gof_payload = TRUE,
                              diagnostic_payload = names(diagnostics),
                              input_id = "liber_workbench", width = NULL,
                             height = "780px", elementId = NULL) {
   jobs <- as.data.frame(jobs %||% data.frame(), stringsAsFactors = FALSE)
   content <- reactR::component("LibeRWorkbench", list(
-    model = .liber_gui_model(model),
-    dataset = .liber_gui_data(data, include_rows = data_payload),
+    model = .liber_gui_model(model, output_catalog = output_catalog),
+    dataset = .liber_gui_data(
+      data, include_rows = data_payload,
+      run_output = if (isTRUE(data_payload)) run_output else NULL
+    ),
     jobs = unname(lapply(seq_len(nrow(jobs)), function(i) as.list(jobs[i, , drop = FALSE]))),
     result = .liber_gui_result(result),
     diagnostics = .liber_gui_diagnostics(diagnostics, diagnostic_payload),
     fit = if (is.list(fit) && !inherits(fit, "nm_fit") && !is.null(fit$available)) fit else .liber_gui_fit(fit, include_gof = gof_payload),
     report = .liber_gui_report(report),
+    report_design = .liber_gui_report_design(report_design),
     log = log %||% list(level = "info", current = "Workbench ready",
                        history = "Workbench ready"),
     job_log = as.character(job_log %||% character()),
     workspace = workspace %||% .liber_gui_workspace(),
+    library = library %||% .liber_gui_library(),
+    ai = ai %||% list(
+      activated = FALSE, consented = FALSE,
+      help_model = .liber_ai_default_help_model(),
+      report_model = .liber_ai_default_report_model(),
+      model = .liber_ai_default_help_model(),
+      worker_url = "", models = list(), secure_context = TRUE
+    ),
     server = server %||% list(
       mode = "local", connected = TRUE, platform = R.version$platform,
       worker = "in-process", isolation = "current R session"
@@ -665,6 +949,114 @@ renderLiberWorkbench <- function(expr, env = parent.frame(), quoted = FALSE) {
     )
   })
   do.call(rbind, rows)
+}
+
+.liber_model_from_event <- function(model, event) {
+  if (inherits(model, "NMEngine")) model <- model$model
+  if (!inherits(model, "nm_model")) .nm_stop("Load a model before editing it.")
+  arguments <- model[intersect(names(model), names(formals(nm_model)))]
+  old_advan <- model$ADVAN
+  arguments$ADVAN <- as.integer(event$advan %||% old_advan)
+  arguments$TRANS <- as.integer(event$trans %||% model$TRANS)
+  arguments$PRED <- as.character(event$pred %||% model$PRED)
+  arguments$ERROR <- as.character(event$error %||% model$ERROR)
+  arguments$DES <- as.character(event$des %||% model$DES)
+  arguments$INPUT <- unique(as.character(unlist(event$input %||% model$INPUT)))
+  arguments$OUTPUT <- unique(as.character(unlist(event$output %||% model$OUTPUT %||% character())))
+  arguments$THETAS <- .liber_parameter_table_update(model$THETAS, event$theta, "THETA")
+  arguments$OMEGAS <- .liber_parameter_table_update(model$OMEGAS, event$omega, "OMEGA")
+  arguments$SIGMAS <- .liber_parameter_table_update(model$SIGMAS, event$sigma, "SIGMA")
+  likelihood <- as.list(model$LIK_CONFIG)
+  likelihood$version <- NULL
+  likelihood$omega <- as.character(
+    event$omega_structure %||% model$LIK_CONFIG$omega %||% "diagonal"
+  )
+  likelihood$priors <- if (is.null(event$priors)) {
+    model$LIK_CONFIG$priors
+  } else {
+    .liber_prior_table_update(event$priors)
+  }
+  arguments$LIK_CONFIG <- do.call(nm_lik_config, likelihood)
+  if (!identical(arguments$ADVAN, old_advan)) arguments$GRAPH <- NULL
+  arguments$ERROR_TYPE <- "auto"
+  edited <- do.call(nm_model, arguments)
+  requested_states <- as.integer(event$n_state %||% edited$n_state)
+  if (edited$ADVAN %in% c(6L, 13L) && requested_states != edited$n_state) {
+    .nm_stop(
+      "The compartment count is derived from $DES. Define DADT(1) through DADT(",
+      requested_states, ") to use that count."
+    )
+  }
+  attr(edited, "name") <- trimws(as.character(
+    event$problem %||% attr(model, "name", exact = TRUE) %||% "Untitled model"
+  ))
+  edited
+}
+
+.liber_estimation_arguments <- function(event) {
+  method <- toupper(as.character(event$method %||% "FOCEI"))
+  arguments <- list(
+    method = method,
+    maxit = as.integer(event$maxit %||% 200L),
+    eta_maxit = as.integer(event$etaMaxit %||% 100L),
+    tolerance = as.numeric(event$tolerance %||% 1e-6),
+    n_cores = max(1L, as.integer(event$nCores %||% 1L)),
+    print_every = max(0L, as.integer(event$printEvery %||% 0L)),
+    covariance = isTRUE(event$covariance),
+    covariance_type = as.character(event$covarianceType %||% "hessian"),
+    covariance_tolerance = as.numeric(event$covarianceTolerance %||% 1e-8),
+    covariance_samples = as.integer(event$covarianceSamples %||% 200L),
+    covariance_seed = as.integer(event$covarianceSeed %||%
+      event$methodSeed %||% 20260713L)
+  )
+  if (identical(method, "IMP")) {
+    arguments$n_imp <- as.integer(event$nImp %||% 200L)
+    arguments$seed <- as.integer(event$methodSeed %||% 20260713L)
+  } else if (identical(method, "GQ")) {
+    arguments$gq_order <- as.integer(event$gqOrder %||% 5L)
+    arguments$gq_grid <- as.character(event$gqGrid %||% "auto")
+    arguments$gq_level <- as.integer(event$gqLevel %||% 3L)
+    arguments$gq_adaptive <- isTRUE(event$gqAdaptive %||% TRUE)
+    arguments$gq_max_points <- as.integer(event$gqMaxPoints %||% 100000L)
+  } else if (identical(method, "SAEM")) {
+    arguments$n_iter <- as.integer(event$nIter %||% event$maxit %||% 200L)
+    arguments$burn <- as.integer(event$burn %||% floor(arguments$n_iter / 3))
+    arguments$mcmc_steps <- as.integer(event$mcmcSteps %||% 2L)
+    arguments$seed <- as.integer(event$methodSeed %||% 20260713L)
+  } else if (identical(method, "BAYES")) {
+    arguments$n_burn <- as.integer(event$nBurn %||% 500L)
+    arguments$n_sample <- as.integer(event$nSample %||% 1000L)
+    arguments$n_thin <- as.integer(event$nThin %||% 1L)
+    arguments$seed <- as.integer(event$methodSeed %||% 20260713L)
+  } else if (method %in% c("HMC", "NUTS")) {
+    arguments$n_warmup <- as.integer(event$nBurn %||% 500L)
+    arguments$n_sample <- as.integer(event$nSample %||% 1000L)
+    arguments$n_thin <- as.integer(event$nThin %||% 1L)
+    arguments$n_chains <- as.integer(event$nChains %||% 4L)
+    arguments$target_acceptance <- as.numeric(event$targetAcceptance %||% 0.8)
+    arguments$max_depth <- as.integer(event$maxTreeDepth %||% 10L)
+    arguments$n_leapfrog <- as.integer(event$nLeapfrog %||% 10L)
+    arguments$seed <- as.integer(event$methodSeed %||% 20260719L)
+  } else if (method %in% c("NPML", "NPAG")) {
+    arguments$np_points <- as.integer(event$npPoints %||% 25L)
+    arguments$np_cycles <- as.integer(event$npCycles %||% 3L)
+    arguments$np_max_support <- as.integer(event$npMaxSupport %||% 100L)
+    arguments$np_grid_step <- as.numeric(event$npGridStep %||% 1)
+    arguments$seed <- as.integer(event$methodSeed %||% 20260719L)
+  }
+  arguments
+}
+
+.liber_estimation_stages <- function(event) {
+  raw <- event$stages %||% list(event)
+  if (is.data.frame(raw)) raw <- lapply(seq_len(nrow(raw)), function(i) as.list(raw[i, , drop = FALSE]))
+  if (!is.list(raw) || !length(raw)) raw <- list(event)
+  lapply(raw, function(stage) {
+    controls <- .liber_estimation_arguments(stage)
+    method <- controls$method
+    controls$method <- NULL
+    do.call(nm_est_stage, c(list(method = method), controls))
+  })
 }
 
 .liber_model_template <- function(advan = 1L, trans = NULL, n_state = NULL,
@@ -918,6 +1310,7 @@ renderLiberWorkbench <- function(expr, env = parent.frame(), quoted = FALSE) {
   )
   ui <- shiny::fluidPage(
     htmltools::tags$head(
+      htmltools::tags$title("LibeRation"),
       htmltools::tags$meta(name = "viewport", content = "width=device-width, initial-scale=1")
     ),
     htmltools::tags$div(
@@ -977,8 +1370,52 @@ renderLiberWorkbench <- function(expr, env = parent.frame(), quoted = FALSE) {
           arguments <- list(
             method = as.character(event$method %||% "FOCEI"),
             maxit = as.integer(event$maxit %||% 200L),
-            eta_maxit = as.integer(event$etaMaxit %||% 100L)
+            eta_maxit = as.integer(event$etaMaxit %||% 100L),
+            tolerance = as.numeric(event$tolerance %||% 1e-6),
+            n_cores = max(1L, as.integer(event$nCores %||% 1L)),
+            print_every = max(0L, as.integer(event$printEvery %||% 0L)),
+            covariance = isTRUE(event$covariance),
+            covariance_type = as.character(event$covarianceType %||% "hessian"),
+            covariance_tolerance = as.numeric(event$covarianceTolerance %||% 1e-8),
+            covariance_samples = as.integer(event$covarianceSamples %||% 200L),
+            covariance_seed = as.integer(event$covarianceSeed %||%
+              event$methodSeed %||% 20260713L)
           )
+          if (identical(arguments$method, "IMP")) {
+            arguments$n_imp <- as.integer(event$nImp %||% 200L)
+            arguments$seed <- as.integer(event$methodSeed %||% 20260713L)
+          } else if (identical(arguments$method, "GQ")) {
+            arguments$gq_order <- as.integer(event$gqOrder %||% 5L)
+            arguments$gq_grid <- as.character(event$gqGrid %||% "auto")
+            arguments$gq_level <- as.integer(event$gqLevel %||% 3L)
+            arguments$gq_adaptive <- isTRUE(event$gqAdaptive)
+            arguments$gq_max_points <- as.integer(event$gqMaxPoints %||% 100000L)
+          } else if (identical(arguments$method, "SAEM")) {
+            arguments$n_iter <- as.integer(event$nIter %||% 200L)
+            arguments$burn <- as.integer(event$burn %||% floor(arguments$n_iter / 3))
+            arguments$mcmc_steps <- as.integer(event$mcmcSteps %||% 2L)
+            arguments$seed <- as.integer(event$methodSeed %||% 20260713L)
+          } else if (identical(arguments$method, "BAYES")) {
+            arguments$n_burn <- as.integer(event$nBurn %||% 500L)
+            arguments$n_sample <- as.integer(event$nSample %||% 1000L)
+            arguments$n_thin <- as.integer(event$nThin %||% 1L)
+            arguments$seed <- as.integer(event$methodSeed %||% 20260713L)
+          } else if (arguments$method %in% c("HMC", "NUTS")) {
+            arguments$n_warmup <- as.integer(event$nBurn %||% 500L)
+            arguments$n_sample <- as.integer(event$nSample %||% 1000L)
+            arguments$n_thin <- as.integer(event$nThin %||% 1L)
+            arguments$n_chains <- as.integer(event$nChains %||% 4L)
+            arguments$target_acceptance <- as.numeric(event$targetAcceptance %||% 0.8)
+            arguments$max_depth <- as.integer(event$maxTreeDepth %||% 10L)
+            arguments$n_leapfrog <- as.integer(event$nLeapfrog %||% 10L)
+            arguments$seed <- as.integer(event$methodSeed %||% 20260719L)
+          } else if (arguments$method %in% c("NPML", "NPAG")) {
+            arguments$np_points <- as.integer(event$npPoints %||% 25L)
+            arguments$np_cycles <- as.integer(event$npCycles %||% 3L)
+            arguments$np_max_support <- as.integer(event$npMaxSupport %||% 100L)
+            arguments$np_grid_step <- as.numeric(event$npGridStep %||% 1)
+            arguments$seed <- as.integer(event$methodSeed %||% 20260719L)
+          }
           if (!is.null(queue)) {
             if (!requireNamespace("LibeRties", quietly = TRUE)) {
               state$result <- simpleError("LibeRties is required for queued execution.")

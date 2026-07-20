@@ -1,9 +1,11 @@
-// [[Rcpp::depends(RcppEigen, RcppEigenAD, BH, LibeRtAD)]]
+// [[Rcpp::depends(LibeRtAD)]]
 // [[Rcpp::plugins(cpp17)]]
 
-#include <RcppEigen.h>
+#include <Rcpp.h>
+#include <LibeRtAD/eigen_r.hpp>
 #include <unsupported/Eigen/MatrixFunctions>
 #include <LibeRtAD/program.hpp>
+#include "eigen_solver.h"
 
 #include <algorithm>
 #include <cmath>
@@ -360,6 +362,7 @@ class ModelEngine {
   std::shared_ptr<const libertad::Program> pred;
   std::shared_ptr<const libertad::Program> des;
   std::vector<std::size_t> all_outputs;
+  std::vector<std::string> selected_output_names;
   std::vector<std::size_t> derivative_outputs;
   std::vector<std::string> state_names;
   OdeControl ode_control;
@@ -379,6 +382,12 @@ class ModelEngine {
         pred(std::make_shared<const libertad::Program>(Rcpp::as<Rcpp::List>(spec["pred_ir"]))) {
     all_outputs.resize(pred->output_names.size());
     std::iota(all_outputs.begin(), all_outputs.end(), 0U);
+    if (spec.containsElementNamed("output_names")) {
+      selected_output_names = Rcpp::as<std::vector<std::string>>(spec["output_names"]);
+      // Validate the serialized selection at engine construction rather than
+      // failing part-way through a long estimation or simulation.
+      pred->select_outputs(selected_output_names);
+    }
     Rcpp::RObject des_ir = spec["des_ir"];
     if (!Rf_isNull(des_ir)) {
       des = std::make_shared<const libertad::Program>(Rcpp::as<Rcpp::List>(des_ir));
@@ -999,6 +1008,7 @@ Rcpp::List simulate(ModelEngine& engine,
   if (n_state < 1) Rcpp::stop("Model state dimension must be positive.");
   Rcpp::NumericVector prediction(n_rows, NA_REAL);
   Rcpp::NumericMatrix amounts(n_rows, n_state);
+  Rcpp::NumericMatrix generated(n_rows, engine.selected_output_names.size());
   Vector state = Vector::Zero(n_state);
   std::vector<ActiveInfusion> active;
   Matrix previous_k = Matrix::Zero(n_state, n_state);
@@ -1031,6 +1041,10 @@ Rcpp::List simulate(ModelEngine& engine,
     }
 
     Parameters parameters = evaluate_parameters(engine, data, row, subject, theta, eta, sigma);
+    for (std::size_t output = 0; output < engine.selected_output_names.size(); ++output) {
+      auto found = parameters.find(engine.selected_output_names[output]);
+      generated(row, static_cast<int>(output)) = found == parameters.end() ? NA_REAL : found->second;
+    }
     Topology topology;
     if (engine.is_ode()) {
       topology.k = Matrix::Zero(n_state, n_state);
@@ -1115,6 +1129,8 @@ Rcpp::List simulate(ModelEngine& engine,
   return Rcpp::List::create(
     Rcpp::Named("ipred") = prediction,
     Rcpp::Named("amounts") = amounts,
+    Rcpp::Named("generated") = generated,
+    Rcpp::Named("output_names") = Rcpp::wrap(engine.selected_output_names),
     Rcpp::Named("state_names") = state_names,
     Rcpp::Named("solver") = engine.solver == "auto" ?
       (engine.is_ode() ? (engine.advan == 13 ? "advan13-implicit" : "advan6-rk45") : "advan") :
@@ -1165,12 +1181,24 @@ inline double scalar_value(const CppAD::AD<double>& value) {
 }
 
 template <class Scalar>
+bool path_lt(const Scalar& left, const Scalar& right) { return left < right; }
+template <class Scalar>
+bool path_le(const Scalar& left, const Scalar& right) { return left <= right; }
+template <class Scalar>
+bool path_gt(const Scalar& left, const Scalar& right) { return left > right; }
+template <class Scalar>
+bool path_ne(const Scalar& left, const Scalar& right) { return left != right; }
+
+template <class Scalar>
 bool scalar_finite(const Scalar& value) {
   return std::isfinite(scalar_value(value));
 }
 
 template <class Scalar>
 bool scalar_positive(const Scalar& value) {
+  // Positivity is a parameter-domain check, not a valid alternate execution
+  // path. Recording it as a CompareOp would attempt to retape at invalid
+  // underflowed ETA trials instead of letting the optimizer reject them.
   return scalar_finite(value) && scalar_value(value) > 0.0;
 }
 
@@ -1217,11 +1245,13 @@ MatrixT<Scalar> solve_linear(MatrixT<Scalar> matrix, MatrixT<Scalar> rhs,
   // changes numerical pivoting, which the tape wrapper detects at construction.
   for (Eigen::Index column = 0; column < n; ++column) {
     Eigen::Index pivot = column;
-    double largest = std::abs(scalar_value(matrix(column, column)));
+    Scalar largest_value = libertad::scalar_abs(matrix(column, column));
+    double largest = scalar_value(largest_value);
     for (Eigen::Index row = column + 1; row < n; ++row) {
-      const double candidate = std::abs(scalar_value(matrix(row, column)));
-      if (candidate > largest) {
-        largest = candidate;
+      const Scalar candidate_value = libertad::scalar_abs(matrix(row, column));
+      if (path_gt(candidate_value, largest_value)) {
+        largest_value = candidate_value;
+        largest = scalar_value(candidate_value);
         pivot = row;
       }
     }
@@ -1251,21 +1281,27 @@ MatrixT<Scalar> matrix_exp_pade(const MatrixT<Scalar>& input) {
     throw std::invalid_argument("Matrix exponential requires a square matrix.");
   }
   const Eigen::Index n = input.rows();
-  double norm_one = 0.0;
+  Scalar norm_one_value = Scalar(0.0);
   for (Eigen::Index column = 0; column < n; ++column) {
-    double sum = 0.0;
+    Scalar sum = Scalar(0.0);
     for (Eigen::Index row = 0; row < n; ++row) {
       const double value = scalar_value(input(row, column));
       if (!std::isfinite(value)) {
         throw std::domain_error("Matrix exponential input contains non-finite values.");
       }
-      sum += std::abs(value);
+      sum += libertad::scalar_abs(input(row, column));
     }
-    norm_one = std::max(norm_one, sum);
+    // Which column attains the norm is not a structural execution choice.
+    // Keep it as a conditional expression and guard only the later Pade
+    // scaling boundary; otherwise harmless changes in the largest column
+    // force needless retaping.
+    norm_one_value = libertad::choose_gt(
+      sum, norm_one_value, sum, norm_one_value);
   }
+  const double norm_one = scalar_value(norm_one_value);
   constexpr double theta13 = 5.371920351148152;
   int scaling = 0;
-  if (norm_one > theta13) {
+  if (path_gt(norm_one_value, Scalar(theta13))) {
     scaling = std::max(0, static_cast<int>(std::ceil(std::log2(norm_one / theta13))));
   }
   const Scalar divisor = Scalar(std::ldexp(1.0, scaling));
@@ -1310,7 +1346,7 @@ Scalar scalar_cosh_t(const Scalar& value) {
 // its threshold, which covers the default NONMEM-style parameter bounds.
 template <class Scalar>
 Scalar scalar_sinhc_t(const Scalar& value) {
-  if (std::abs(scalar_value(value)) > 1e-4) {
+  if (path_gt(libertad::scalar_abs(value), Scalar(1e-4))) {
     return scalar_sinh_t(value) / value;
   }
   const Scalar square = value * value;
@@ -1353,11 +1389,11 @@ TwoByTwoExponentialT<Scalar> two_by_two_exp_t(
   const Scalar half_difference = Scalar(0.5) * (matrix(0, 0) - matrix(1, 1));
   const Scalar discriminant =
     half_difference * half_difference + matrix(0, 1) * matrix(1, 0);
-  if (scalar_value(discriminant) < -1e-12) {
+  if (path_lt(discriminant, Scalar(-1e-12))) {
     throw std::domain_error("The ADVAN two-compartment transition has complex rates.");
   }
   result.delta = libertad::scalar_sqrt(
-    scalar_value(discriminant) < 0.0 ? Scalar(0.0) : discriminant);
+    path_lt(discriminant, Scalar(0.0)) ? Scalar(0.0) : discriminant);
   const Scalar scaled_delta = result.delta * time;
   const Scalar multiplier = libertad::scalar_exp(result.mean * time);
   result.transition = multiplier * (
@@ -1391,9 +1427,11 @@ MatrixT<Scalar> advan4_transition_t(const MatrixT<Scalar>& k,
   // f(Kc)b, where f(lambda) is the divided exponential between a
   // disposition eigenvalue and the depot eigenvalue. This avoids the
   // singular (Kc + KA I)^-1 formula when KA equals a hybrid rate.
-  const double delta_value = std::abs(scalar_value(disposition.delta));
-  const double scale = std::max(1.0, std::abs(scalar_value(disposition.mean)));
-  if (delta_value <= 1e-8 * scale) {
+  const Scalar delta_value = libertad::scalar_abs(disposition.delta);
+  const Scalar scale = libertad::choose_gt(
+    libertad::scalar_abs(disposition.mean), Scalar(1.0),
+    libertad::scalar_abs(disposition.mean), Scalar(1.0));
+  if (path_le(delta_value, Scalar(1e-8) * scale)) {
     return matrix_exp_pade(MatrixT<Scalar>(k * time));
   }
   const Scalar lambda_plus = disposition.mean + disposition.delta;
@@ -1432,7 +1470,7 @@ inline std::string propagation_kernel_name(const ModelEngine& engine) {
 template <class Scalar>
 MatrixT<Scalar> specialized_advan_transition_t(
     int advan, const MatrixT<Scalar>& k, const Scalar& time) {
-  if (scalar_value(time) <= 0.0) {
+  if (path_le(time, Scalar(0.0))) {
     return MatrixT<Scalar>::Identity(k.rows(), k.cols());
   }
   if (advan == 1) {
@@ -1453,22 +1491,22 @@ MatrixT<Scalar> specialized_advan_transition_t(
 }
 
 template <class Scalar>
-double matrix_one_norm_value(const MatrixT<Scalar>& matrix) {
-  double norm = 0.0;
+Scalar matrix_one_norm_value(const MatrixT<Scalar>& matrix) {
+  Scalar norm_value = Scalar(0.0);
   for (Eigen::Index column = 0; column < matrix.cols(); ++column) {
-    double sum = 0.0;
+    Scalar sum = Scalar(0.0);
     for (Eigen::Index row = 0; row < matrix.rows(); ++row) {
-      sum += std::abs(scalar_value(matrix(row, column)));
+      sum += libertad::scalar_abs(matrix(row, column));
     }
-    norm = std::max(norm, sum);
+    norm_value = libertad::choose_gt(sum, norm_value, sum, norm_value);
   }
-  return norm;
+  return norm_value;
 }
 
 template <class Scalar>
 bool zero_input_t(const VectorT<Scalar>& input) {
   for (Eigen::Index row = 0; row < input.rows(); ++row) {
-    if (scalar_value(input[row]) != 0.0) return false;
+    if (path_ne(input[row], Scalar(0.0))) return false;
   }
   return true;
 }
@@ -1481,10 +1519,10 @@ AffineMapT<Scalar> specialized_advan_affine_map_t(
   if (k.cols() != n || input.size() != n) {
     throw std::invalid_argument("Specialized ADVAN propagation dimensions are inconsistent.");
   }
-  if (scalar_value(time) < -1e-12 || !scalar_finite(time)) {
+  if (path_lt(time, Scalar(-1e-12)) || !scalar_finite(time)) {
     throw std::domain_error("Propagation interval must be finite and non-negative.");
   }
-  if (scalar_value(time) <= 0.0) {
+  if (path_le(time, Scalar(0.0))) {
     return {MatrixT<Scalar>::Identity(n, n), VectorT<Scalar>::Zero(n)};
   }
   const MatrixT<Scalar> transition = specialized_advan_transition_t(advan, k, time);
@@ -1494,7 +1532,7 @@ AffineMapT<Scalar> specialized_advan_affine_map_t(
 
   VectorT<Scalar> offset(n);
   const MatrixT<Scalar> scaled = k * time;
-  if (matrix_one_norm_value(scaled) <= 1e-4) {
+  if (path_le(matrix_one_norm_value(scaled), Scalar(1e-4))) {
     // phi_1(A) = I + A/2! + A^2/3! + ... avoids cancellation in
     // K^-1(exp(Kt)-I) for very short intervals or very slow rates.
     const MatrixT<Scalar> identity = MatrixT<Scalar>::Identity(n, n);
@@ -1521,10 +1559,10 @@ AffineMapT<Scalar> affine_map_t(const MatrixT<Scalar>& k,
     throw std::invalid_argument("Affine propagation dimensions are inconsistent.");
   }
   const double dt_value = scalar_value(dt);
-  if (dt_value < -1e-12 || !std::isfinite(dt_value)) {
+  if (path_lt(dt, Scalar(-1e-12)) || !std::isfinite(dt_value)) {
     throw std::domain_error("Propagation interval must be finite and non-negative.");
   }
-  if (dt_value <= 0.0) {
+  if (path_le(dt, Scalar(0.0))) {
     return {MatrixT<Scalar>::Identity(n, n), VectorT<Scalar>::Zero(n)};
   }
   MatrixT<Scalar> augmented = MatrixT<Scalar>::Zero(n + 1, n + 1);
@@ -1747,11 +1785,53 @@ TopologyT<Scalar> build_graph_topology_t(const MatrixGraph& graph,
   return topology;
 }
 
+// Numeric covariates used by PRED/DES can change between subjects without
+// changing the event topology.  During prediction-tape recording these values
+// are CppAD dynamic parameters, allowing one structural tape to be reused.
+// Event ordering, dosing-mode, compartment, mixture, and IOV fields remain
+// ordinary constants because changes to them require a different tape.
+template <class Scalar>
+struct DynamicDataT {
+  int n_rows = 0;
+  std::unordered_map<std::string, std::size_t> column_positions;
+  std::vector<Scalar> values;
+
+  const Scalar* find(const std::string& name, int row) const {
+    auto it = column_positions.find(name);
+    if (it == column_positions.end()) return nullptr;
+    const std::size_t position = it->second * static_cast<std::size_t>(n_rows) +
+      static_cast<std::size_t>(row);
+    return &values.at(position);
+  }
+};
+
+template <class Scalar>
+Scalar dynamic_row_value(const Rcpp::DataFrame& data, const std::string& name,
+                         int row, const DynamicDataT<Scalar>* dynamic_data) {
+  if (dynamic_data != nullptr) {
+    const Scalar* value = dynamic_data->find(name, row);
+    if (value != nullptr) return *value;
+  }
+  return Scalar(data_value(data, name, row));
+}
+
+template <class Scalar>
+Scalar dynamic_row_optional(const Rcpp::DataFrame& data, const std::string& name,
+                            int row, double fallback,
+                            const DynamicDataT<Scalar>* dynamic_data) {
+  if (dynamic_data != nullptr) {
+    const Scalar* value = dynamic_data->find(name, row);
+    if (value != nullptr) return *value;
+  }
+  return Scalar(row_optional(data, name, row, fallback));
+}
+
 template <class Scalar>
 ParametersT<Scalar> evaluate_parameters_t(
     const ModelEngine& engine, const Rcpp::DataFrame& data, int row, int subject,
     const std::vector<Scalar>& theta, const std::vector<Scalar>& eta,
-    int eta_columns, const std::vector<Scalar>& sigma, int mixture_number) {
+    int eta_columns, const std::vector<Scalar>& sigma, int mixture_number,
+    const DynamicDataT<Scalar>* dynamic_data = nullptr) {
   std::vector<Scalar> inputs(engine.pred->input_names.size(), Scalar(0.0));
   for (std::size_t i = 0; i < engine.pred->input_names.size(); ++i) {
     const std::string& name = engine.pred->input_names[i];
@@ -1780,12 +1860,12 @@ ParametersT<Scalar> evaluate_parameters_t(
       inputs[i] = Scalar(mixture_number);
       continue;
     }
-    const double value = data_value(data, name, row);
-    if (!std::isfinite(value)) {
+    const Scalar value = dynamic_row_value(data, name, row, dynamic_data);
+    if (!std::isfinite(scalar_value(value))) {
       throw std::domain_error("PRED input '" + name + "' is non-finite at row " +
                               std::to_string(row + 1) + ".");
     }
-    inputs[i] = Scalar(value);
+    inputs[i] = value;
   }
   std::vector<Scalar> output = engine.pred->eval_outputs(inputs, engine.all_outputs);
   ParametersT<Scalar> parameters;
@@ -1801,7 +1881,8 @@ VectorT<Scalar> evaluate_derivatives_t(
     int row, int subject, const Scalar& time, const VectorT<Scalar>& state,
     const ParametersT<Scalar>& parameters,
     const std::vector<Scalar>& theta, const std::vector<Scalar>& eta,
-    int eta_columns, const std::vector<Scalar>& sigma, int mixture_number) {
+    int eta_columns, const std::vector<Scalar>& sigma, int mixture_number,
+    const DynamicDataT<Scalar>* dynamic_data = nullptr) {
   if (!engine.des) throw std::logic_error("ODE derivative program is missing.");
   std::vector<Scalar> inputs(engine.des->input_names.size(), Scalar(0.0));
   for (std::size_t i = 0; i < engine.des->input_names.size(); ++i) {
@@ -1842,12 +1923,12 @@ VectorT<Scalar> evaluate_derivatives_t(
       inputs[i] = Scalar(mixture_number);
       continue;
     }
-    const double value = data_value(data, name, row);
-    if (!std::isfinite(value)) {
+    const Scalar value = dynamic_row_value(data, name, row, dynamic_data);
+    if (!std::isfinite(scalar_value(value))) {
       throw std::domain_error("DES input '" + name + "' is non-finite at row " +
                               std::to_string(row + 1) + ".");
     }
-    inputs[i] = Scalar(value);
+    inputs[i] = value;
   }
   std::vector<Scalar> values = engine.des->eval_outputs(inputs, engine.derivative_outputs);
   VectorT<Scalar> derivative(static_cast<Eigen::Index>(values.size()));
@@ -1856,15 +1937,16 @@ VectorT<Scalar> evaluate_derivatives_t(
 }
 
 template <class Scalar>
-double scaled_error_t(const VectorT<Scalar>& error,
+Scalar scaled_error_t(const VectorT<Scalar>& error,
                       const VectorT<Scalar>& before,
                       const VectorT<Scalar>& after,
                       const OdeControl& control) {
-  double maximum = 0.0;
+  Scalar maximum = Scalar(0.0);
   for (Eigen::Index i = 0; i < error.size(); ++i) {
     const double scale = control.atol + control.rtol * std::max(
       std::abs(scalar_value(before[i])), std::abs(scalar_value(after[i])));
-    maximum = std::max(maximum, std::abs(scalar_value(error[i])) / scale);
+    const Scalar scaled = libertad::scalar_abs(error[i]) / Scalar(scale);
+    maximum = libertad::choose_gt(scaled, maximum, scaled, maximum);
   }
   return maximum;
 }
@@ -1910,10 +1992,11 @@ VectorT<Scalar> integrate_dopri54_t(const Rhs& rhs, VectorT<Scalar> state,
       Scalar(5179.0 / 57600.0) * k1 + Scalar(7571.0 / 16695.0) * k3 +
       Scalar(393.0 / 640.0) * k4 - Scalar(92097.0 / 339200.0) * k5 +
       Scalar(187.0 / 2100.0) * k6 + Scalar(1.0 / 40.0) * k7);
-    const double error = scaled_error_t(
+    const Scalar error_expression = scaled_error_t(
       VectorT<Scalar>(fifth - fourth), state, fifth, control);
+    const double error = scalar_value(error_expression);
     if (!std::isfinite(error)) throw std::domain_error("ADVAN6 ODE error estimate is non-finite.");
-    if (error <= 1.0) {
+    if (path_le(error_expression, Scalar(1.0))) {
       state = fifth;
       time += h;
     }
@@ -1934,7 +2017,8 @@ bool implicit_trapezoid_step_t(const Rhs& rhs, const VectorT<Scalar>& before,
   for (int iteration = 0; iteration < 12; ++iteration) {
     const VectorT<Scalar> f1 = rhs(time + h, after);
     const VectorT<Scalar> residual = after - before - Scalar(0.5 * h) * (f0 + f1);
-    if (scaled_error_t(residual, before, after, control) < 0.03) return true;
+    if (path_lt(scaled_error_t(residual, before, after, control),
+                Scalar(0.03))) return true;
     MatrixT<Scalar> jacobian(n, n);
     for (Eigen::Index column = 0; column < n; ++column) {
       VectorT<Scalar> perturbed = after;
@@ -1948,7 +2032,8 @@ bool implicit_trapezoid_step_t(const Rhs& rhs, const VectorT<Scalar>& before,
     rhs_matrix.col(0) = -residual;
     const VectorT<Scalar> update = solve_linear(system, rhs_matrix, "ADVAN13 Newton").col(0);
     after += update;
-    if (scaled_error_t(update, before, after, control) < 0.03) return true;
+    if (path_lt(scaled_error_t(update, before, after, control),
+                Scalar(0.03))) return true;
   }
   return false;
 }
@@ -1973,10 +2058,12 @@ VectorT<Scalar> integrate_implicit_trapezoid_t(
     const bool converged = implicit_trapezoid_step_t(rhs, state, time, h, control, full) &&
       implicit_trapezoid_step_t(rhs, state, time, h * 0.5, control, half) &&
       implicit_trapezoid_step_t(rhs, half, time + h * 0.5, h * 0.5, control, two_half);
-    double error = std::numeric_limits<double>::infinity();
-    if (converged) error = scaled_error_t(
+    Scalar error_expression = Scalar(std::numeric_limits<double>::infinity());
+    if (converged) error_expression = scaled_error_t(
       VectorT<Scalar>((two_half - full) / Scalar(3.0)), state, two_half, control);
-    if (converged && std::isfinite(error) && error <= 1.0) {
+    const double error = scalar_value(error_expression);
+    if (converged && std::isfinite(error) &&
+        path_le(error_expression, Scalar(1.0))) {
       state = two_half + (two_half - full) / Scalar(3.0);
       time += h;
     }
@@ -1994,7 +2081,7 @@ VectorT<Scalar> integrate_dopri54_interval_t(
     const Scalar& to, const OdeControl& control) {
   const Scalar span = to - from;
   const double span_value = scalar_value(span);
-  if (span_value <= 0.0) return state;
+  if (path_le(span, Scalar(0.0))) return state;
   OdeControl normalized = control;
   if (normalized.initial_step > 0.0) {
     normalized.initial_step = std::min(1.0, normalized.initial_step / span_value);
@@ -2012,7 +2099,7 @@ VectorT<Scalar> integrate_implicit_interval_t(
     const Scalar& to, const OdeControl& control) {
   const Scalar span = to - from;
   const double span_value = scalar_value(span);
-  if (span_value <= 0.0) return state;
+  if (path_le(span, Scalar(0.0))) return state;
   OdeControl normalized = control;
   if (normalized.initial_step > 0.0) {
     normalized.initial_step = std::min(1.0, normalized.initial_step / span_value);
@@ -2027,17 +2114,21 @@ VectorT<Scalar> integrate_implicit_interval_t(
 
 template <class Scalar>
 Scalar bioavailability_t(const ParametersT<Scalar>& p, const Rcpp::DataFrame& data,
-                         int row, int cmt) {
+                         int row, int cmt,
+                         const DynamicDataT<Scalar>* dynamic_data = nullptr) {
   const std::string name = "F" + std::to_string(cmt);
   Scalar value = positive_parameter(p, {name.c_str()});
-  if (!scalar_positive(value)) value = Scalar(row_optional(data, name, row, 1.0));
+  if (!scalar_positive(value)) {
+    value = dynamic_row_optional(data, name, row, 1.0, dynamic_data);
+  }
   return scalar_positive(value) ? value : Scalar(1.0);
 }
 
 template <class Scalar>
 Scalar event_infusion_rate_t(const ParametersT<Scalar>& p,
                              const Rcpp::DataFrame& data, int row, int cmt,
-                             double amount, double rate_code) {
+                             double amount, double rate_code,
+                             const DynamicDataT<Scalar>* dynamic_data = nullptr) {
   if (rate_code >= 0.0) return Scalar(rate_code);
   if (rate_code != -1.0 && rate_code != -2.0) {
     throw std::domain_error("Negative RATE must be -1 (modelled Rn) or -2 (modelled Dn).");
@@ -2045,7 +2136,9 @@ Scalar event_infusion_rate_t(const ParametersT<Scalar>& p,
   const std::string name = std::string(rate_code == -1.0 ? "R" : "D") +
     std::to_string(cmt);
   Scalar value = positive_parameter(p, {name.c_str()});
-  if (!scalar_positive(value)) value = Scalar(row_optional(data, name, row, NA_REAL));
+  if (!scalar_positive(value)) {
+    value = dynamic_row_optional(data, name, row, NA_REAL, dynamic_data);
+  }
   if (!scalar_positive(value)) {
     throw std::domain_error("RATE=" + std::to_string(static_cast<int>(rate_code)) +
                             " requires a positive " + name + " value.");
@@ -2056,10 +2149,13 @@ Scalar event_infusion_rate_t(const ParametersT<Scalar>& p,
 template <class Scalar>
 Scalar observation_scale_t(const ParametersT<Scalar>& p,
                            const Rcpp::DataFrame& data, int row, int cmt,
-                           const TopologyT<Scalar>& topology) {
+                           const TopologyT<Scalar>& topology,
+                           const DynamicDataT<Scalar>* dynamic_data = nullptr) {
   const std::string name = "S" + std::to_string(cmt);
   Scalar value = positive_parameter(p, {name.c_str()});
-  if (!scalar_positive(value)) value = Scalar(row_optional(data, name, row, NA_REAL));
+  if (!scalar_positive(value)) {
+    value = dynamic_row_optional(data, name, row, NA_REAL, dynamic_data);
+  }
   const int index = cmt - 1;
   if (!scalar_positive(value) && index >= 0 &&
       index < static_cast<int>(topology.default_scales.size())) {
@@ -2078,9 +2174,8 @@ VectorT<Scalar> infusion_input_t(int n, const std::vector<ActiveInfusionT<Scalar
 template <class Scalar>
 void remove_finished_t(std::vector<ActiveInfusionT<Scalar>>& active,
                        const Scalar& time) {
-  const double time_value = scalar_value(time);
-  active.erase(std::remove_if(active.begin(), active.end(), [time_value](const auto& infusion) {
-    return scalar_value(infusion.end) <= time_value + 1e-12;
+  active.erase(std::remove_if(active.begin(), active.end(), [&time](const auto& infusion) {
+    return path_le(infusion.end, time + Scalar(1e-12));
   }), active.end());
 }
 
@@ -2091,11 +2186,11 @@ VectorT<Scalar> propagate_to_t(const ModelEngine& engine,
                               std::vector<ActiveInfusionT<Scalar>>& active) {
   Scalar cursor = from;
   remove_finished_t(active, cursor);
-  while (scalar_value(cursor) < scalar_value(to) - 1e-12) {
+  while (path_lt(cursor, to - Scalar(1e-12))) {
     Scalar segment_end = to;
     for (const auto& infusion : active) {
-      if (scalar_value(infusion.end) > scalar_value(cursor) + 1e-12 &&
-          scalar_value(infusion.end) < scalar_value(segment_end)) {
+      if (path_gt(infusion.end, cursor + Scalar(1e-12)) &&
+          path_lt(infusion.end, segment_end)) {
         segment_end = infusion.end;
       }
     }
@@ -2115,15 +2210,16 @@ VectorT<Scalar> propagate_ode_to_t(
     const std::vector<Scalar>& eta, int eta_columns,
     const std::vector<Scalar>& sigma, const ParametersT<Scalar>& parameters,
     int mixture_number, VectorT<Scalar> state, double from, double to,
-    std::vector<ActiveInfusionT<Scalar>>& active) {
+    std::vector<ActiveInfusionT<Scalar>>& active,
+    const DynamicDataT<Scalar>* dynamic_data = nullptr) {
   Scalar cursor = Scalar(from);
   const Scalar endpoint = Scalar(to);
   remove_finished_t(active, cursor);
-  while (scalar_value(cursor) < scalar_value(endpoint) - 1e-12) {
+  while (path_lt(cursor, endpoint - Scalar(1e-12))) {
     Scalar segment_end = endpoint;
     for (const auto& infusion : active) {
-      if (scalar_value(infusion.end) > scalar_value(cursor) + 1e-12 &&
-          scalar_value(infusion.end) < scalar_value(segment_end)) {
+      if (path_gt(infusion.end, cursor + Scalar(1e-12)) &&
+          path_lt(infusion.end, segment_end)) {
         segment_end = infusion.end;
       }
     }
@@ -2131,7 +2227,7 @@ VectorT<Scalar> propagate_ode_to_t(
     auto rhs = [&](const Scalar& time, const VectorT<Scalar>& value) {
       VectorT<Scalar> derivative = evaluate_derivatives_t(
         engine, data, row, subject, time, value, parameters,
-        theta, eta, eta_columns, sigma, mixture_number);
+        theta, eta, eta_columns, sigma, mixture_number, dynamic_data);
       derivative += input;
       return derivative;
     };
@@ -2145,17 +2241,19 @@ VectorT<Scalar> propagate_ode_to_t(
 }
 
 template <class Scalar>
-double relative_state_change_t(const VectorT<Scalar>& before,
+Scalar relative_state_change_t(const VectorT<Scalar>& before,
                                const VectorT<Scalar>& after) {
-  double numerator = 0.0;
-  double denominator = 0.0;
+  Scalar numerator = Scalar(0.0);
+  Scalar denominator = Scalar(0.0);
   for (Eigen::Index i = 0; i < before.size(); ++i) {
-    const double difference = scalar_value(after[i]) - scalar_value(before[i]);
+    const Scalar difference = after[i] - before[i];
     numerator += difference * difference;
-    const double value = scalar_value(after[i]);
-    denominator += value * value;
+    denominator += after[i] * after[i];
   }
-  return std::sqrt(numerator) / std::max(1.0, std::sqrt(denominator));
+  const Scalar norm = libertad::scalar_sqrt(denominator);
+  const Scalar scale = libertad::choose_gt(
+    norm, Scalar(1.0), norm, Scalar(1.0));
+  return libertad::scalar_sqrt(numerator) / scale;
 }
 
 template <class Scalar>
@@ -2169,7 +2267,9 @@ std::vector<ActiveInfusionT<Scalar>> periodic_infusions_t(
   active.reserve(static_cast<std::size_t>(previous + 1));
   for (int dose = 0; dose <= previous; ++dose) {
     const Scalar end = Scalar(time) + duration - Scalar(dose * interval);
-    if (scalar_value(end) > time + 1e-12) active.push_back({end, compartment, rate});
+    if (path_gt(end, Scalar(time + 1e-12))) {
+      active.push_back({end, compartment, rate});
+    }
   }
   return active;
 }
@@ -2181,7 +2281,8 @@ VectorT<Scalar> steady_ode_bolus_post_t(
     const std::vector<Scalar>& eta, int eta_columns,
     const std::vector<Scalar>& sigma, const ParametersT<Scalar>& parameters,
     int mixture_number, const VectorT<Scalar>& dose,
-    double time, double interval) {
+    double time, double interval,
+    const DynamicDataT<Scalar>* dynamic_data = nullptr) {
   if (!(interval > 0.0)) throw std::domain_error("ODE steady-state bolus requires II > 0.");
   VectorT<Scalar> current = dose;
   const double tolerance = std::max(1e-10, engine.ode_control.rtol * 5.0);
@@ -2189,8 +2290,11 @@ VectorT<Scalar> steady_ode_bolus_post_t(
     std::vector<ActiveInfusionT<Scalar>> active;
     VectorT<Scalar> next = propagate_ode_to_t(
       engine, data, row, subject, theta, eta, eta_columns, sigma,
-      parameters, mixture_number, current, time, time + interval, active) + dose;
-    if (relative_state_change_t(current, next) <= tolerance) return next;
+      parameters, mixture_number, current, time, time + interval, active,
+      dynamic_data) + dose;
+    if (path_le(relative_state_change_t(current, next), Scalar(tolerance))) {
+      return next;
+    }
     current = next;
   }
   throw std::runtime_error("ODE bolus periodic shooting did not converge.");
@@ -2203,8 +2307,9 @@ VectorT<Scalar> steady_ode_infusion_pre_t(
     const std::vector<Scalar>& eta, int eta_columns,
     const std::vector<Scalar>& sigma, const ParametersT<Scalar>& parameters,
     int mixture_number, int compartment, const Scalar& administered_rate,
-    const Scalar& duration, double time, double interval) {
-  if (!(scalar_value(duration) > 0.0) || !(interval > 0.0)) {
+    const Scalar& duration, double time, double interval,
+    const DynamicDataT<Scalar>* dynamic_data = nullptr) {
+  if (!path_gt(duration, Scalar(0.0)) || !(interval > 0.0)) {
     throw std::domain_error("ODE steady-state infusion requires duration and II > 0.");
   }
   VectorT<Scalar> current = VectorT<Scalar>::Zero(engine.n_state);
@@ -2214,8 +2319,11 @@ VectorT<Scalar> steady_ode_infusion_pre_t(
       time, duration, interval, compartment, administered_rate);
     VectorT<Scalar> next = propagate_ode_to_t(
       engine, data, row, subject, theta, eta, eta_columns, sigma,
-      parameters, mixture_number, current, time, time + interval, active);
-    if (relative_state_change_t(current, next) <= tolerance) return next;
+      parameters, mixture_number, current, time, time + interval, active,
+      dynamic_data);
+    if (path_le(relative_state_change_t(current, next), Scalar(tolerance))) {
+      return next;
+    }
     current = next;
   }
   throw std::runtime_error("ODE infusion periodic shooting did not converge.");
@@ -2243,10 +2351,10 @@ VectorT<Scalar> steady_infusion_pre_t(const ModelEngine& engine,
   }
   const int complete = static_cast<int>(std::floor(duration_value / interval + 1e-12));
   Scalar remainder = duration - Scalar(complete * interval);
-  if (scalar_value(remainder) < 1e-12) remainder = Scalar(0.0);
+  if (path_lt(remainder, Scalar(1e-12))) remainder = Scalar(0.0);
   const VectorT<Scalar> baseline = Scalar(static_cast<double>(complete)) * rate;
   VectorT<Scalar> first_input = baseline;
-  if (scalar_value(remainder) > 0.0) first_input += rate;
+  if (path_gt(remainder, Scalar(0.0))) first_input += rate;
   AffineMapT<Scalar> on = engine_affine_map_t(engine, k, first_input, remainder);
   AffineMapT<Scalar> off = engine_affine_map_t(
     engine, k, baseline, Scalar(interval) - remainder);
@@ -2260,7 +2368,8 @@ std::vector<Scalar> simulate_analytical_t(
     const ModelEngine& engine, const Rcpp::DataFrame& data,
     const std::vector<Scalar>& theta, const std::vector<Scalar>& eta,
     const std::vector<Scalar>& sigma,
-    const std::vector<int>& mixture_assignment = std::vector<int>()) {
+    const std::vector<int>& mixture_assignment = std::vector<int>(),
+    const DynamicDataT<Scalar>* dynamic_data = nullptr) {
   const int n_rows = data.nrows();
   Rcpp::NumericVector time = data["TIME"];
   Rcpp::NumericVector amount = data["AMT"];
@@ -2303,7 +2412,7 @@ std::vector<Scalar> simulate_analytical_t(
         state = propagate_ode_to_t(
           engine, data, previous_row, subject, theta, eta, eta_columns, sigma,
           previous_parameters, previous_mixture, state,
-          previous_time, time[row], active);
+          previous_time, time[row], active, dynamic_data);
       } else {
         state = propagate_to_t(
           engine, previous_k, state, Scalar(previous_time), Scalar(time[row]), active);
@@ -2314,7 +2423,7 @@ std::vector<Scalar> simulate_analytical_t(
       mixture_assignment.at(static_cast<std::size_t>(subject));
     ParametersT<Scalar> parameters = evaluate_parameters_t(
       engine, data, row, subject, theta, eta, eta_columns, sigma,
-      mixture_number);
+      mixture_number, dynamic_data);
     TopologyT<Scalar> topology;
     if (engine.is_ode()) {
       topology.k = MatrixT<Scalar>::Zero(n_state, n_state);
@@ -2334,9 +2443,10 @@ std::vector<Scalar> simulate_analytical_t(
     if (dosing) {
       const int dose_cmt = cmt[row] > 0 ? cmt[row] : engine.dose_cmp;
       const int dose_index = compartment_index(dose_cmt, topology.default_dose, n_state);
-      const Scalar f = bioavailability_t(parameters, data, row, dose_cmt);
+      const Scalar f = bioavailability_t(
+        parameters, data, row, dose_cmt, dynamic_data);
       const Scalar event_rate = event_infusion_rate_t(
-        parameters, data, row, dose_cmt, amount[row], rate[row]);
+        parameters, data, row, dose_cmt, amount[row], rate[row], dynamic_data);
       const int ss_flag = ss[row] != 0 ? ss[row] : engine.model_ss;
       if (ss_flag == 1) {
         state.setZero();
@@ -2352,7 +2462,7 @@ std::vector<Scalar> simulate_analytical_t(
           VectorT<Scalar> periodic = engine.is_ode() ? steady_ode_infusion_pre_t(
             engine, data, row, subject, theta, eta, eta_columns, sigma,
             parameters, mixture_number, dose_index, event_rate * f,
-            duration, time[row], interval[row]) :
+            duration, time[row], interval[row], dynamic_data) :
             steady_infusion_pre_t(engine, topology.k, input, duration, interval[row]);
           if (ss_flag == 1) state = periodic; else state += periodic;
           std::vector<ActiveInfusionT<Scalar>> periodic_active = periodic_infusions_t(
@@ -2367,7 +2477,8 @@ std::vector<Scalar> simulate_analytical_t(
         if (ss_flag != 0) {
           VectorT<Scalar> periodic = engine.is_ode() ? steady_ode_bolus_post_t(
             engine, data, row, subject, theta, eta, eta_columns, sigma,
-            parameters, mixture_number, dose, time[row], interval[row]) :
+            parameters, mixture_number, dose, time[row], interval[row],
+            dynamic_data) :
             steady_bolus_post_t(engine, topology.k, dose, interval[row]);
           if (ss_flag == 1) state = periodic; else state += periodic;
         } else {
@@ -2378,7 +2489,8 @@ std::vector<Scalar> simulate_analytical_t(
     const int observation_cmt = cmt[row] > 0 && evid[row] == 0 ? cmt[row] : engine.obs_cmp;
     const int observation_index = compartment_index(
       observation_cmt, topology.default_observation, n_state);
-    const Scalar scale = observation_scale_t(parameters, data, row, observation_cmt, topology);
+    const Scalar scale = observation_scale_t(
+      parameters, data, row, observation_cmt, topology, dynamic_data);
     prediction[static_cast<std::size_t>(row)] = state[observation_index] / scale;
     previous_k = topology.k;
     previous_parameters = std::move(parameters);
@@ -2393,16 +2505,170 @@ std::vector<Scalar> simulate_analytical_t(
 struct ObjectiveTape {
   CppAD::ADFun<double> fun;
   std::vector<std::string> domain_names;
+  std::vector<std::string> dynamic_columns;
+  std::vector<int> dynamic_observed_rows;
+  std::vector<int> structural_dvid;
+  std::vector<double> dynamic_values;
+  int n_rows = 0;
 };
+
+class TapePathChange : public std::runtime_error {
+ public:
+  explicit TapePathChange(const std::string& context,
+                          std::vector<double> point = std::vector<double>())
+      : std::runtime_error("CppAD tape path changed in " + context +
+                           "; automatic retaping is required."),
+        point_(std::move(point)) {}
+
+  const std::vector<double>& point() const { return point_; }
+
+ private:
+  std::vector<double> point_;
+};
+
+void require_unchanged_path(CppAD::ADFun<double>& fun,
+                            const std::string& context) {
+  if (fun.compare_change_number() != 0U) throw TapePathChange(context);
+}
 
 struct PredictionTape {
   CppAD::ADFun<double> fun;
   std::vector<std::string> domain_names;
+  std::vector<std::string> dynamic_columns;
+  std::vector<double> dynamic_values;
   int n_rows = 0;
   std::string propagation_kernel;
   std::size_t operation_count = 0;
   std::size_t variable_count = 0;
+  std::string derivative_strategy = "not-evaluated";
+  std::size_t jacobian_nonzeros = 0;
 };
+
+bool structural_data_input(const std::string& name) {
+  static const std::unordered_map<std::string, bool> structural = {
+    {"ID", true}, {"TIME", true}, {"AMT", true}, {"RATE", true},
+    {"II", true}, {"ADDL", true}, {"EVID", true}, {"CMT", true},
+    {"SS", true}, {"MIXNUM", true}, {"DVID", true}, {"DV", true},
+    {"MDV", true}, {"LLOQ", true}, {"BLQ", true}, {"CENS", true},
+    {".ID_INDEX", true}, {".OCC_INDEX", true}
+  };
+  return structural.find(name) != structural.end();
+}
+
+bool data_backed_model_input(const std::string& name) {
+  if (structural_data_input(name) || name == "F" || name == "T" ||
+      name == "MIXNUM" || starts_with(name, "THETA_") ||
+      starts_with(name, "ETA_") || starts_with(name, "SIGMA_") ||
+      starts_with(name, "ERR_") || starts_with(name, "A_")) {
+    return false;
+  }
+  return true;
+}
+
+std::vector<std::string> prediction_dynamic_columns(
+    const ModelEngine& engine, const Rcpp::DataFrame& data) {
+  std::vector<std::string> columns;
+  std::unordered_map<std::string, bool> seen;
+  auto append = [&](const std::vector<std::string>& inputs) {
+    for (const std::string& name : inputs) {
+      if (!data_backed_model_input(name) ||
+          !data.containsElementNamed(name.c_str()) || seen[name]) continue;
+      for (int row = 0; row < data.nrows(); ++row) {
+        if (!std::isfinite(data_value(data, name, row))) {
+          throw std::domain_error("Dynamic model input '" + name +
+                                  "' contains a non-finite value.");
+        }
+      }
+      seen[name] = true;
+      columns.push_back(name);
+    }
+  };
+  append(engine.pred->input_names);
+  if (engine.des) append(engine.des->input_names);
+  return columns;
+}
+
+std::vector<double> prediction_dynamic_values(
+    const std::vector<std::string>& columns, const Rcpp::DataFrame& data,
+    int expected_rows = -1) {
+  if (expected_rows >= 0 && data.nrows() != expected_rows) {
+    throw std::invalid_argument("Dynamic prediction data has a different row count.");
+  }
+  std::vector<double> values;
+  values.reserve(columns.size() * static_cast<std::size_t>(data.nrows()));
+  for (const std::string& name : columns) {
+    if (!data.containsElementNamed(name.c_str())) {
+      throw std::invalid_argument("Dynamic prediction data is missing column '" + name + "'.");
+    }
+    for (int row = 0; row < data.nrows(); ++row) {
+      const double value = data_value(data, name, row);
+      if (!std::isfinite(value)) {
+        throw std::domain_error("Dynamic prediction input '" + name +
+                                "' contains a non-finite value.");
+      }
+      values.push_back(value);
+    }
+  }
+  return values;
+}
+
+std::vector<int> fo_observed_rows(const Rcpp::DataFrame& data) {
+  Rcpp::NumericVector dv = data["DV"];
+  Rcpp::NumericVector evid = data["EVID"];
+  Rcpp::NumericVector mdv = data["MDV"];
+  std::vector<int> observed;
+  for (int row = 0; row < data.nrows(); ++row) {
+    if (evid[row] == 0.0 && mdv[row] == 0.0 && std::isfinite(dv[row])) {
+      observed.push_back(row);
+    }
+  }
+  return observed;
+}
+
+std::vector<int> fo_dvid_values(const Rcpp::DataFrame& data) {
+  std::vector<int> result(static_cast<std::size_t>(data.nrows()), 1);
+  if (!data.containsElementNamed("DVID")) return result;
+  Rcpp::NumericVector dvid = data["DVID"];
+  for (int row = 0; row < data.nrows(); ++row) {
+    result[static_cast<std::size_t>(row)] =
+      std::max(1, static_cast<int>(dvid[row]));
+  }
+  return result;
+}
+
+std::vector<double> fo_dynamic_values(const ObjectiveTape& tape,
+                                      const Rcpp::DataFrame& data) {
+  if (tape.n_rows != data.nrows()) {
+    throw std::invalid_argument("A shared FO tape received a different number of rows.");
+  }
+  if (fo_observed_rows(data) != tape.dynamic_observed_rows) {
+    throw std::invalid_argument("A shared FO tape received a different observation pattern.");
+  }
+  if (fo_dvid_values(data) != tape.structural_dvid) {
+    throw std::invalid_argument("A shared FO tape received a different DVID pattern.");
+  }
+  std::vector<double> values = prediction_dynamic_values(
+    tape.dynamic_columns, data, tape.n_rows);
+  Rcpp::NumericVector dv = data["DV"];
+  values.reserve(values.size() + tape.dynamic_observed_rows.size());
+  for (int row : tape.dynamic_observed_rows) {
+    const double value = dv[row];
+    if (!std::isfinite(value)) {
+      throw std::domain_error("A shared FO tape received a non-finite observation.");
+    }
+    values.push_back(value);
+  }
+  return values;
+}
+
+void set_fo_dynamic(ObjectiveTape& tape, const Rcpp::DataFrame& data) {
+  const std::vector<double> values = fo_dynamic_values(tape, data);
+  if (values.size() != tape.fun.size_dyn_ind()) {
+    throw std::logic_error("Shared FO dynamic data do not match the recorded tape.");
+  }
+  if (!values.empty()) tape.fun.new_dynamic(values);
+  tape.dynamic_values = values;
+}
 
 std::vector<double> flatten_parameters(const Rcpp::NumericVector& theta,
                                        const Rcpp::NumericMatrix& eta,
@@ -2448,7 +2714,19 @@ std::unique_ptr<PredictionTape> record_prediction_tape(
   }
   std::vector<double> point = flatten_parameters(theta, eta, sigma);
   std::vector<CppAD::AD<double>> independent(point.begin(), point.end());
-  CppAD::Independent(independent);
+  const std::vector<std::string> dynamic_columns =
+    prediction_dynamic_columns(engine, data);
+  const std::vector<double> dynamic_values =
+    prediction_dynamic_values(dynamic_columns, data);
+  std::vector<CppAD::AD<double>> dynamic(dynamic_values.begin(), dynamic_values.end());
+  if (dynamic.empty()) CppAD::Independent(independent);
+  else CppAD::Independent(independent, dynamic);
+  DynamicDataT<CppAD::AD<double>> dynamic_data;
+  dynamic_data.n_rows = data.nrows();
+  dynamic_data.values = dynamic;
+  for (std::size_t column = 0; column < dynamic_columns.size(); ++column) {
+    dynamic_data.column_positions[dynamic_columns[column]] = column;
+  }
   std::size_t cursor = 0;
   std::vector<CppAD::AD<double>> theta_ad(static_cast<std::size_t>(theta.size()));
   for (auto& value : theta_ad) value = independent[cursor++];
@@ -2457,13 +2735,16 @@ std::unique_ptr<PredictionTape> record_prediction_tape(
   std::vector<CppAD::AD<double>> sigma_ad(static_cast<std::size_t>(sigma.size()));
   for (auto& value : sigma_ad) value = independent[cursor++];
   std::vector<CppAD::AD<double>> predictions = simulate_analytical_t(
-    engine, data, theta_ad, eta_ad, sigma_ad);
+    engine, data, theta_ad, eta_ad, sigma_ad, std::vector<int>(),
+    dynamic.empty() ? nullptr : &dynamic_data);
   auto tape = std::make_unique<PredictionTape>();
   tape->fun.Dependent(independent, predictions);
   tape->fun.optimize();
   tape->operation_count = tape->fun.size_op();
   tape->variable_count = tape->fun.size_var();
   tape->domain_names = parameter_names(theta.size(), eta.nrow(), eta.ncol(), sigma.size());
+  tape->dynamic_columns = dynamic_columns;
+  tape->dynamic_values = dynamic_values;
   tape->n_rows = data.nrows();
   tape->propagation_kernel = propagation_kernel_name(engine);
   return tape;
@@ -2883,13 +3164,24 @@ std::unique_ptr<ObjectiveTape> record_fo_tape(
   if (n_eta < 0 || n_omega != static_cast<int>(engine.omega_rows.size())) {
     throw std::invalid_argument("FO tape parameter dimensions are inconsistent with the model.");
   }
+  Rcpp::NumericVector dv = data["DV"];
+  Rcpp::NumericVector dvid = data.containsElementNamed("DVID") ?
+    Rcpp::NumericVector(data["DVID"]) : Rcpp::NumericVector(data.nrows(), 1.0);
+  const std::vector<int> observed = fo_observed_rows(data);
+  std::vector<double> dynamic_values = prediction_tape.dynamic_values;
+  dynamic_values.reserve(dynamic_values.size() + observed.size());
+  for (int row : observed) dynamic_values.push_back(dv[row]);
+
   std::vector<double> point;
   point.reserve(static_cast<std::size_t>(n_theta + n_sigma + n_omega));
   for (double value : theta) point.push_back(value);
   for (double value : sigma) point.push_back(value);
   for (double value : omega) point.push_back(value);
   std::vector<CppAD::AD<double>> independent(point.begin(), point.end());
-  CppAD::Independent(independent);
+  std::vector<CppAD::AD<double>> dynamic(
+    dynamic_values.begin(), dynamic_values.end());
+  if (dynamic.empty()) CppAD::Independent(independent);
+  else CppAD::Independent(independent, dynamic);
   std::vector<CppAD::AD<double>> theta_ad(
     independent.begin(), independent.begin() + n_theta);
   std::vector<CppAD::AD<double>> sigma_ad(
@@ -2904,6 +3196,12 @@ std::unique_ptr<ObjectiveTape> record_fo_tape(
     prediction_point.end(), static_cast<std::size_t>(n_eta), CppAD::AD<double>(0.0));
   prediction_point.insert(prediction_point.end(), sigma_ad.begin(), sigma_ad.end());
   auto prediction_ad = prediction_tape.fun.base2ad();
+  if (!prediction_tape.dynamic_values.empty()) {
+    std::vector<CppAD::AD<double>> prediction_dynamic(
+      dynamic.begin(),
+      dynamic.begin() + static_cast<std::ptrdiff_t>(prediction_tape.dynamic_values.size()));
+    prediction_ad.new_dynamic(prediction_dynamic);
+  }
   std::ostringstream messages;
   const std::vector<CppAD::AD<double>> predictions =
     prediction_ad.Forward(0, prediction_point, messages);
@@ -2921,17 +3219,6 @@ std::unique_ptr<ObjectiveTape> record_fo_tape(
     }
   }
 
-  Rcpp::NumericVector dv = data["DV"];
-  Rcpp::NumericVector evid = data["EVID"];
-  Rcpp::NumericVector mdv = data["MDV"];
-  Rcpp::NumericVector dvid = data.containsElementNamed("DVID") ?
-    Rcpp::NumericVector(data["DVID"]) : Rcpp::NumericVector(data.nrows(), 1.0);
-  std::vector<int> observed;
-  for (int row = 0; row < data.nrows(); ++row) {
-    if (evid[row] == 0.0 && mdv[row] == 0.0 && std::isfinite(dv[row])) {
-      observed.push_back(row);
-    }
-  }
   const Eigen::Index n_observed = static_cast<Eigen::Index>(observed.size());
   VectorT<CppAD::AD<double>> residual(n_observed);
   VectorT<CppAD::AD<double>> variance(n_observed);
@@ -2939,18 +3226,20 @@ std::unique_ptr<ObjectiveTape> record_fo_tape(
   for (Eigen::Index index = 0; index < n_observed; ++index) {
     const int row = observed[static_cast<std::size_t>(index)];
     const CppAD::AD<double> prediction = predictions[static_cast<std::size_t>(row)];
+    const CppAD::AD<double> observation = dynamic[
+      prediction_tape.dynamic_values.size() + static_cast<std::size_t>(index)];
     variance[index] = residual_variance_t(
       engine, prediction, sigma_ad, std::max(1, static_cast<int>(dvid[row])));
     if (engine.error_type == "exponential") {
       if (!(dv[row] > 0.0) || !(scalar_value(prediction) > 0.0)) {
         throw std::domain_error("FO exponential likelihood requires positive DV and predictions.");
       }
-      residual[index] = CppAD::log(CppAD::AD<double>(dv[row])) - CppAD::log(prediction);
+      residual[index] = CppAD::log(observation) - CppAD::log(prediction);
       for (int eta = 0; eta < n_eta; ++eta) {
         jacobian(index, eta) = eta_jacobian(row, eta) / prediction;
       }
     } else {
-      residual[index] = CppAD::AD<double>(dv[row]) - prediction;
+      residual[index] = observation - prediction;
       for (int eta = 0; eta < n_eta; ++eta) {
         jacobian(index, eta) = eta_jacobian(row, eta);
       }
@@ -3016,6 +3305,11 @@ std::unique_ptr<ObjectiveTape> record_fo_tape(
   for (int index = 0; index < n_omega; ++index) {
     tape->domain_names.push_back("OMEGA_" + std::to_string(index + 1));
   }
+  tape->dynamic_columns = prediction_tape.dynamic_columns;
+  tape->dynamic_observed_rows = observed;
+  tape->structural_dvid = fo_dvid_values(data);
+  tape->dynamic_values = dynamic_values;
+  tape->n_rows = data.nrows();
   return tape;
 }
 
@@ -3209,7 +3503,14 @@ EtaEvaluation objective_eta_evaluate(
   std::ostringstream messages;
   const std::vector<double> value = tape.fun.Forward(0, point, messages);
   EtaEvaluation result;
+  // An invalid line-search trial must be rejected by the optimizer, not used
+  // as a retaping anchor. At extreme ETAs an exponentiated rate can underflow
+  // to zero; replay then becomes non-finite and comparison changes at that
+  // same point are immaterial. Only finite trials are eligible for retaping.
   if (value.empty() || !std::isfinite(value[0])) return result;
+  if (tape.fun.compare_change_number() != 0U) {
+    throw TapePathChange("conditional objective", point);
+  }
   result.value = value[0];
   result.finite = true;
   result.gradient = Vector::Zero(static_cast<Eigen::Index>(positions.size()));
@@ -3234,6 +3535,7 @@ Matrix objective_eta_hessian(
     static_cast<Eigen::Index>(dimension), static_cast<Eigen::Index>(dimension));
   std::ostringstream messages;
   tape.fun.Forward(0, point, messages);
+  require_unchanged_path(tape.fun, "conditional objective Hessian");
   const std::vector<double> weight(1, 1.0);
   std::vector<double> direction(domain, 0.0);
   for (std::size_t column = 0; column < dimension; ++column) {
@@ -3360,7 +3662,7 @@ Rcpp::List objective_eta_mode(
     Rcpp::Named("par") = par,
     Rcpp::Named("value") = current.value,
     Rcpp::Named("convergence") = convergence,
-    Rcpp::Named("hessian") = Rcpp::wrap(hessian),
+    Rcpp::Named("hessian") = libertad::eigen_matrix_to_r(hessian),
     Rcpp::Named("gradient") = gradient,
     Rcpp::Named("iterations") = iterations,
     Rcpp::Named("evaluations") = evaluations,
@@ -3417,10 +3719,15 @@ class PopulationObjective {
     eta_maxit_ = Rcpp::as<int>(config["eta_maxit"]);
     tolerance_ = Rcpp::as<double>(config["tolerance"]);
     use_ode_ = Rcpp::as<bool>(config["use_ode"]);
+    fo_population_batch_requested_ = Rcpp::as<bool>(config["fo_population_batch"]);
+    fo_population_max_operations_ =
+      Rcpp::as<double>(config["fo_population_max_operations"]);
     guard_radius_ = Rcpp::as<double>(config["guard_radius"]);
     start_ = Rcpp::as<std::vector<double>>(config["start"]);
     if (eta_maxit_ < 1 || tolerance_ <= 0.0 || !std::isfinite(tolerance_) ||
-        guard_radius_ <= 0.0 || !std::isfinite(guard_radius_)) {
+        guard_radius_ <= 0.0 || !std::isfinite(guard_radius_) ||
+        fo_population_max_operations_ <= 0.0 ||
+        !std::isfinite(fo_population_max_operations_)) {
       throw std::invalid_argument("Compiled population controls are invalid.");
     }
     if (omega_rows_.size() != omega_base_.size() ||
@@ -3460,6 +3767,21 @@ class PopulationObjective {
       subject_data_.push_back(subject_data[subject]);
     }
     starts_ = Matrix::Zero(subjects, n_eta_);
+    if (config.containsElementNamed("eta_start")) {
+      Rcpp::NumericMatrix eta_start = config["eta_start"];
+      if (eta_start.nrow() != subjects || eta_start.ncol() != n_eta_) {
+        throw std::invalid_argument("Compiled ETA start matrix has the wrong dimensions.");
+      }
+      for (int subject = 0; subject < subjects; ++subject) {
+        for (int effect = 0; effect < n_eta_; ++effect) {
+          const double value = eta_start(subject, effect);
+          if (!std::isfinite(value)) {
+            throw std::invalid_argument("Compiled ETA starts must be finite.");
+          }
+          starts_(subject, effect) = value;
+        }
+      }
+    }
     primary_.resize(static_cast<std::size_t>(subjects), nullptr);
     curvature_.resize(static_cast<std::size_t>(subjects), nullptr);
     owned_prediction_.resize(static_cast<std::size_t>(subjects));
@@ -3470,7 +3792,7 @@ class PopulationObjective {
     if (use_ode_) {
       const PopulationParameters initial = decode(start_);
       for (int subject = 0; subject < subjects; ++subject) {
-        record_subject(subject, initial, Vector::Zero(n_eta_), false);
+        record_subject(subject, initial, starts_.row(subject).transpose(), false);
       }
     } else {
       if (primary_tape_pointers.size() != subjects) {
@@ -3489,6 +3811,19 @@ class PopulationObjective {
           SEXP source = curvature_tape_pointers[subject];
           Rcpp::XPtr<ObjectiveTape> tape(source);
           curvature_[static_cast<std::size_t>(subject)] = tape.get();
+        }
+      }
+    }
+    if (is_fo()) {
+      std::unordered_map<ObjectiveTape*, bool> unique;
+      for (ObjectiveTape* tape : primary_) unique[tape] = true;
+      fo_unique_subject_tapes_ = static_cast<int>(unique.size());
+      if (!use_ode_ && fo_population_batch_requested_) {
+        try {
+          record_fo_population(decode(start_));
+        } catch (const std::exception& error) {
+          fo_population_error_ = error.what();
+          fo_population_.reset();
         }
       }
     }
@@ -3562,7 +3897,9 @@ class PopulationObjective {
 
   Rcpp::List telemetry() const {
     return Rcpp::List::create(
-      Rcpp::Named("backend") = "persistent-cpp-population-objective",
+      Rcpp::Named("backend") = fo_population_ ?
+        "persistent-cpp-batched-fo-population-objective" :
+        "persistent-cpp-population-objective",
       Rcpp::Named("approximation") = approximation_,
       Rcpp::Named("value_requests") = value_requests_,
       Rcpp::Named("gradient_requests") = gradient_requests_,
@@ -3576,6 +3913,15 @@ class PopulationObjective {
       Rcpp::Named("tape_records") = tape_records_,
       Rcpp::Named("tape_retapes") = tape_retapes_,
       Rcpp::Named("ode_owned_tapes") = use_ode_,
+      Rcpp::Named("fo_unique_subject_tapes") = fo_unique_subject_tapes_,
+      Rcpp::Named("fo_shared_subject_tapes") = is_fo() ?
+        static_cast<int>(primary_.size()) - fo_unique_subject_tapes_ : 0,
+      Rcpp::Named("fo_population_batched") = static_cast<bool>(fo_population_),
+      Rcpp::Named("fo_population_operations") = fo_population_ ?
+        static_cast<double>(fo_population_->fun.size_op()) : 0.0,
+      Rcpp::Named("fo_population_fallbacks") = fo_population_fallbacks_,
+      Rcpp::Named("fo_dynamic_updates") = static_cast<double>(fo_dynamic_updates_),
+      Rcpp::Named("fo_population_error") = fo_population_error_,
       Rcpp::Named("propagation_kernel") = propagation_kernel_name(*engine_)
     );
   }
@@ -3588,6 +3934,8 @@ class PopulationObjective {
   std::vector<int> omega_rows_, omega_cols_;
   bool omega_full_ = false;
   bool use_ode_ = false;
+  bool fo_population_batch_requested_ = true;
+  double fo_population_max_operations_ = 2e6;
   int n_eta_ = 0;
   int n_eta_base_ = 0;
   int eta_maxit_ = 100;
@@ -3598,6 +3946,7 @@ class PopulationObjective {
   std::vector<ObjectiveTape*> primary_, curvature_;
   std::vector<std::unique_ptr<PredictionTape>> owned_prediction_;
   std::vector<std::unique_ptr<ObjectiveTape>> owned_primary_, owned_curvature_;
+  std::unique_ptr<ObjectiveTape> fo_population_;
   std::vector<std::vector<double>> anchors_;
   Matrix starts_;
 
@@ -3621,6 +3970,10 @@ class PopulationObjective {
   int mode_recoveries_ = 0;
   int tape_records_ = 0;
   int tape_retapes_ = 0;
+  int fo_unique_subject_tapes_ = 0;
+  int fo_population_fallbacks_ = 0;
+  long long fo_dynamic_updates_ = 0;
+  std::string fo_population_error_;
 
   static double penalty() { return 1e100; }
 
@@ -3806,6 +4159,105 @@ class PopulationObjective {
     return result;
   }
 
+  std::vector<double> fo_population_dynamic_values() {
+    std::vector<double> result;
+    for (std::size_t subject = 0; subject < primary_.size(); ++subject) {
+      Rcpp::DataFrame data(subject_data_[subject]);
+      const std::vector<double> values = fo_dynamic_values(*primary_[subject], data);
+      result.insert(result.end(), values.begin(), values.end());
+    }
+    fo_dynamic_updates_ += static_cast<long long>(primary_.size());
+    return result;
+  }
+
+  void record_fo_population(const PopulationParameters& parameters) {
+    if (!is_fo() || primary_.empty()) return;
+    double estimated_operations = 0.0;
+    for (ObjectiveTape* tape : primary_) {
+      estimated_operations += static_cast<double>(tape->fun.size_op());
+    }
+    if (estimated_operations > fo_population_max_operations_) {
+      throw std::runtime_error(
+        "The estimated fused FO tape exceeds LibeRation.fo_population_max_operations; "
+        "using subject tapes.");
+    }
+    const std::vector<double> point = fo_point(parameters);
+    std::vector<double> dynamic_values = fo_population_dynamic_values();
+    std::vector<CppAD::AD<double>> independent(point.begin(), point.end());
+    std::vector<CppAD::AD<double>> dynamic(
+      dynamic_values.begin(), dynamic_values.end());
+    if (dynamic.empty()) CppAD::Independent(independent);
+    else CppAD::Independent(independent, dynamic);
+
+    std::vector<CppAD::AD<double>> dependent(primary_.size());
+    std::size_t cursor = 0;
+    std::ostringstream messages;
+    for (std::size_t subject = 0; subject < primary_.size(); ++subject) {
+      ObjectiveTape& source = *primary_[subject];
+      if (source.domain_names.size() != point.size()) {
+        throw std::invalid_argument("FO subject tapes have inconsistent parameter domains.");
+      }
+      auto nested = source.fun.base2ad();
+      const std::size_t count = source.fun.size_dyn_ind();
+      if (cursor + count > dynamic.size()) {
+        throw std::logic_error("FO population dynamic offsets are inconsistent.");
+      }
+      if (count) {
+        std::vector<CppAD::AD<double>> current(
+          dynamic.begin() + static_cast<std::ptrdiff_t>(cursor),
+          dynamic.begin() + static_cast<std::ptrdiff_t>(cursor + count));
+        nested.new_dynamic(current);
+      }
+      const std::vector<CppAD::AD<double>> value =
+        nested.Forward(0, independent, messages);
+      if (value.size() != 1U) {
+        throw std::logic_error("An FO subject tape did not return one objective value.");
+      }
+      dependent[subject] = value[0];
+      cursor += count;
+    }
+    if (cursor != dynamic.size()) {
+      throw std::logic_error("FO population dynamic data were not fully consumed.");
+    }
+    auto population = std::make_unique<ObjectiveTape>();
+    population->fun.Dependent(independent, dependent);
+    population->fun.optimize();
+    population->domain_names = primary_[0]->domain_names;
+    population->dynamic_values = std::move(dynamic_values);
+    fo_population_ = std::move(population);
+    ++tape_records_;
+  }
+
+  void evaluate_fo_population(const PopulationParameters& parameters,
+                              double prior) {
+    if (!fo_population_) throw std::logic_error("FO population tape is unavailable.");
+    const std::vector<double> dynamic_values = fo_population_dynamic_values();
+    if (dynamic_values.size() != fo_population_->fun.size_dyn_ind()) {
+      throw std::logic_error("FO population dynamic data have the wrong length.");
+    }
+    if (!dynamic_values.empty()) fo_population_->fun.new_dynamic(dynamic_values);
+    fo_population_->dynamic_values = dynamic_values;
+    const std::vector<double> point = fo_point(parameters);
+    std::ostringstream messages;
+    const std::vector<double> values = fo_population_->fun.Forward(0, point, messages);
+    require_unchanged_path(fo_population_->fun, "batched FO population objective");
+    if (values.size() != primary_.size()) {
+      throw std::logic_error("Batched FO population output has the wrong length.");
+    }
+    cache_points_.assign(primary_.size(), point);
+    cache_subject_values_ = values;
+    double total = prior;
+    for (double value : values) {
+      if (!std::isfinite(value)) {
+        total = penalty();
+        break;
+      }
+      total += value;
+    }
+    cache_value_ = std::isfinite(total) ? total : penalty();
+    cache_valid_ = true;
+  }
+
   std::vector<double> anchor_point(
       const PopulationParameters& parameters, const Vector& eta) const {
     return objective_point(parameters, eta);
@@ -3861,6 +4313,30 @@ class PopulationObjective {
     if (retape) ++tape_retapes_;
   }
 
+  void record_primary_subject(int subject,
+                              const PopulationParameters& parameters,
+                              const Vector& eta, bool retape) {
+    if (is_fo()) {
+      record_subject(subject, parameters, eta, retape);
+      return;
+    }
+    Rcpp::DataFrame data(subject_data_[static_cast<std::size_t>(subject)]);
+    Rcpp::NumericVector theta = Rcpp::wrap(parameters.theta);
+    Rcpp::NumericVector sigma = Rcpp::wrap(parameters.sigma);
+    Rcpp::NumericVector omega = Rcpp::wrap(parameters.omega);
+    Rcpp::NumericMatrix eta_matrix(1, n_eta_);
+    for (int effect = 0; effect < n_eta_; ++effect) {
+      eta_matrix(0, effect) = eta[effect];
+    }
+    const std::size_t index = static_cast<std::size_t>(subject);
+    owned_primary_[index] = record_objective_tape(
+      *engine_, data, theta, eta_matrix, sigma, omega, interaction());
+    primary_[index] = owned_primary_[index].get();
+    anchors_[index] = anchor_point(parameters, eta);
+    ++tape_records_;
+    if (retape) ++tape_retapes_;
+  }
+
   bool ensure_tape(int subject, const PopulationParameters& parameters,
                    const Vector& eta) {
     if (!material_movement(subject, parameters, eta)) return false;
@@ -3874,11 +4350,15 @@ class PopulationObjective {
     }
     std::ostringstream messages;
     const std::vector<double> value = tape.fun.Forward(0, point, messages);
-    return value.empty() ? std::numeric_limits<double>::infinity() : value[0];
+    if (value.empty() || !std::isfinite(value[0])) {
+      return std::numeric_limits<double>::infinity();
+    }
+    require_unchanged_path(tape.fun, "compiled population objective");
+    return value[0];
   }
 
-  Rcpp::List mode_at(int subject, const PopulationParameters& parameters,
-                     const Vector& start) {
+  Rcpp::List mode_at_once(int subject, const PopulationParameters& parameters,
+                          const Vector& start) {
     const std::size_t index = static_cast<std::size_t>(subject);
     std::vector<double> point = objective_point(parameters, start);
     std::vector<std::size_t> positions(static_cast<std::size_t>(n_eta_));
@@ -3918,11 +4398,11 @@ class PopulationObjective {
       std::vector<double> current_point = objective_point(parameters, eta_eigen);
       Matrix hessian = objective_eta_hessian(
         *primary_[index], current_point, positions);
-      Eigen::SelfAdjointEigenSolver<Matrix> eigen(hessian);
-      if (eigen.info() != Eigen::Success) return;
-      const double largest = std::max(eigen.eigenvalues().cwiseAbs().maxCoeff(), 1.0);
+      auto eigen = liberation::detail::self_adjoint_eigen(hessian, false);
+      if (eigen.info != Eigen::Success) return;
+      const double largest = std::max(eigen.values.cwiseAbs().maxCoeff(), 1.0);
       const double jitter = std::max(0.0, largest * 1e-12 -
-        eigen.eigenvalues().minCoeff());
+        eigen.values.minCoeff());
       hessian.diagonal().array() += jitter;
       const Vector displacement = hessian.ldlt().solve(gradient_eigen);
       if (displacement.allFinite() &&
@@ -3957,6 +4437,76 @@ class PopulationObjective {
     return result;
   }
 
+  Rcpp::List mode_at(int subject, const PopulationParameters& parameters,
+                     const Vector& start) {
+    Vector anchor = start;
+    for (int attempt = 0; attempt < 12; ++attempt) {
+      try {
+        return mode_at_once(subject, parameters, anchor);
+      } catch (const TapePathChange& change) {
+        Vector candidate = anchor;
+        if (change.point().size() >= parameters.theta.size() +
+                                   static_cast<std::size_t>(n_eta_)) {
+          for (int effect = 0; effect < n_eta_; ++effect) {
+            candidate[effect] = change.point()[parameters.theta.size() +
+                                               static_cast<std::size_t>(effect)];
+          }
+        }
+        // A Laplace curvature tape may not be positive definite away from the
+        // conditional mode. Retape only the primary objective during mode
+        // search; the curvature tape is refreshed once the mode is known.
+        // A path-changing line-search trial can also sit outside the valid
+        // pharmacological domain (for example exp(ETA) underflowing a rate to
+        // zero). Backtrack toward the last valid anchor until direct recording
+        // succeeds rather than promoting that invalid trial to a tape anchor.
+        // Bound a single retape displacement as well: a BFGS line search can
+        // briefly propose ETAs hundreds of units away, which may still pass a
+        // simple positivity test but is not a numerically meaningful anchor.
+        Vector displacement = candidate - anchor;
+        const double maximum = displacement.allFinite() ?
+          displacement.lpNorm<Eigen::Infinity>() :
+          std::numeric_limits<double>::infinity();
+        constexpr double maximum_retape_eta_step = 2.0;
+        if (maximum > maximum_retape_eta_step) {
+          candidate = anchor + displacement * (maximum_retape_eta_step / maximum);
+        }
+        bool recorded = false;
+        for (int backtrack = 0; backtrack < 24 && !recorded; ++backtrack) {
+          if (!candidate.allFinite()) candidate = anchor;
+          try {
+            record_primary_subject(subject, parameters, candidate, true);
+            anchor = candidate;
+            recorded = true;
+          } catch (const std::domain_error&) {
+            candidate = 0.5 * (anchor + candidate);
+          }
+        }
+        if (!recorded) throw;
+      }
+    }
+    return mode_at_once(subject, parameters, anchor);
+  }
+
+  double guarded_tape_value(int subject, const PopulationParameters& parameters,
+                            const Vector& eta, bool curvature,
+                            const std::vector<double>& point) {
+    for (int attempt = 0; attempt < 3; ++attempt) {
+      try {
+        ObjectiveTape* tape = curvature ?
+          curvature_[static_cast<std::size_t>(subject)] :
+          primary_[static_cast<std::size_t>(subject)];
+        return tape_value(*tape, point);
+      } catch (const TapePathChange&) {
+        if (curvature) record_subject(subject, parameters, eta, true);
+        else record_primary_subject(subject, parameters, eta, true);
+      }
+    }
+    ObjectiveTape* tape = curvature ?
+      curvature_[static_cast<std::size_t>(subject)] :
+      primary_[static_cast<std::size_t>(subject)];
+    return tape_value(*tape, point);
+  }
+
   void evaluate_value(const std::vector<double>& encoded) {
     cache_valid_ = false;
     cache_gradient_valid_ = false;
@@ -3975,13 +4525,26 @@ class PopulationObjective {
       cache_valid_ = true;
       return;
     }
+    if (is_fo() && fo_population_) {
+      try {
+        evaluate_fo_population(cache_parameters_, total);
+        return;
+      } catch (const TapePathChange&) {
+        fo_population_.reset();
+        ++fo_population_fallbacks_;
+        fo_population_error_ = "A batched tape path changed; using subject tapes.";
+      }
+    }
     if (is_fo()) {
       const Vector zero_eta = Vector::Zero(n_eta_);
       const std::vector<double> point = fo_point(cache_parameters_);
       for (int subject = 0; subject < subjects; ++subject) {
         if (use_ode_) ensure_tape(subject, cache_parameters_, zero_eta);
-        const double current = tape_value(
-          *primary_[static_cast<std::size_t>(subject)], point);
+        Rcpp::DataFrame data(subject_data_[static_cast<std::size_t>(subject)]);
+        set_fo_dynamic(*primary_[static_cast<std::size_t>(subject)], data);
+        ++fo_dynamic_updates_;
+        const double current = guarded_tape_value(
+          subject, cache_parameters_, zero_eta, false, point);
         if (!std::isfinite(current)) {
           total = penalty();
           break;
@@ -4017,7 +4580,8 @@ class PopulationObjective {
           }
         } else {
           const std::vector<double> point = objective_point(cache_parameters_, eta);
-          current = tape_value(*primary_[static_cast<std::size_t>(subject)], point);
+          current = guarded_tape_value(
+            subject, cache_parameters_, eta, false, point);
           ++mode_evaluations_;
         }
         if (!std::isfinite(current)) {
@@ -4038,8 +4602,8 @@ class PopulationObjective {
         cache_subject_values_[static_cast<std::size_t>(subject)] = current;
         total += current;
         if (has_curvature()) {
-          const double determinant = tape_value(
-            *curvature_[static_cast<std::size_t>(subject)], point);
+          const double determinant = guarded_tape_value(
+            subject, cache_parameters_, eta, true, point);
           if (!std::isfinite(determinant)) {
             total = penalty();
             break;
@@ -4073,12 +4637,41 @@ class PopulationObjective {
       population.push_back(n_theta + n_eta_ + n_sigma + index);
     }
 
-    if (is_fo() || approximation_ == "its") {
+    if (is_fo() && fo_population_) {
+      // The population tape has one output per subject.  Form its Jacobian and
+      // add rows in subject order so the fused route retains the deterministic
+      // summation order of the established subject-tape implementation.  With
+      // far fewer population parameters than subjects CppAD uses a small
+      // number of forward sweeps here, rather than one reverse sweep per
+      // subject.
+      const std::vector<double> point = fo_point(cache_parameters_);
+      const std::vector<double> derivative = fo_population_->fun.Jacobian(point);
+      require_unchanged_path(fo_population_->fun, "batched FO population gradient");
+      Vector native = Vector::Zero(n_native);
+      if (derivative.size() != primary_.size() * static_cast<std::size_t>(n_native)) {
+        throw std::logic_error("Batched FO population gradient has the wrong length.");
+      }
+      for (std::size_t subject = 0; subject < primary_.size(); ++subject) {
+        for (int index = 0; index < n_native; ++index) {
+          native[index] += derivative[
+            subject * static_cast<std::size_t>(n_native) +
+            static_cast<std::size_t>(index)];
+        }
+      }
+      native += native_prior;
+      outer = cache_parameters_.transform.transpose() * native;
+    } else if (is_fo() || approximation_ == "its") {
       Vector native = Vector::Zero(n_native);
       for (std::size_t subject = 0; subject < primary_.size(); ++subject) {
         ObjectiveTape& objective = *primary_[subject];
+        if (is_fo()) {
+          Rcpp::DataFrame data(subject_data_[subject]);
+          set_fo_dynamic(objective, data);
+          ++fo_dynamic_updates_;
+        }
         std::ostringstream messages;
         objective.fun.Forward(0, cache_points_[subject], messages);
+        if (is_fo()) require_unchanged_path(objective.fun, "shared FO objective gradient");
         const std::vector<double> derivative = objective.fun.Reverse(1, weight);
         if (is_fo()) {
           for (int index = 0; index < n_native; ++index) native[index] += derivative[index];
@@ -4126,13 +4719,13 @@ class PopulationObjective {
           eta_hessian = Matrix::Zero(0, 0);
         }
         if (n_eta_) {
-          Eigen::SelfAdjointEigenSolver<Matrix> eigen(eta_hessian);
-          if (eigen.info() != Eigen::Success) {
+          auto eigen = liberation::detail::self_adjoint_eigen(eta_hessian, false);
+          if (eigen.info != Eigen::Success) {
             throw std::runtime_error("Conditional ETA curvature decomposition failed.");
           }
-          const double largest = std::max(eigen.eigenvalues().cwiseAbs().maxCoeff(), 1.0);
+          const double largest = std::max(eigen.values.cwiseAbs().maxCoeff(), 1.0);
           const double jitter = std::max(0.0, largest * 1e-9 -
-            eigen.eigenvalues().minCoeff());
+            eigen.values.minCoeff());
           if (jitter > largest * 1e-2) {
             throw std::runtime_error("Conditional ETA curvature is not positive definite.");
           }
@@ -4263,8 +4856,8 @@ Rcpp::NumericVector liberation_engine_derivative(
   liberation::Parameters parameters = liberation::evaluate_parameters(
     *engine, data, row - 1, subject - 1, theta, eta, sigma
   );
-  Eigen::Map<const Eigen::VectorXd> mapped(state.begin(), state.size());
-  return Rcpp::wrap(liberation::evaluate_derivatives(
+  const auto mapped = libertad::r_vector_map(state);
+  return libertad::eigen_vector_to_r(liberation::evaluate_derivatives(
     *engine, data, row - 1, subject - 1, time, mapped, parameters, theta, eta, sigma
   ));
 }
@@ -4272,10 +4865,8 @@ Rcpp::NumericVector liberation_engine_derivative(
 // [[Rcpp::export(name = ".liberation_matrix_exp")]]
 Rcpp::NumericMatrix liberation_matrix_exp(const Rcpp::NumericMatrix& matrix,
                                            double dt = 1.0) {
-  Eigen::Map<const Eigen::MatrixXd> mapped(
-    matrix.begin(), matrix.nrow(), matrix.ncol()
-  );
-  return Rcpp::wrap(liberation::matrix_exp(mapped * dt));
+  const auto mapped = libertad::r_matrix_map(matrix);
+  return libertad::eigen_matrix_to_r(liberation::matrix_exp(mapped * dt));
 }
 
 // [[Rcpp::export(name = ".liberation_advan_matrix")]]
@@ -4287,7 +4878,7 @@ Rcpp::List liberation_advan_matrix(int advan, const Rcpp::List& parameters) {
   }
   liberation::Topology topology = liberation::build_topology(advan, p);
   return Rcpp::List::create(
-    Rcpp::Named("K") = topology.k,
+    Rcpp::Named("K") = libertad::eigen_matrix_to_r(topology.k),
     Rcpp::Named("states") = topology.state_names
   );
 }
@@ -4304,10 +4895,34 @@ SEXP liberation_prediction_tape_create(
   pointer.attr("class") = Rcpp::CharacterVector::create(
     "liberation_prediction_tape_ptr", "externalptr");
   pointer.attr("domain") = Rcpp::wrap(pointer->domain_names);
+  pointer.attr("dynamic_columns") = Rcpp::wrap(pointer->dynamic_columns);
+  pointer.attr("dynamic_parameters") =
+    static_cast<double>(pointer->fun.size_dyn_ind());
   pointer.attr("propagation_kernel") = pointer->propagation_kernel;
   pointer.attr("operation_count") = static_cast<double>(pointer->operation_count);
   pointer.attr("variable_count") = static_cast<double>(pointer->variable_count);
   return pointer;
+}
+
+// [[Rcpp::export(name = ".liberation_prediction_tape_new_dynamic")]]
+Rcpp::NumericVector liberation_prediction_tape_new_dynamic(
+    SEXP tape_pointer, const Rcpp::DataFrame& data) {
+  Rcpp::XPtr<liberation::PredictionTape> tape(tape_pointer);
+  std::vector<double> values = liberation::prediction_dynamic_values(
+    tape->dynamic_columns, data, tape->n_rows);
+  tape->fun.new_dynamic(values);
+  tape->dynamic_values = values;
+  Rcpp::NumericVector result(values.begin(), values.end());
+  result.attr("columns") = Rcpp::wrap(tape->dynamic_columns);
+  return result;
+}
+
+// [[Rcpp::export(name = ".liberation_fo_tape_new_dynamic")]]
+Rcpp::NumericVector liberation_fo_tape_new_dynamic(
+    SEXP tape_pointer, const Rcpp::DataFrame& data) {
+  Rcpp::XPtr<liberation::ObjectiveTape> tape(tape_pointer);
+  liberation::set_fo_dynamic(*tape, data);
+  return Rcpp::wrap(tape->dynamic_values);
 }
 
 // [[Rcpp::export(name = ".liberation_prediction_tape_eval")]]
@@ -4317,22 +4932,59 @@ Rcpp::List liberation_prediction_tape_eval(
   std::vector<double> x = liberation::prediction_point(*tape, point);
   std::ostringstream messages;
   std::vector<double> value = tape->fun.Forward(0, x, messages);
+  liberation::require_unchanged_path(tape->fun, "prediction evaluation");
   Rcpp::List result = Rcpp::List::create(Rcpp::Named("value") = Rcpp::wrap(value));
   result.attr("domain") = Rcpp::wrap(tape->domain_names);
   if (jacobian) {
     const std::size_t n = tape->domain_names.size();
     const std::size_t m = static_cast<std::size_t>(tape->n_rows);
     Rcpp::NumericMatrix derivative(m, n);
-    std::vector<double> direction(n, 0.0);
-    for (std::size_t column = 0; column < n; ++column) {
-      direction[column] = 1.0;
-      std::vector<double> forward = tape->fun.Forward(1, direction, messages);
-      direction[column] = 0.0;
-      for (std::size_t row = 0; row < m; ++row) derivative(row, column) = forward[row];
+    std::size_t nonzeros = 0U;
+    if (m * n >= 4096U && m >= 32U) {
+      CppAD::vectorBool select_domain(n), select_range(m);
+      for (std::size_t column = 0; column < n; ++column) select_domain[column] = true;
+      for (std::size_t row = 0; row < m; ++row) select_range[row] = true;
+      using SizeVector = CppAD::vector<std::size_t>;
+      using BaseVector = CppAD::vector<double>;
+      CppAD::sparse_rcv<SizeVector, BaseVector> sparse;
+      BaseVector sparse_point(x.size());
+      for (std::size_t index = 0; index < x.size(); ++index) sparse_point[index] = x[index];
+      tape->fun.subgraph_jac_rev(
+        select_domain, select_range, sparse_point, sparse);
+      liberation::require_unchanged_path(
+        tape->fun, "sparse prediction evaluation");
+      for (std::size_t index = 0; index < sparse.nnz(); ++index) {
+        derivative(sparse.row()[index], sparse.col()[index]) = sparse.val()[index];
+      }
+      nonzeros = sparse.nnz();
+      tape->derivative_strategy = "subgraph-reverse";
+    } else {
+      constexpr std::size_t block_max = 16U;
+      for (std::size_t first = 0; first < n; first += block_max) {
+        const std::size_t directions = std::min(block_max, n - first);
+        std::vector<double> seed(n * directions, 0.0);
+        for (std::size_t direction = 0; direction < directions; ++direction) {
+          seed[(first + direction) * directions + direction] = 1.0;
+        }
+        const std::vector<double> forward = directions == 1U ?
+          tape->fun.Forward(1, seed) :
+          tape->fun.Forward(1, directions, seed);
+        for (std::size_t row = 0; row < m; ++row) {
+          for (std::size_t direction = 0; direction < directions; ++direction) {
+            const double current = forward[row * directions + direction];
+            derivative(row, first + direction) = current;
+            if (current != 0.0) ++nonzeros;
+          }
+        }
+      }
+      tape->derivative_strategy = n == 1U ? "forward" : "multi-forward";
     }
+    tape->jacobian_nonzeros = nonzeros;
     derivative.attr("dimnames") = Rcpp::List::create(R_NilValue, Rcpp::wrap(tape->domain_names));
     result["jacobian"] = derivative;
   }
+  result.attr("derivative_strategy") = tape->derivative_strategy;
+  result.attr("jacobian_nonzeros") = static_cast<double>(tape->jacobian_nonzeros);
   return result;
 }
 
@@ -4344,24 +4996,40 @@ Rcpp::List liberation_prediction_tape_eval_subset(
   std::vector<double> x = liberation::prediction_point(*tape, point);
   std::ostringstream messages;
   const std::vector<double> value = tape->fun.Forward(0, x, messages);
+  liberation::require_unchanged_path(tape->fun, "prediction subset evaluation");
   const std::size_t domain = tape->domain_names.size();
   const std::size_t range = static_cast<std::size_t>(tape->n_rows);
   Rcpp::NumericMatrix derivative(range, columns.size());
-  std::vector<double> direction(domain, 0.0);
   Rcpp::CharacterVector names(columns.size());
+  std::vector<std::size_t> selected_columns(static_cast<std::size_t>(columns.size()));
   for (R_xlen_t selected = 0; selected < columns.size(); ++selected) {
     const int column = columns[selected] - 1;
     if (column < 0 || static_cast<std::size_t>(column) >= domain) {
       Rcpp::stop("Prediction derivative column is outside the tape domain.");
     }
-    direction[static_cast<std::size_t>(column)] = 1.0;
-    const std::vector<double> forward = tape->fun.Forward(1, direction, messages);
-    direction[static_cast<std::size_t>(column)] = 0.0;
-    for (std::size_t row = 0; row < range; ++row) {
-      derivative(static_cast<int>(row), selected) = forward[row];
-    }
+    selected_columns[static_cast<std::size_t>(selected)] =
+      static_cast<std::size_t>(column);
     names[selected] = tape->domain_names[static_cast<std::size_t>(column)];
   }
+  constexpr std::size_t block_max = 16U;
+  for (std::size_t first = 0; first < selected_columns.size(); first += block_max) {
+    const std::size_t directions = std::min(block_max, selected_columns.size() - first);
+    std::vector<double> seed(domain * directions, 0.0);
+    for (std::size_t direction = 0; direction < directions; ++direction) {
+      seed[selected_columns[first + direction] * directions + direction] = 1.0;
+    }
+    const std::vector<double> forward = directions == 1U ?
+      tape->fun.Forward(1, seed) :
+      tape->fun.Forward(1, directions, seed);
+    for (std::size_t row = 0; row < range; ++row) {
+      for (std::size_t direction = 0; direction < directions; ++direction) {
+        derivative(static_cast<int>(row), static_cast<int>(first + direction)) =
+          forward[row * directions + direction];
+      }
+    }
+  }
+  tape->derivative_strategy = selected_columns.size() <= 1U ?
+    "forward-subset" : "multi-forward-subset";
   derivative.attr("dimnames") = Rcpp::List::create(R_NilValue, names);
   Rcpp::List result = Rcpp::List::create(
     Rcpp::Named("value") = Rcpp::wrap(value),
@@ -4374,8 +5042,9 @@ Rcpp::List liberation_prediction_tape_eval_subset(
 // [[Rcpp::export(name = ".liberation_matrix_exp_pade")]]
 Rcpp::NumericMatrix liberation_matrix_exp_pade(const Rcpp::NumericMatrix& matrix,
                                                 double dt = 1.0) {
-  Eigen::Map<const Eigen::MatrixXd> mapped(matrix.begin(), matrix.nrow(), matrix.ncol());
-  return Rcpp::wrap(liberation::matrix_exp_pade(Eigen::MatrixXd(mapped * dt)));
+  const auto mapped = libertad::r_matrix_map(matrix);
+  return libertad::eigen_matrix_to_r(
+    liberation::matrix_exp_pade(Eigen::MatrixXd(mapped * dt)));
 }
 
 // [[Rcpp::export(name = ".liberation_fo_tape_create")]]
@@ -4441,6 +5110,7 @@ Rcpp::List liberation_objective_tape_eval(
   std::vector<double> x = Rcpp::as<std::vector<double>>(point);
   std::ostringstream messages;
   std::vector<double> value = tape->fun.Forward(0, x, messages);
+  liberation::require_unchanged_path(tape->fun, "objective evaluation");
   Rcpp::List result = Rcpp::List::create(Rcpp::Named("value") = value[0]);
   if (gradient || hessian) {
     std::vector<double> weight(1, 1.0);
@@ -4500,6 +5170,7 @@ Rcpp::NumericVector liberation_objective_tape_eta_values(
       x[positions[static_cast<std::size_t>(column)]] = eta(sample, column);
     }
     const std::vector<double> value = tape->fun.Forward(0, x, messages);
+    liberation::require_unchanged_path(tape->fun, "objective ETA batch");
     values[sample] = value.empty() ? NA_REAL : value[0];
     if ((sample + 1) % 256 == 0) Rcpp::checkUserInterrupt();
   }
@@ -4524,6 +5195,7 @@ Rcpp::NumericVector liberation_objective_tape_collection_values(
     }
     std::ostringstream messages;
     const std::vector<double> value = tape->fun.Forward(0, point, messages);
+    liberation::require_unchanged_path(tape->fun, "objective collection");
     values[row] = value.empty() ? NA_REAL : value[0];
     if ((row + 1) % 256 == 0) Rcpp::checkUserInterrupt();
   }
@@ -4550,6 +5222,7 @@ Rcpp::NumericMatrix liberation_objective_tape_collection_gradients(
     }
     std::ostringstream messages;
     tape->fun.Forward(0, point, messages);
+    liberation::require_unchanged_path(tape->fun, "objective gradient collection");
     const std::vector<double> derivative = tape->fun.Reverse(1, weight);
     for (int column = 0; column < points.ncol(); ++column) {
       gradients(row, column) = derivative[static_cast<std::size_t>(column)];
@@ -4586,6 +5259,7 @@ Rcpp::NumericMatrix liberation_objective_tape_hessian_subset(
   std::vector<double> x = Rcpp::as<std::vector<double>>(point);
   std::ostringstream messages;
   tape->fun.Forward(0, x, messages);
+  liberation::require_unchanged_path(tape->fun, "objective Hessian subset");
   const std::vector<double> weight(1, 1.0);
   std::vector<double> direction(domain, 0.0);
   for (std::size_t column = 0; column < columns.size(); ++column) {
@@ -4670,12 +5344,12 @@ Rcpp::List liberation_nested_population_gradient(
     }
     double jitter = 0.0;
     if (n_eta) {
-      Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> eigen(eta_hessian);
-      if (eigen.info() != Eigen::Success) {
+      auto eigen = liberation::detail::self_adjoint_eigen(eta_hessian, false);
+      if (eigen.info != Eigen::Success) {
         Rcpp::stop("Conditional ETA curvature eigen decomposition failed.");
       }
-      const double largest = std::max(eigen.eigenvalues().cwiseAbs().maxCoeff(), 1.0);
-      jitter = std::max(0.0, largest * 1e-9 - eigen.eigenvalues().minCoeff());
+      const double largest = std::max(eigen.values.cwiseAbs().maxCoeff(), 1.0);
+      jitter = std::max(0.0, largest * 1e-9 - eigen.values.minCoeff());
       if (jitter > largest * 1e-2) {
         Rcpp::stop("Conditional ETA curvature is not sufficiently positive definite.");
       }

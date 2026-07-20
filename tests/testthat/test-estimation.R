@@ -33,7 +33,8 @@ test_that("FO marginal values and population gradients are taped exactly", {
 
   objective <- function(outer) {
     LibeRation:::.nm_fo_objective(context, map$decode(outer))
-  }
+}
+
   exact <- LibeRation:::.nm_fo_outer_gradient(context, map, parameters)
   numerical <- vapply(seq_along(map$start), function(index) {
     step <- 1e-5 * max(1, abs(map$start[[index]]))
@@ -43,6 +44,76 @@ test_that("FO marginal values and population gradients are taped exactly", {
     (objective(high) - objective(low)) / (2 * step)
   }, numeric(1))
   expect_equal(exact, numerical, tolerance = 3e-6)
+})
+
+test_that("FO shares structural likelihood tapes and fuses the population safely", {
+  fixture <- estimation_fixture(FALSE)
+  fixture$model$THETAS$FIX <- c(FALSE, TRUE)
+  fixture$model$SIGMAS$FIX <- FALSE
+  fixture$model$OMEGAS$FIX <- FALSE
+  context <- LibeRation:::.nm_estimation_context(
+    fixture$model, fixture$data, method = "FO"
+  )
+  expect_true(all(vapply(
+    context$subjects, function(subject) is.null(subject$noninteraction_tape),
+    logical(1)
+  )))
+  map <- LibeRation:::.nm_outer_map(context$model)
+
+  old <- options(LibeRation.fo_population_batch = FALSE)
+  on.exit(options(old), add = TRUE)
+  subject_route <- LibeRation:::.nm_cpp_population_objective(
+    context, map, "fo", eta_maxit = 80L, tolerance = 1e-8
+  )
+  subject_value <- LibeRation:::.liberation_population_objective_value(
+    subject_route$pointer, map$start
+  )
+  subject_gradient <- LibeRation:::.liberation_population_objective_gradient(
+    subject_route$pointer, map$start
+  )
+  subject_telemetry <- LibeRation:::.liberation_population_objective_telemetry(
+    subject_route$pointer
+  )
+
+  options(LibeRation.fo_population_batch = TRUE)
+  fused_route <- LibeRation:::.nm_cpp_population_objective(
+    context, map, "fo", eta_maxit = 80L, tolerance = 1e-8
+  )
+  fused_value <- LibeRation:::.liberation_population_objective_value(
+    fused_route$pointer, map$start
+  )
+  fused_gradient <- LibeRation:::.liberation_population_objective_gradient(
+    fused_route$pointer, map$start
+  )
+  fused_telemetry <- LibeRation:::.liberation_population_objective_telemetry(
+    fused_route$pointer
+  )
+
+  expect_equal(fused_value, subject_value, tolerance = 2e-12)
+  expect_equal(fused_gradient, subject_gradient, tolerance = 2e-11)
+  expect_equal(subject_telemetry$fo_unique_subject_tapes, 1L)
+  expect_equal(subject_telemetry$fo_shared_subject_tapes, 2L)
+  expect_true(fused_telemetry$fo_population_batched)
+  expect_gt(fused_telemetry$fo_population_operations, 0)
+
+  options(LibeRation.fo_population_max_operations = 1)
+  limited_route <- LibeRation:::.nm_cpp_population_objective(
+    context, map, "fo", eta_maxit = 80L, tolerance = 1e-8
+  )
+  limited_telemetry <- LibeRation:::.liberation_population_objective_telemetry(
+    limited_route$pointer
+  )
+  expect_false(limited_telemetry$fo_population_batched)
+  expect_match(limited_telemetry$fo_population_error, "exceeds")
+  options(LibeRation.fo_population_max_operations = NULL)
+
+  # The R-coordinated fallback must also select each subject's dynamic data
+  # correctly after the tape pool has been established.
+  parameters <- map$decode(map$start)
+  fallback_gradient <- LibeRation:::.nm_fo_outer_gradient(
+    context, map, parameters
+  )
+  expect_equal(fallback_gradient, subject_gradient, tolerance = 2e-11)
 })
 
 test_that("FO tapes cover residual-error families and AR1 covariance", {
@@ -176,6 +247,154 @@ test_that("ITS and IMP use the exact conditional objective", {
   expect_equal(imp$diagnostics$imp_gradient, "score")
 })
 
+test_that("GQ integrates the exact joint objective deterministically", {
+  fixture <- estimation_fixture()
+  context <- LibeRation:::.nm_estimation_context(fixture$model, fixture$data)
+  parameters <- list(
+    theta = fixture$model$THETAS$Value,
+    sigma = fixture$model$SIGMAS$Value,
+    omega = fixture$model$OMEGAS$Value
+  )
+  evaluator <- context$subjects[[1L]]
+
+  design <- LibeRation:::.nm_gq_design(context, order = 15L)
+  proposal <- LibeRation:::.nm_imp_subject_proposal(
+    evaluator, parameters, design$normals[[1L]], 100L, 1e-9
+  )
+  quadrature <- LibeRation:::.nm_imp_subject_from_proposal(
+    evaluator, parameters, proposal, gradient = TRUE
+  )
+  centered_integral <- stats::integrate(
+    function(eta) vapply(eta, function(value) exp(-0.5 * (
+      evaluator$objective(
+        parameters$theta, value, parameters$sigma, parameters$omega,
+        gradient = FALSE
+      )$value - proposal$mode$value
+    )), numeric(1)),
+    lower = -8, upper = 8, rel.tol = 1e-10
+  )$value
+  reference <- proposal$mode$value - 2 * log(centered_integral)
+  expect_equal(quadrature$value, reference, tolerance = 2e-6)
+  expect_true(all(is.finite(quadrature$native_gradient)))
+
+  one_node <- LibeRation:::.nm_gq_design(context, order = 1L)
+  laplace_proposal <- LibeRation:::.nm_imp_subject_proposal(
+    evaluator, parameters, one_node$normals[[1L]], 100L, 1e-9
+  )
+  one_node_value <- LibeRation:::.nm_imp_subject_from_proposal(
+    evaluator, parameters, laplace_proposal, gradient = FALSE
+  )$value
+  expect_equal(
+    one_node_value,
+    laplace_proposal$mode$value + laplace_proposal$mode$logdet - log(4 * pi),
+    tolerance = 1e-10
+  )
+})
+
+test_that("GQ exposes adaptive and fixed integration with covariance support", {
+  fixture <- estimation_fixture()
+  adaptive <- nm_est(
+    fixture$model, fixture$data, method = "GQ", maxit = 2L,
+    eta_maxit = 80L, gq_order = 3L
+  )
+  fixed <- nm_est(
+    fixture$model, fixture$data, method = "GQ", maxit = 2L,
+    eta_maxit = 80L, gq_order = 3L, gq_adaptive = FALSE
+  )
+  expect_true(is.finite(adaptive$objective))
+  expect_true(is.finite(fixed$objective))
+  expect_equal(adaptive$diagnostics$quadrature_points, 3L)
+  expect_true(adaptive$diagnostics$adaptive)
+  expect_false(fixed$diagnostics$adaptive)
+  covariance <- nm_cov_step(adaptive)
+  expect_identical(covariance$status, "completed")
+  expect_equal(dim(covariance$covariance), c(0L, 0L))
+
+  free <- estimation_fixture(FALSE)
+  optimized <- nm_est(
+    free$model, free$data, method = "GQ", maxit = 4L,
+    eta_maxit = 80L, gq_order = 5L, covariance = TRUE,
+    covariance_type = "hessian"
+  )
+  expect_true(is.finite(optimized$objective))
+  expect_true(all(is.finite(c(
+    optimized$theta, optimized$omega, optimized$sigma
+  ))))
+  expect_identical(optimized$covariance$status, "completed")
+  expect_true(all(is.finite(optimized$covariance$se)))
+})
+
+test_that("GQ selects and evaluates Smolyak sparse grids", {
+  low <- LibeRation:::.nm_gq_design(
+    list(n_eta = 3L, n_subjects = 2L), order = 5L,
+    grid = "auto", level = 3L
+  )
+  high <- LibeRation:::.nm_gq_design(
+    list(n_eta = 4L, n_subjects = 2L), order = 5L,
+    grid = "auto", level = 3L
+  )
+  expect_identical(low$resolved_grid, "tensor")
+  expect_identical(high$resolved_grid, "smolyak")
+  expect_equal(high$actual_samples, 49L)
+  expect_lt(high$actual_samples, 5^4)
+  expect_equal(
+    sum(attr(high$normals[[1L]], "measure_sign") *
+      exp(attr(high$normals[[1L]], "log_measure"))),
+    1, tolerance = 1e-12
+  )
+
+  fixture <- estimation_fixture()
+  tensor <- nm_est(
+    fixture$model, fixture$data, method = "GQ", maxit = 2L,
+    eta_maxit = 80L, gq_grid = "tensor", gq_order = 5L
+  )
+  sparse <- nm_est(
+    fixture$model, fixture$data, method = "GQ", maxit = 2L,
+    eta_maxit = 80L, gq_grid = "smolyak", gq_level = 3L
+  )
+  expect_equal(sparse$objective, tensor$objective, tolerance = 1e-10)
+  expect_identical(sparse$diagnostics$quadrature_grid, "smolyak")
+  expect_equal(sparse$diagnostics$quadrature_level, 3L)
+  expect_true(all(sparse$diagnostics$quadrature_cancellation_ratio > 0))
+
+  free <- estimation_fixture(FALSE)
+  free$model$THETAS$FIX <- c(FALSE, TRUE)
+  free$model$OMEGAS$FIX <- TRUE
+  free$model$SIGMAS$FIX <- TRUE
+  sparse_covariance <- nm_est(
+    free$model, free$data, method = "GQ", maxit = 4L,
+    eta_maxit = 80L, gq_grid = "smolyak", gq_level = 3L,
+    covariance = TRUE, covariance_type = "hessian"
+  )
+  expect_identical(sparse_covariance$covariance$status, "completed")
+  expect_identical(sparse_covariance$covariance$quadrature_grid, "smolyak")
+  expect_equal(sparse_covariance$covariance$quadrature_level, 3L)
+})
+
+test_that("four-ETA adaptive Smolyak GQ has a finite signed-grid likelihood", {
+  fixture <- estimation_fixture()
+  model <- nm_model(
+    INPUT = c("ID", "TIME", "EVID", "AMT", "DV", "MDV"),
+    ADVAN = 1, DOSECMP = 1, OBSCMP = 1,
+    PRED = paste(
+      "CL=THETA(1)*exp(ETA(1)+0.2*ETA(3))",
+      "V=THETA(2)*exp(ETA(2)+0.2*ETA(4))", "S1=V", sep = ";"
+    ),
+    ERROR = "Y=F+ERR(1)",
+    THETAS = data.frame(THETA = 1:2, Value = c(2, 20), FIX = TRUE),
+    OMEGAS = data.frame(OMEGA = 1:4, Value = rep(0.09, 4L), FIX = TRUE),
+    SIGMAS = data.frame(SIGMA = 1, Value = 0.2, FIX = TRUE)
+  )
+  fit <- nm_est(
+    model, fixture$data, method = "GQ", maxit = 2L,
+    eta_maxit = 80L, gq_grid = "smolyak", gq_level = 3L
+  )
+  expect_true(is.finite(fit$objective))
+  expect_equal(fit$diagnostics$quadrature_points, 49L)
+  expect_gt(fit$diagnostics$quadrature_negative_weights, 0L)
+  expect_true(all(fit$diagnostics$quadrature_cancellation_ratio > 0))
+})
+
 test_that("SAEM and BAYES return reproducible stochastic diagnostics", {
   fixture <- estimation_fixture()
   saem <- nm_est(
@@ -276,6 +495,34 @@ test_that("L-BFGS-B uses the persistent C++ population objective and same-point 
   expect_gte(
     fit$diagnostics$optimizer$population_objective$shared_state_hits, 1L
   )
+})
+
+test_that("Laplace retaping rejects extreme conditional-mode trial anchors", {
+  model <- LibeRation:::.liber_model_template(2L, trans = 2L)
+  data <- LibeRation:::.liber_builtin_dataset(
+    model, "theophylline", n_subjects = 3L, seed = 1L
+  )
+  context <- LibeRation:::.nm_estimation_context(model, data)
+  map <- LibeRation:::.nm_outer_map(context$model)
+  compiled <- LibeRation:::.nm_cpp_population_objective(
+    context, map, "laplace", eta_maxit = 100L, tolerance = 1e-7
+  )
+
+  value <- LibeRation:::.liberation_population_objective_value(
+    compiled$pointer, map$start
+  )
+  gradient <- LibeRation:::.liberation_population_objective_gradient(
+    compiled$pointer, map$start
+  )
+  telemetry <- LibeRation:::.liberation_population_objective_telemetry(
+    compiled$pointer
+  )
+
+  expect_true(is.finite(value))
+  expect_true(all(is.finite(gradient)))
+  expect_gt(telemetry$tape_retapes, 0L)
+  expect_gte(telemetry$tape_records, telemetry$tape_retapes)
+  expect_lt(telemetry$tape_retapes, 12L * context$n_subjects)
 })
 
 test_that("adaptive ODE objective tapes retape after material domain movement", {
@@ -433,4 +680,23 @@ test_that("estimation can retain compiled subject workers and print gradients", 
   expect_s3_class(fit, "nm_fit")
   expect_true(is.finite(fit$objective))
   expect_true(any(grepl("SCALED GRADIENT", output, fixed = TRUE)))
+})
+
+test_that("estimation methods can run as one ordered sequence", {
+  fixture <- estimation_fixture(fix = TRUE)
+  fit <- nm_est_sequence(
+    fixture$model, fixture$data,
+    stages = list(
+      nm_est_stage("FO", maxit = 1),
+      nm_est_stage("FOCE", maxit = 1, eta_maxit = 10)
+    )
+  )
+  expect_s3_class(fit, "nm_fit")
+  expect_equal(fit$method_sequence, c("FO", "FOCE"))
+  expect_equal(fit$sequence_label, "FO -> FOCE")
+  expect_true(fit$sequence_complete)
+  expect_length(fit$stages, 2L)
+  expect_equal(fit$stages[[2L]]$stage$initial$theta, fit$stages[[1L]]$theta)
+  expect_true(fit$stages[[2L]]$stage$initial$eta_warm_start)
+  expect_true(is.finite(fit$timing$sequence_total_seconds))
 })

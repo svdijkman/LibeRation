@@ -10,9 +10,23 @@ Implemented model paths include ADVAN1-4/11/12, ADVAN6, ADVAN13, arbitrary
 linear matrix propagation, infusions, analytical and nonlinear periodic
 steady state, correlated OMEGA, IOV, priors, mixtures, BLQ likelihoods, and
 time-varying covariates. Estimation methods include FO, FOCE, FOCEI, Laplace,
-ITS, IMP, SAEM, and Bayesian estimation. Diagnostics and uncertainty workflows
+ITS, adaptive Gaussian quadrature (GQ) with automatic tensor/Smolyak sparse
+grids, IMP, SAEM, and Bayesian estimation.
+Bayesian workflows include random-walk BAYES, static HMC, and adaptive NUTS;
+discrete nonparametric population distributions are available through
+fixed-support NPML and adaptive-grid NPAG.
+Diagnostics and uncertainty workflows
 include covariance, GOF/CWRES, VPC/NPDE/NPC, categorical and time-to-event
 VPCs, bootstrap, profile likelihood, and SCM.
+
+The React workbench includes an explicit visual ADVAN6/13 model builder for
+linear and nonlinear compartment systems. It generates previewable
+`$PK/$PRED` and `$DES` code with log-normal ETA scaffolding while retaining the
+normal editable code windows. A separate drag-and-drop report workflow renders
+DOCX/PDF from user text, selected immutable model runs, comparisons, and saved
+diagnostics. Optional modelling help and report drafting use a consented,
+lazy-loaded WebGPU language model in a dedicated browser worker; inference is
+local and the worker's network APIs are disabled after its weights load.
 
 ## Quick start
 
@@ -39,6 +53,18 @@ fit <- nm_est(model, data, method = "FOCEI")
 summary(fit)
 liber_gui(model, data)
 ```
+
+For deterministic marginal integration, `method = "GQ"` automatically uses
+tensor Gauss--Hermite quadrature for up to three ETAs and a Smolyak sparse
+grid above that. The grid can be selected explicitly with
+`gq_grid = "tensor"` or `gq_grid = "smolyak"`; assess convergence by increasing
+`gq_order` or `gq_level`, respectively.
+
+`method = "HMC"` and `method = "NUTS"` sample the exact joint CppAD target
+and retain divergence, acceptance, R-hat, and effective-sample-size
+diagnostics. `method = "NPML"` estimates weights on a fixed ETA support;
+`method = "NPAG"` expands and prunes the support grid. Bootstrap is the
+recommended uncertainty procedure for the nonparametric methods.
 
 Install LibeRtAD first, then install LibeRation with R 4.1 or newer and a
 C++17 toolchain. Install LibeRties as well to enable persistent local and

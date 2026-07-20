@@ -11,11 +11,16 @@ liber_workbench(
   result = NULL,
   fit = NULL,
   report = NULL,
+  report_design = NULL,
   diagnostics = NULL,
   log = NULL,
   job_log = NULL,
   server = NULL,
   workspace = NULL,
+  library = NULL,
+  ai = NULL,
+  output_catalog = NULL,
+  run_output = if (inherits(fit, "nm_fit")) fit$output else NULL,
   data_payload = TRUE,
   gof_payload = TRUE,
   diagnostic_payload = names(diagnostics),
@@ -38,6 +43,9 @@ liber_workbench(
 
 \item{report}{Optional generated [nm_report()].}
 
+\item{report_design}{Optional saved [nm_report_design()] restored by the
+visual report designer.}
+
 \item{diagnostics}{Optional saved VPC, NPC, and NPDE results for the selected
 estimation run.}
 
@@ -48,6 +56,17 @@ estimation run.}
 \item{server}{Optional runtime/server status passed to the workbench.}
 
 \item{workspace}{Optional [nm_workspace()] and current project metadata.}
+
+\item{library}{Optional LibeRary catalogue payload.}
+
+\item{ai}{Optional browser-local WebGPU AI settings and model catalogue.}
+
+\item{output_catalog}{Optional draft output catalogue used by the GUI after
+validation but before editor changes are applied.}
+
+\item{run_output}{Optional selected model-run output columns, aligned by a
+`.ROW` column or by row position. These are loaded into Data explorer only
+when its row payload is requested.}
 
 \item{data_payload}{Whether dataset rows are included in the browser payload.
 When false, only dataset metadata and column names are included.}

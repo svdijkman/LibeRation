@@ -6,7 +6,7 @@
 \alias{LibeRation-package}
 \title{LibeRation: population PK/PD modelling with a C++ runtime}
 \description{
-NONMEM-compatible population PK/PD model specification, simulation, estimation, diagnostics, and graphical workflow management with one C++ numerical runtime. Implements ADVAN1-4, ADVAN6, ADVAN11-13, arbitrary linear matrix propagation, analytical and nonlinear periodic steady state, exact automatic differentiation, eight population estimation methods, advanced likelihoods, stochastic simulation, diagnostics, and versioned projects. Models use the established LibeRation R syntax or the restricted C++ expression form.
+NONMEM-compatible population PK/PD model specification, simulation, estimation, diagnostics, and graphical workflow management with one C++ numerical runtime. Implements ADVAN1-4, ADVAN6, ADVAN11-13, arbitrary linear matrix propagation, analytical and nonlinear periodic steady state, exact automatic differentiation, thirteen population estimation methods, advanced likelihoods, stochastic simulation, diagnostics, and versioned projects. Models use the established LibeRation R syntax or the restricted C++ expression form.
 }
 \author{
 \strong{Maintainer}: Sven C. van Dijkman \email{svdijkman@users.noreply.github.com}

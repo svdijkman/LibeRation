@@ -285,6 +285,74 @@
   )
 }
 
+.nm_standard_output_catalog <- function(n_state, n_eta) {
+  rows <- list(
+    data.frame(
+      name = c("PRED", "IPRED", "RES", "IRES", "WRES", "IWRES", "CWRES"),
+      source = "engine",
+      availability = c("all", "all", rep("estimation", 5L)),
+      description = c(
+        "Population prediction", "Individual prediction",
+        "Population residual", "Individual residual",
+        "Population weighted residual", "Individual weighted residual",
+        "Conditional weighted residual"
+      ), stringsAsFactors = FALSE
+    )
+  )
+  if (n_eta > 0L) {
+    rows[[length(rows) + 1L]] <- data.frame(
+      name = paste0("ETA", seq_len(n_eta)), source = "random effect",
+      availability = "all", description = paste("Individual random effect", seq_len(n_eta)),
+      stringsAsFactors = FALSE
+    )
+  }
+  if (n_state > 0L) {
+    rows[[length(rows) + 1L]] <- data.frame(
+      name = paste0("A", seq_len(n_state)), source = "compartment state",
+      availability = "all", description = paste("Amount in compartment", seq_len(n_state)),
+      stringsAsFactors = FALSE
+    )
+  }
+  do.call(rbind, rows)
+}
+
+.nm_output_catalog <- function(pred_ir, n_state, n_eta, input = character()) {
+  standard <- .nm_standard_output_catalog(n_state, n_eta)
+  assigned <- setdiff(
+    as.character(pred_ir$output_names %||% character()),
+    c(standard$name, grep("^[.]value[0-9]+$", pred_ir$output_names %||% character(), value = TRUE))
+  )
+  generated <- data.frame(
+    name = assigned, source = "model assignment", availability = "all",
+    description = if (length(assigned)) paste("Assigned in $PK/$PRED:", assigned) else character(),
+    stringsAsFactors = FALSE
+  )
+  output <- rbind(standard, generated)
+  output$collision <- output$name %in% as.character(input)
+  output$selectable <- !output$collision
+  rownames(output) <- NULL
+  output
+}
+
+.nm_validate_outputs <- function(output, catalog) {
+  output <- unique(as.character(output %||% character()))
+  if (anyNA(output) || any(!nzchar(trimws(output)))) {
+    .nm_stop("OUTPUT names must be non-missing, non-empty strings.")
+  }
+  unknown <- setdiff(output, catalog$name)
+  if (length(unknown)) {
+    .nm_stop("Unknown OUTPUT column(s): ", paste(unknown, collapse = ", "), ".")
+  }
+  collisions <- output[match(output, catalog$name) %in% which(catalog$collision)]
+  if (length(collisions)) {
+    .nm_stop(
+      "OUTPUT column(s) also occur in INPUT: ", paste(collisions, collapse = ", "),
+      ". Rename the generated variable to keep the run table unambiguous."
+    )
+  }
+  output
+}
+
 #' Define a NONMEM-style pharmacometric model
 #'
 #' The established LibeRation `PRED` and `ERROR` strings are retained. They are
@@ -292,6 +360,9 @@
 #' loop by R.
 #'
 #' @param INPUT Required dataset column names.
+#' @param OUTPUT Optional generated run columns. Available names are discovered
+#'   from `$PK/$PRED` assignments and combined with standard engine outputs; see
+#'   [nm_model_outputs()].
 #' @param ADVAN ADVAN number.
 #' @param TRANS TRANS parameterization number.
 #' @param SS Model-level steady-state default.
@@ -327,6 +398,7 @@
 #' model
 #' @export
 nm_model <- function(INPUT,
+                     OUTPUT = NULL,
                      ADVAN = 2L,
                      TRANS = 2L,
                      SS = 0L,
@@ -390,10 +462,14 @@ nm_model <- function(INPUT,
   } else NULL
   ode_control <- .nm_ode_control(ODE_CONTROL, advan)
   graph <- GRAPH %||% if (is.null(des_info)) .nm_known_graph(advan) else .nm_ode_graph(des_info$n_state)
+  n_state <- des_info$n_state %||% nrow(graph$compartments %||% data.frame())
+  output_catalog <- .nm_output_catalog(pred_ir, n_state, n_eta, INPUT)
+  selected_output <- .nm_validate_outputs(OUTPUT, output_catalog)
   structure(
     list(
       version = 1L,
       INPUT = unique(as.character(INPUT)),
+      OUTPUT = selected_output,
       ADVAN = advan,
       TRANS = as.integer(TRANS),
       SS = as.integer(SS),
@@ -418,10 +494,31 @@ nm_model <- function(INPUT,
       pred_ir = pred_ir,
       des_ir = des_info$ir %||% NULL,
       n_eta = n_eta,
-      n_state = des_info$n_state %||% nrow(graph$compartments %||% data.frame())
+      n_state = n_state,
+      output_catalog = output_catalog
     ),
     class = "nm_model"
   )
+}
+
+#' List selectable generated model-run columns
+#'
+#' This is a static catalogue produced while `$PK/$PRED` is compiled. It does
+#' not execute the model or require a dataset. Standard engine outputs are
+#' included alongside named assignment results.
+#'
+#' @param model An [nm_model()] or compiled [NMEngine()].
+#' @return A data frame with output name, source, run availability, description,
+#'   and selection status.
+#' @export
+nm_model_outputs <- function(model) {
+  if (inherits(model, "NMEngine")) model <- model$model
+  if (!inherits(model, "nm_model")) .nm_stop("`model` must be an nm_model or NMEngine.")
+  catalog <- model$output_catalog %||% .nm_output_catalog(
+    model$pred_ir, model$n_state, model$n_eta, model$INPUT
+  )
+  catalog$selected <- catalog$name %in% (model$OUTPUT %||% character())
+  catalog
 }
 
 #' Define a model using the restricted C++ expression form
@@ -524,7 +621,8 @@ nm_support_matrix <- function() {
   feature <- c("ADVAN1", "ADVAN2", "ADVAN3", "ADVAN4", "ADVAN11", "ADVAN12",
                "matrix exponential", "steady-state bolus", "steady-state infusion",
                "nonlinear ODE steady state", "ADVAN6", "ADVAN13",
-               "FO", "FOCE", "FOCEI", "LAPLACE", "ITS", "IMP", "SAEM", "BAYES",
+               "FO", "FOCE", "FOCEI", "LAPLACE", "ITS", "GQ", "IMP", "SAEM", "BAYES",
+               "HMC", "NUTS", "NPML", "NPAG",
                "full OMEGA", "IOV", "M3/M4 BLQ", "finite mixtures", "priors",
                "AR1 residuals", "stochastic simulation", "VPC", "categorical VPC",
                "time-to-event VPC", "bootstrap", "profile likelihood", "SCM",

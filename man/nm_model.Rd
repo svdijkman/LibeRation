@@ -6,6 +6,7 @@
 \usage{
 nm_model(
   INPUT,
+  OUTPUT = NULL,
   ADVAN = 2L,
   TRANS = 2L,
   SS = 0L,
@@ -31,6 +32,10 @@ nm_model(
 }
 \arguments{
 \item{INPUT}{Required dataset column names.}
+
+\item{OUTPUT}{Optional generated run columns. Available names are discovered
+from `$PK/$PRED` assignments and combined with standard engine outputs; see
+[nm_model_outputs()].}
 
 \item{ADVAN}{ADVAN number.}
 

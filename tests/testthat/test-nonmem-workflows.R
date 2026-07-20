@@ -29,6 +29,7 @@ test_that("NONMEM control streams round-trip supported semantic records", {
   expect_equal(imported$model$THETAS$FIX, c(FALSE, FALSE, TRUE))
   expect_equal(imported$model$OMEGAS$Value, 0.1)
   expect_match(imported$model$ERROR, "ERR(1)", fixed = TRUE)
+  expect_equal(imported$model$OUTPUT, "PRED")
 
   round_trip <- nm_control_read(nm_control_write(imported))
   expect_equal(round_trip$model$ADVAN, imported$model$ADVAN)
@@ -37,6 +38,21 @@ test_that("NONMEM control streams round-trip supported semantic records", {
   expect_equal(round_trip$model$OMEGAS[, c("ROW", "COL", "Value")],
                imported$model$OMEGAS[, c("ROW", "COL", "Value")])
   expect_equal(round_trip$model$SIGMAS$Value, imported$model$SIGMAS$Value)
+})
+
+test_that("selected generated columns create a NONMEM TABLE record", {
+  model <- nm_model(
+    INPUT = c("ID", "TIME", "EVID", "AMT", "DV"),
+    OUTPUT = c("PRED", "CL", "CWRES"),
+    ADVAN = 1,
+    PRED = "CL=THETA(1); V=THETA(2); S1=V",
+    ERROR = "Y=F+ERR(1)",
+    THETAS = data.frame(THETA = 1:2, Value = c(2, 20)),
+    SIGMAS = data.frame(SIGMA = 1, Value = 0.1)
+  )
+  text <- nm_control_write(model)
+  expect_match(text, "$TABLE ID TIME DV PRED CL CWRES", fixed = TRUE)
+  expect_equal(nm_control_read(text)$model$OUTPUT, c("PRED", "CL", "CWRES"))
 })
 
 test_that("unknown NONMEM records are preserved and reported", {

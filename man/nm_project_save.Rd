@@ -10,7 +10,8 @@ nm_project_save(
   model = NULL,
   data = NULL,
   result = NULL,
-  label = NULL
+  label = NULL,
+  provenance = NULL
 )
 }
 \arguments{
@@ -27,6 +28,9 @@ nm_project_save(
 
 \item{label}{Model-version label. Empty labels are assigned `Mod001`,
 `Mod002`, and so on.}
+
+\item{provenance}{Optional named provenance fields supplied by an integrated
+LibeR package. Core runtime provenance cannot be overwritten.}
 }
 \value{
 Model-version id, invisibly.

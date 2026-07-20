@@ -20,6 +20,23 @@ test_that("ADVAN1 agrees with the closed-form IV bolus solution", {
   expect_equal(result$A1, expected * 20, tolerance = 1e-11)
 })
 
+test_that("selected model assignments are collected in the C++ prediction pass", {
+  model <- nm_model(
+    INPUT = c("ID", "TIME", "EVID", "AMT"), OUTPUT = c("PRED", "CL", "K"),
+    ADVAN = 1, PRED = "CL=THETA(1)*exp(ETA(1)); V=THETA(2); K=CL/V; S1=V",
+    ERROR = "Y=F", THETAS = theta_table(c(2, 20)),
+    OMEGAS = data.frame(OMEGA = 1, Value = 0.1)
+  )
+  data <- data.frame(
+    ID = 1, TIME = c(0, 1), EVID = c(1, 0), AMT = c(100, 0)
+  )
+  result <- nm_simulate(model, data, eta = matrix(log(1.5), 1, 1))
+  expect_equal(result$CL, rep(3, 2), tolerance = 1e-12)
+  expect_equal(result$K, rep(0.15, 2), tolerance = 1e-12)
+  expect_equal(result$PRED[[2L]], 5 * exp(-0.1), tolerance = 1e-12)
+  expect_false(isTRUE(all.equal(result$PRED[[2L]], result$IPRED[[2L]])))
+})
+
 test_that("ADVAN2 uses model dosing and observation compartments when CMT is absent", {
   model <- nm_model(
     INPUT = c("ID", "TIME", "EVID", "AMT"),

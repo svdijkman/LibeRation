@@ -49,7 +49,17 @@ test_that("legacy workbench layout and workflow controls are present", {
   expect_match(style, 'lw-syntax-definition', fixed = TRUE)
   expect_match(style, 'lw-syntax-function', fixed = TRUE)
   expect_match(source, 'OMEGA matrix', fixed = TRUE)
+  expect_match(source, '"OMEGA("', fixed = TRUE)
+  expect_match(source, 'Sequential estimation', fixed = TRUE)
+  expect_match(source, 'Generated run columns', fixed = TRUE)
   expect_match(source, 'Print gradients every N (0 = off)', fixed = TRUE)
+  expect_match(source, 'GQ (adaptive Gauss-Hermite)', fixed = TRUE)
+  expect_match(source, 'gqOrder', fixed = TRUE)
+  expect_match(source, 'gqGrid', fixed = TRUE)
+  expect_match(source, 'gqLevel', fixed = TRUE)
+  expect_match(source, 'gqAdaptive', fixed = TRUE)
+  expect_match(source, 'gqMaxPoints', fixed = TRUE)
+  expect_match(source, 'Smolyak sparse grid', fixed = TRUE)
   expect_match(source, 'Open the saved model run and its results', fixed = TRUE)
   expect_match(source, 'comparison_close', fixed = TRUE)
   expect_match(source, 'page_change', fixed = TRUE)
@@ -62,9 +72,28 @@ test_that("legacy workbench layout and workflow controls are present", {
   expect_match(source, 'Stratify by', fixed = TRUE)
   expect_match(source, 'function ComparisonPlots', fixed = TRUE)
   expect_match(source, 'lw-button-danger-ghost', fixed = TRUE)
+  expect_match(source, 'Type "YES" to confirm', fixed = TRUE)
+  expect_match(source, 'confirmation:deleteConfirmation[0]', fixed = TRUE)
+  expect_match(source, 'deleteConfirmation[0]!=="YES"', fixed = TRUE)
+  expect_match(source, 'Selected project:', fixed = TRUE)
+  expect_match(source, 'Selected model version:', fixed = TRUE)
+  expect_match(source, 'Selected model run:', fixed = TRUE)
+  expect_match(source, 'Dataset:', fixed = TRUE)
+  expect_match(source, 'Generation stopped before a response was produced.', fixed = TRUE)
+  worker_source <- paste(readLines(
+    system.file("htmlwidgets", "liber-ai-worker.js", package = "LibeRation"),
+    warn = FALSE
+  ), collapse = "\n")
+  expect_match(worker_source, 'isDisposedFailure', fixed = TRUE)
+  expect_match(worker_source, 'recoverEngine', fixed = TRUE)
+  expect_match(worker_source, 'Refreshing the local GPU session', fixed = TRUE)
   server_source <- paste(deparse(body(liber_gui)), collapse = "\n")
   expect_match(server_source, 'q\\$logs\\(selected,\\s+stream = "stdout"', perl = TRUE)
   expect_match(server_source, 'q\\$logs\\(id,\\s+stream = "stdout"', perl = TRUE)
+  expect_match(server_source, 'event$confirmation', fixed = TRUE)
+  estimator_source <- paste(deparse(body(LibeRation:::.liber_estimation_arguments)), collapse = "\n")
+  expect_match(estimator_source, 'event$gqGrid', fixed = TRUE)
+  expect_match(estimator_source, 'event$gqLevel', fixed = TRUE)
 })
 
 test_that("large data and diagnostic payloads are lazy", {
@@ -83,6 +112,36 @@ test_that("large data and diagnostic payloads are lazy", {
   diagnostics <- LibeRation:::.liber_gui_diagnostics(list(vpc = vpc), payload = character())
   expect_true(diagnostics$available$vpc)
   expect_null(diagnostics$vpc)
+})
+
+test_that("selected run outputs are loaded lazily into Data explorer", {
+  data <- data.frame(
+    ID = c(1, 1), TIME = c(0, 1), EVID = c(1, 0), AMT = c(100, 0),
+    DV = c(NA, 4.5), MDV = c(1, 0)
+  )
+  output <- data.frame(.ROW = 1:2, CL = c(2, 2), CWRES = c(NA, 0.1))
+  metadata <- LibeRation:::.liber_gui_data(
+    data, include_rows = FALSE, run_output = output
+  )
+  expect_false("CL" %in% metadata$columns)
+
+  payload <- LibeRation:::.liber_gui_data(
+    data, include_rows = TRUE, run_output = output
+  )
+  expect_true(all(c("CL", "CWRES") %in% payload$columns))
+  expect_equal(vapply(payload$plot_rows, `[[`, numeric(1), "CL"), c(2, 2))
+})
+
+test_that("draft model validation sees unsaved code and generated outputs", {
+  model <- LibeRation:::.liber_model_template(1L)
+  event <- list(
+    pred = paste(model$PRED, "K = CL / V", sep = "\n"),
+    output = c("PRED", "K")
+  )
+  draft <- LibeRation:::.liber_model_from_event(model, event)
+  expect_true("K" %in% nm_model_outputs(draft)$name)
+  expect_equal(draft$OUTPUT, c("PRED", "K"))
+  expect_s3_class(nm_compile(draft), "NMEngine")
 })
 
 test_that("the initial queue refresh runs inside a reactive isolate", {

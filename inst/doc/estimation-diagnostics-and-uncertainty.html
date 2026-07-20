@@ -1,0 +1,608 @@
+<!DOCTYPE html>
+
+<html>
+
+<head>
+
+<meta charset="utf-8" />
+<meta name="generator" content="pandoc" />
+<meta http-equiv="X-UA-Compatible" content="IE=EDGE" />
+
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+
+<meta name="author" content="Sven C. van Dijkman" />
+
+
+<title>Estimation, diagnostics, and uncertainty</title>
+
+<script>// Pandoc 2.9 adds attributes on both header and div. We remove the former (to
+// be compatible with the behavior of Pandoc < 2.8).
+document.addEventListener('DOMContentLoaded', function(e) {
+  var hs = document.querySelectorAll("div.section[class*='level'] > :first-child");
+  var i, h, a;
+  for (i = 0; i < hs.length; i++) {
+    h = hs[i];
+    if (!/^h[1-6]$/i.test(h.tagName)) continue;  // it should be a header h1-h6
+    a = h.attributes;
+    while (a.length > 0) h.removeAttribute(a[0].name);
+  }
+});
+</script>
+
+<style type="text/css">
+code{white-space: pre-wrap;}
+span.smallcaps{font-variant: small-caps;}
+span.underline{text-decoration: underline;}
+div.column{display: inline-block; vertical-align: top; width: 50%;}
+div.hanging-indent{margin-left: 1.5em; text-indent: -1.5em;}
+ul.task-list{list-style: none;}
+</style>
+
+
+
+<style type="text/css">
+code {
+white-space: pre;
+}
+.sourceCode {
+overflow: visible;
+}
+</style>
+<style type="text/css" data-origin="pandoc">
+html { -webkit-text-size-adjust: 100%; }
+pre > code.sourceCode { white-space: pre; position: relative; }
+pre > code.sourceCode > span { display: inline-block; line-height: 1.25; }
+pre > code.sourceCode > span:empty { height: 1.2em; }
+.sourceCode { overflow: visible; }
+code.sourceCode > span { color: inherit; text-decoration: inherit; }
+div.sourceCode { margin: 1em 0; }
+pre.sourceCode { margin: 0; }
+@media screen {
+div.sourceCode { overflow: auto; }
+}
+@media print {
+pre > code.sourceCode { white-space: pre-wrap; }
+pre > code.sourceCode > span { text-indent: -5em; padding-left: 5em; }
+}
+pre.numberSource code
+{ counter-reset: source-line 0; }
+pre.numberSource code > span
+{ position: relative; left: -4em; counter-increment: source-line; }
+pre.numberSource code > span > a:first-child::before
+{ content: counter(source-line);
+position: relative; left: -1em; text-align: right; vertical-align: baseline;
+border: none; display: inline-block;
+-webkit-touch-callout: none; -webkit-user-select: none;
+-khtml-user-select: none; -moz-user-select: none;
+-ms-user-select: none; user-select: none;
+padding: 0 4px; width: 4em;
+color: #aaaaaa;
+}
+pre.numberSource { margin-left: 3em; border-left: 1px solid #aaaaaa; padding-left: 4px; }
+div.sourceCode
+{ }
+@media screen {
+pre > code.sourceCode > span > a:first-child::before { text-decoration: underline; }
+}
+code span.al { color: #ff0000; font-weight: bold; } 
+code span.an { color: #60a0b0; font-weight: bold; font-style: italic; } 
+code span.at { color: #7d9029; } 
+code span.bn { color: #40a070; } 
+code span.bu { color: #008000; } 
+code span.cf { color: #007020; font-weight: bold; } 
+code span.ch { color: #4070a0; } 
+code span.cn { color: #880000; } 
+code span.co { color: #60a0b0; font-style: italic; } 
+code span.cv { color: #60a0b0; font-weight: bold; font-style: italic; } 
+code span.do { color: #ba2121; font-style: italic; } 
+code span.dt { color: #902000; } 
+code span.dv { color: #40a070; } 
+code span.er { color: #ff0000; font-weight: bold; } 
+code span.ex { } 
+code span.fl { color: #40a070; } 
+code span.fu { color: #06287e; } 
+code span.im { color: #008000; font-weight: bold; } 
+code span.in { color: #60a0b0; font-weight: bold; font-style: italic; } 
+code span.kw { color: #007020; font-weight: bold; } 
+code span.op { color: #666666; } 
+code span.ot { color: #007020; } 
+code span.pp { color: #bc7a00; } 
+code span.sc { color: #4070a0; } 
+code span.ss { color: #bb6688; } 
+code span.st { color: #4070a0; } 
+code span.va { color: #19177c; } 
+code span.vs { color: #4070a0; } 
+code span.wa { color: #60a0b0; font-weight: bold; font-style: italic; } 
+</style>
+<script>
+// apply pandoc div.sourceCode style to pre.sourceCode instead
+(function() {
+  var sheets = document.styleSheets;
+  for (var i = 0; i < sheets.length; i++) {
+    if (sheets[i].ownerNode.dataset["origin"] !== "pandoc") continue;
+    try { var rules = sheets[i].cssRules; } catch (e) { continue; }
+    var j = 0;
+    while (j < rules.length) {
+      var rule = rules[j];
+      // check if there is a div.sourceCode rule
+      if (rule.type !== rule.STYLE_RULE || rule.selectorText !== "div.sourceCode") {
+        j++;
+        continue;
+      }
+      var style = rule.style.cssText;
+      // check if color or background-color is set
+      if (rule.style.color === '' && rule.style.backgroundColor === '') {
+        j++;
+        continue;
+      }
+      // replace div.sourceCode by a pre.sourceCode rule
+      sheets[i].deleteRule(j);
+      sheets[i].insertRule('pre.sourceCode{' + style + '}', j);
+    }
+  }
+})();
+</script>
+
+
+
+
+<style type="text/css">body {
+background-color: #fff;
+margin: 1em auto;
+max-width: 700px;
+overflow: visible;
+padding-left: 2em;
+padding-right: 2em;
+font-family: "Open Sans", "Helvetica Neue", Helvetica, Arial, sans-serif;
+font-size: 14px;
+line-height: 1.35;
+}
+#TOC {
+clear: both;
+margin: 0 0 10px 10px;
+padding: 4px;
+width: 400px;
+border: 1px solid #CCCCCC;
+border-radius: 5px;
+background-color: #f6f6f6;
+font-size: 13px;
+line-height: 1.3;
+}
+#TOC .toctitle {
+font-weight: bold;
+font-size: 15px;
+margin-left: 5px;
+}
+#TOC ul {
+padding-left: 40px;
+margin-left: -1.5em;
+margin-top: 5px;
+margin-bottom: 5px;
+}
+#TOC ul ul {
+margin-left: -2em;
+}
+#TOC li {
+line-height: 16px;
+}
+table {
+margin: 1em auto;
+border-width: 1px;
+border-color: #DDDDDD;
+border-style: outset;
+border-collapse: collapse;
+}
+table th {
+border-width: 2px;
+padding: 5px;
+border-style: inset;
+}
+table td {
+border-width: 1px;
+border-style: inset;
+line-height: 18px;
+padding: 5px 5px;
+}
+table, table th, table td {
+border-left-style: none;
+border-right-style: none;
+}
+table thead, table tr.even {
+background-color: #f7f7f7;
+}
+p {
+margin: 0.5em 0;
+}
+blockquote {
+background-color: #f6f6f6;
+padding: 0.25em 0.75em;
+}
+hr {
+border-style: solid;
+border: none;
+border-top: 1px solid #777;
+margin: 28px 0;
+}
+dl {
+margin-left: 0;
+}
+dl dd {
+margin-bottom: 13px;
+margin-left: 13px;
+}
+dl dt {
+font-weight: bold;
+}
+ul {
+margin-top: 0;
+}
+ul li {
+list-style: circle outside;
+}
+ul ul {
+margin-bottom: 0;
+}
+pre, code {
+background-color: #f7f7f7;
+border-radius: 3px;
+color: #333;
+white-space: pre-wrap; 
+}
+pre {
+border-radius: 3px;
+margin: 5px 0px 10px 0px;
+padding: 10px;
+}
+pre:not([class]) {
+background-color: #f7f7f7;
+}
+code {
+font-family: Consolas, Monaco, 'Courier New', monospace;
+font-size: 85%;
+}
+p > code, li > code {
+padding: 2px 0px;
+}
+div.figure {
+text-align: center;
+}
+img {
+background-color: #FFFFFF;
+padding: 2px;
+border: 1px solid #DDDDDD;
+border-radius: 3px;
+border: 1px solid #CCCCCC;
+margin: 0 5px;
+}
+h1 {
+margin-top: 0;
+font-size: 35px;
+line-height: 40px;
+}
+h2 {
+border-bottom: 4px solid #f7f7f7;
+padding-top: 10px;
+padding-bottom: 2px;
+font-size: 145%;
+}
+h3 {
+border-bottom: 2px solid #f7f7f7;
+padding-top: 10px;
+font-size: 120%;
+}
+h4 {
+border-bottom: 1px solid #f7f7f7;
+margin-left: 8px;
+font-size: 105%;
+}
+h5, h6 {
+border-bottom: 1px solid #ccc;
+font-size: 105%;
+}
+a {
+color: #0033dd;
+text-decoration: none;
+}
+a:hover {
+color: #6666ff; }
+a:visited {
+color: #800080; }
+a:visited:hover {
+color: #BB00BB; }
+a[href^="http:"] {
+text-decoration: underline; }
+a[href^="https:"] {
+text-decoration: underline; }
+
+code > span.kw { color: #555; font-weight: bold; } 
+code > span.dt { color: #902000; } 
+code > span.dv { color: #40a070; } 
+code > span.bn { color: #d14; } 
+code > span.fl { color: #d14; } 
+code > span.ch { color: #d14; } 
+code > span.st { color: #d14; } 
+code > span.co { color: #888888; font-style: italic; } 
+code > span.ot { color: #007020; } 
+code > span.al { color: #ff0000; font-weight: bold; } 
+code > span.fu { color: #900; font-weight: bold; } 
+code > span.er { color: #a61717; background-color: #e3d2d2; } 
+</style>
+
+
+
+
+</head>
+
+<body>
+
+
+
+
+<h1 class="title toc-ignore">Estimation, diagnostics, and
+uncertainty</h1>
+<h4 class="author">Sven C. van Dijkman</h4>
+
+
+
+<div id="estimation-methods" class="section level2">
+<h2>Estimation methods</h2>
+<p><code>nm_est()</code> exposes thirteen population methods through a
+common interface.</p>
+<table>
+<thead>
+<tr class="header">
+<th>Method</th>
+<th>Main use</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>FO</td>
+<td>Fast first-order approximation</td>
+</tr>
+<tr class="even">
+<td>FOCE</td>
+<td>Conditional estimation without residual interaction</td>
+</tr>
+<tr class="odd">
+<td>FOCEI</td>
+<td>Conditional estimation with residual interaction</td>
+</tr>
+<tr class="even">
+<td>LAPLACE</td>
+<td>Conditional mode plus curvature correction</td>
+</tr>
+<tr class="odd">
+<td>ITS</td>
+<td>Iterative two-stage estimation</td>
+</tr>
+<tr class="even">
+<td>GQ</td>
+<td>Adaptive generalized Gaussian quadrature marginal likelihood</td>
+</tr>
+<tr class="odd">
+<td>IMP</td>
+<td>Importance-sampling marginal likelihood</td>
+</tr>
+<tr class="even">
+<td>SAEM</td>
+<td>Stochastic approximation EM</td>
+</tr>
+<tr class="odd">
+<td>BAYES</td>
+<td>Bayesian sampling workflow</td>
+</tr>
+<tr class="even">
+<td>HMC</td>
+<td>Static Hamiltonian Monte Carlo with exact CppAD gradients</td>
+</tr>
+<tr class="odd">
+<td>NUTS</td>
+<td>Adaptive no-U-turn Hamiltonian Monte Carlo</td>
+</tr>
+<tr class="even">
+<td>NPML</td>
+<td>Fixed-support nonparametric maximum likelihood</td>
+</tr>
+<tr class="odd">
+<td>NPAG</td>
+<td>Adaptive-grid nonparametric maximum likelihood</td>
+</tr>
+</tbody>
+</table>
+<p>Method-specific controls are supplied through <code>...</code>. Use a
+fixed seed for stochastic methods and record all controls in reports or
+manifests.</p>
+<p>For GQ, <code>gq_grid = &quot;auto&quot;</code> uses a tensor grid through
+three ETA dimensions and a Smolyak sparse grid for higher-dimensional
+models. <code>gq_order</code> controls the tensor nodes per ETA
+dimension (default 5), while <code>gq_level</code> controls the Smolyak
+accuracy level (default 3). <code>gq_adaptive = TRUE</code> centres and
+scales the grid using each subject’s conditional mode and exact ETA
+Hessian, and <code>gq_max_points</code> guards the retained grid size.
+<code>gq_adaptive = FALSE</code> provides fixed quadrature under OMEGA
+as a numerical reference. Because Smolyak combination weights can be
+negative, the likelihood uses signed log-sum-exp arithmetic and reports
+a cancellation ratio. The default CppAD score gradient treats the finite
+grid as an integration rule; the slower
+<code>gq_gradient = &quot;finite_grid&quot;</code> option numerically
+differentiates the complete moving-grid approximation. Assess
+convergence by increasing the selected grid’s order or level.</p>
+<p>HMC and NUTS jointly sample population parameters and individual ETAs
+on an unconstrained scale. Finite THETA bounds and positive variance
+parameters are included through differentiable transforms and their
+Jacobians. Both methods adapt step size and a diagonal mass matrix
+during warmup. NUTS additionally adapts trajectory length. Retained
+diagnostics include acceptance, divergent transitions, NUTS tree-depth
+saturation, split R-hat, ESS, and per-chain traces. Increase
+<code>target_acceptance</code> when divergences remain after checking
+the model and parameterisation.</p>
+<p>NPML optimises mixture weights on a fixed ETA support, initialized
+from conditional modes unless <code>np_supports</code> is supplied. NPAG
+repeatedly expands, reweights, and prunes that support. Both retain
+support weights, subject-level posterior support probabilities, and
+posterior ETA means. Their reported OMEGA is the weighted support
+covariance for interoperability, not an assumed normal random-effect
+distribution. Support-point inference is non-regular; use bootstrap
+rather than the ordinary Hessian covariance step.</p>
+<div class="sourceCode" id="cb1"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb1-1"><a href="#cb1-1" tabindex="-1"></a>gq_fit <span class="ot">&lt;-</span> <span class="fu">nm_est</span>(</span>
+<span id="cb1-2"><a href="#cb1-2" tabindex="-1"></a>  model, data, <span class="at">method =</span> <span class="st">&quot;GQ&quot;</span>,</span>
+<span id="cb1-3"><a href="#cb1-3" tabindex="-1"></a>  <span class="at">gq_grid =</span> <span class="st">&quot;auto&quot;</span>, <span class="at">gq_order =</span> <span class="dv">5</span>, <span class="at">gq_level =</span> <span class="dv">3</span>,</span>
+<span id="cb1-4"><a href="#cb1-4" tabindex="-1"></a>  <span class="at">covariance =</span> <span class="cn">TRUE</span></span>
+<span id="cb1-5"><a href="#cb1-5" tabindex="-1"></a>)</span></code></pre></div>
+<div class="sourceCode" id="cb2"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb2-1"><a href="#cb2-1" tabindex="-1"></a>fit <span class="ot">&lt;-</span> <span class="fu">nm_est</span>(</span>
+<span id="cb2-2"><a href="#cb2-2" tabindex="-1"></a>  model,</span>
+<span id="cb2-3"><a href="#cb2-3" tabindex="-1"></a>  data,</span>
+<span id="cb2-4"><a href="#cb2-4" tabindex="-1"></a>  <span class="at">method =</span> <span class="st">&quot;FOCEI&quot;</span>,</span>
+<span id="cb2-5"><a href="#cb2-5" tabindex="-1"></a>  <span class="at">maxit =</span> <span class="dv">200</span>,</span>
+<span id="cb2-6"><a href="#cb2-6" tabindex="-1"></a>  <span class="at">eta_maxit =</span> <span class="dv">100</span>,</span>
+<span id="cb2-7"><a href="#cb2-7" tabindex="-1"></a>  <span class="at">tolerance =</span> <span class="fl">1e-6</span>,</span>
+<span id="cb2-8"><a href="#cb2-8" tabindex="-1"></a>  <span class="at">optimizer_backend =</span> <span class="st">&quot;auto&quot;</span>,</span>
+<span id="cb2-9"><a href="#cb2-9" tabindex="-1"></a>  <span class="at">n_cores =</span> <span class="dv">4</span>,</span>
+<span id="cb2-10"><a href="#cb2-10" tabindex="-1"></a>  <span class="at">print_every =</span> <span class="dv">10</span>,</span>
+<span id="cb2-11"><a href="#cb2-11" tabindex="-1"></a>  <span class="at">covariance =</span> <span class="cn">TRUE</span>,</span>
+<span id="cb2-12"><a href="#cb2-12" tabindex="-1"></a>  <span class="at">covariance_type =</span> <span class="st">&quot;auto&quot;</span></span>
+<span id="cb2-13"><a href="#cb2-13" tabindex="-1"></a>)</span></code></pre></div>
+<p><code>print_every</code> writes the objective and scaled population
+gradient to the worker log every N outer evaluations. The fit records
+elapsed model-fit time, covariance time, iterations, function and
+gradient evaluations, and available numerical telemetry.</p>
+</div>
+<div id="sequential-estimation" class="section level2">
+<h2>Sequential estimation</h2>
+<p>Several methods can be run as one ordered estimation in the current R
+process, local queue, or remote queue. Population estimates initialize
+the next stage; compatible conditional methods also receive the previous
+subject ETA modes. Only the final stage generates the selected
+record-level output table, while every stage retains convergence and
+timing telemetry.</p>
+<div class="sourceCode" id="cb3"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb3-1"><a href="#cb3-1" tabindex="-1"></a>fit <span class="ot">&lt;-</span> <span class="fu">nm_est_sequence</span>(</span>
+<span id="cb3-2"><a href="#cb3-2" tabindex="-1"></a>  model, data,</span>
+<span id="cb3-3"><a href="#cb3-3" tabindex="-1"></a>  <span class="at">stages =</span> <span class="fu">list</span>(</span>
+<span id="cb3-4"><a href="#cb3-4" tabindex="-1"></a>    <span class="fu">nm_est_stage</span>(<span class="st">&quot;FOCE&quot;</span>, <span class="at">maxit =</span> <span class="dv">100</span>, <span class="at">eta_maxit =</span> <span class="dv">50</span>),</span>
+<span id="cb3-5"><a href="#cb3-5" tabindex="-1"></a>    <span class="fu">nm_est_stage</span>(<span class="st">&quot;SAEM&quot;</span>, <span class="at">n_iter =</span> <span class="dv">500</span>, <span class="at">seed =</span> <span class="dv">20260719</span>)</span>
+<span id="cb3-6"><a href="#cb3-6" tabindex="-1"></a>  )</span>
+<span id="cb3-7"><a href="#cb3-7" tabindex="-1"></a>)</span>
+<span id="cb3-8"><a href="#cb3-8" tabindex="-1"></a></span>
+<span id="cb3-9"><a href="#cb3-9" tabindex="-1"></a>fit<span class="sc">$</span>method_sequence</span>
+<span id="cb3-10"><a href="#cb3-10" tabindex="-1"></a>fit<span class="sc">$</span>stages</span></code></pre></div>
+</div>
+<div id="covariance-and-standard-errors" class="section level2">
+<h2>Covariance and standard errors</h2>
+<div class="sourceCode" id="cb4"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb4-1"><a href="#cb4-1" tabindex="-1"></a>covariance <span class="ot">&lt;-</span> <span class="fu">nm_cov_step</span>(</span>
+<span id="cb4-2"><a href="#cb4-2" tabindex="-1"></a>  fit,</span>
+<span id="cb4-3"><a href="#cb4-3" tabindex="-1"></a>  <span class="at">type =</span> <span class="st">&quot;auto&quot;</span>,</span>
+<span id="cb4-4"><a href="#cb4-4" tabindex="-1"></a>  <span class="at">tolerance =</span> <span class="fl">1e-8</span>,</span>
+<span id="cb4-5"><a href="#cb4-5" tabindex="-1"></a>  <span class="at">samples =</span> <span class="dv">200</span>,</span>
+<span id="cb4-6"><a href="#cb4-6" tabindex="-1"></a>  <span class="at">seed =</span> <span class="dv">20260715</span></span>
+<span id="cb4-7"><a href="#cb4-7" tabindex="-1"></a>)</span></code></pre></div>
+<p>Available estimators include objective Hessian (<code>R</code>),
+subject-score OPG (<code>S</code>), and robust sandwich covariance.
+<code>auto</code> prefers reliable objective curvature and falls back
+when conditioning or positive definiteness is unsatisfactory. GQ reuses
+its fitted rule for covariance; IMP and SAEM can use a separate
+marginal-information integration budget.</p>
+<p>Inspect at least convergence status, gradients, eigenvalues,
+condition number, fallback method, standard errors, and relative
+standard errors before using the uncertainty estimates.</p>
+</div>
+<div id="goodness-of-fit" class="section level2">
+<h2>Goodness of fit</h2>
+<p><code>nm_gof()</code> creates record-aligned <code>PRED</code>,
+<code>IPRED</code>, residual, and CWRES quantities. The GUI displays DV
+versus PRED, DV versus IPRED, CWRES versus TIME, and CWRES versus PRED.
+CWRES plots use a -5 to 5 reference range with horizontal guides at -2
+and 2.</p>
+<div class="sourceCode" id="cb5"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb5-1"><a href="#cb5-1" tabindex="-1"></a>gof <span class="ot">&lt;-</span> <span class="fu">nm_gof</span>(fit)</span>
+<span id="cb5-2"><a href="#cb5-2" tabindex="-1"></a><span class="fu">subset</span>(gof, EVID <span class="sc">==</span> <span class="dv">0</span>, <span class="fu">c</span>(ID, TIME, DV, PRED, IPRED, CWRES))</span></code></pre></div>
+</div>
+<div id="predictive-diagnostics" class="section level2">
+<h2>Predictive diagnostics</h2>
+<div class="sourceCode" id="cb6"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb6-1"><a href="#cb6-1" tabindex="-1"></a>vpc <span class="ot">&lt;-</span> <span class="fu">nm_vpc</span>(</span>
+<span id="cb6-2"><a href="#cb6-2" tabindex="-1"></a>  fit,</span>
+<span id="cb6-3"><a href="#cb6-3" tabindex="-1"></a>  <span class="at">nsim =</span> <span class="dv">500</span>,</span>
+<span id="cb6-4"><a href="#cb6-4" tabindex="-1"></a>  <span class="at">probs =</span> <span class="fu">c</span>(<span class="fl">0.05</span>, <span class="fl">0.5</span>, <span class="fl">0.95</span>),</span>
+<span id="cb6-5"><a href="#cb6-5" tabindex="-1"></a>  <span class="at">level =</span> <span class="fl">0.90</span>,</span>
+<span id="cb6-6"><a href="#cb6-6" tabindex="-1"></a>  <span class="at">stratify =</span> <span class="st">&quot;SEX&quot;</span>,</span>
+<span id="cb6-7"><a href="#cb6-7" tabindex="-1"></a>  <span class="at">seed =</span> <span class="dv">20260715</span></span>
+<span id="cb6-8"><a href="#cb6-8" tabindex="-1"></a>)</span>
+<span id="cb6-9"><a href="#cb6-9" tabindex="-1"></a></span>
+<span id="cb6-10"><a href="#cb6-10" tabindex="-1"></a>npde <span class="ot">&lt;-</span> <span class="fu">nm_npde</span>(fit, <span class="at">nsim =</span> <span class="dv">500</span>, <span class="at">seed =</span> <span class="dv">20260715</span>)</span>
+<span id="cb6-11"><a href="#cb6-11" tabindex="-1"></a>npc <span class="ot">&lt;-</span> <span class="fu">nm_npc</span>(fit, <span class="at">nsim =</span> <span class="dv">500</span>, <span class="at">seed =</span> <span class="dv">20260715</span>)</span></code></pre></div>
+<p>A stratified VPC retains the total-population summary and adds
+summaries for each stratum. The GUI generates and saves diagnostic plot
+data once, then reloads the saved representation when revisiting a
+tab.</p>
+<p>Binary categorical and time-to-event models have dedicated VPC
+summaries:</p>
+<div class="sourceCode" id="cb7"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb7-1"><a href="#cb7-1" tabindex="-1"></a>categorical_vpc <span class="ot">&lt;-</span> <span class="fu">nm_vpc_categorical</span>(</span>
+<span id="cb7-2"><a href="#cb7-2" tabindex="-1"></a>  categorical_fit, <span class="at">outcome =</span> <span class="st">&quot;DV&quot;</span>, <span class="at">nsim =</span> <span class="dv">500</span></span>
+<span id="cb7-3"><a href="#cb7-3" tabindex="-1"></a>)</span>
+<span id="cb7-4"><a href="#cb7-4" tabindex="-1"></a></span>
+<span id="cb7-5"><a href="#cb7-5" tabindex="-1"></a>tte_vpc <span class="ot">&lt;-</span> <span class="fu">nm_vpc_tte</span>(</span>
+<span id="cb7-6"><a href="#cb7-6" tabindex="-1"></a>  tte_fit, <span class="at">event =</span> <span class="st">&quot;EVENT&quot;</span>, <span class="at">nsim =</span> <span class="dv">500</span></span>
+<span id="cb7-7"><a href="#cb7-7" tabindex="-1"></a>)</span></code></pre></div>
+</div>
+<div id="bootstrap-and-profile-likelihood" class="section level2">
+<h2>Bootstrap and profile likelihood</h2>
+<div class="sourceCode" id="cb8"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb8-1"><a href="#cb8-1" tabindex="-1"></a>bootstrap <span class="ot">&lt;-</span> <span class="fu">nm_bootstrap</span>(</span>
+<span id="cb8-2"><a href="#cb8-2" tabindex="-1"></a>  fit,</span>
+<span id="cb8-3"><a href="#cb8-3" tabindex="-1"></a>  <span class="at">n =</span> <span class="dv">1000</span>,</span>
+<span id="cb8-4"><a href="#cb8-4" tabindex="-1"></a>  <span class="at">seed =</span> <span class="dv">20260715</span>,</span>
+<span id="cb8-5"><a href="#cb8-5" tabindex="-1"></a>  <span class="at">n_cores =</span> <span class="dv">8</span></span>
+<span id="cb8-6"><a href="#cb8-6" tabindex="-1"></a>)</span>
+<span id="cb8-7"><a href="#cb8-7" tabindex="-1"></a></span>
+<span id="cb8-8"><a href="#cb8-8" tabindex="-1"></a>profile <span class="ot">&lt;-</span> <span class="fu">nm_profile</span>(</span>
+<span id="cb8-9"><a href="#cb8-9" tabindex="-1"></a>  fit,</span>
+<span id="cb8-10"><a href="#cb8-10" tabindex="-1"></a>  <span class="at">parameters =</span> <span class="fu">c</span>(<span class="st">&quot;THETA1&quot;</span>, <span class="st">&quot;OMEGA1&quot;</span>),</span>
+<span id="cb8-11"><a href="#cb8-11" tabindex="-1"></a>  <span class="at">points =</span> <span class="dv">11</span>,</span>
+<span id="cb8-12"><a href="#cb8-12" tabindex="-1"></a>  <span class="at">span =</span> <span class="dv">3</span>,</span>
+<span id="cb8-13"><a href="#cb8-13" tabindex="-1"></a>  <span class="at">level =</span> <span class="fl">0.95</span></span>
+<span id="cb8-14"><a href="#cb8-14" tabindex="-1"></a>)</span></code></pre></div>
+<p>Bootstrap resamples subjects, not rows. Profile likelihood fixes one
+native parameter at each grid point and re-estimates the others. These
+workflows are particularly useful when Hessian uncertainty is asymmetric
+or unreliable.</p>
+</div>
+<div id="stepwise-covariate-modelling" class="section level2">
+<h2>Stepwise covariate modelling</h2>
+<div class="sourceCode" id="cb9"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb9-1"><a href="#cb9-1" tabindex="-1"></a>candidates <span class="ot">&lt;-</span> <span class="fu">data.frame</span>(</span>
+<span id="cb9-2"><a href="#cb9-2" tabindex="-1"></a>  <span class="at">parameter =</span> <span class="fu">c</span>(<span class="st">&quot;CL&quot;</span>, <span class="st">&quot;V&quot;</span>),</span>
+<span id="cb9-3"><a href="#cb9-3" tabindex="-1"></a>  <span class="at">covariate =</span> <span class="fu">c</span>(<span class="st">&quot;WT&quot;</span>, <span class="st">&quot;SEX&quot;</span>),</span>
+<span id="cb9-4"><a href="#cb9-4" tabindex="-1"></a>  <span class="at">form =</span> <span class="fu">c</span>(<span class="st">&quot;power&quot;</span>, <span class="st">&quot;categorical&quot;</span>),</span>
+<span id="cb9-5"><a href="#cb9-5" tabindex="-1"></a>  <span class="at">reference =</span> <span class="fu">c</span>(<span class="dv">70</span>, <span class="cn">NA</span>),</span>
+<span id="cb9-6"><a href="#cb9-6" tabindex="-1"></a>  <span class="at">category =</span> <span class="fu">c</span>(<span class="cn">NA</span>, <span class="dv">1</span>),</span>
+<span id="cb9-7"><a href="#cb9-7" tabindex="-1"></a>  <span class="at">initial =</span> <span class="fu">c</span>(<span class="fl">0.75</span>, <span class="fl">0.1</span>)</span>
+<span id="cb9-8"><a href="#cb9-8" tabindex="-1"></a>)</span>
+<span id="cb9-9"><a href="#cb9-9" tabindex="-1"></a></span>
+<span id="cb9-10"><a href="#cb9-10" tabindex="-1"></a>scm <span class="ot">&lt;-</span> <span class="fu">nm_scm</span>(</span>
+<span id="cb9-11"><a href="#cb9-11" tabindex="-1"></a>  fit,</span>
+<span id="cb9-12"><a href="#cb9-12" tabindex="-1"></a>  candidates,</span>
+<span id="cb9-13"><a href="#cb9-13" tabindex="-1"></a>  <span class="at">direction =</span> <span class="st">&quot;both&quot;</span>,</span>
+<span id="cb9-14"><a href="#cb9-14" tabindex="-1"></a>  <span class="at">p_forward =</span> <span class="fl">0.05</span>,</span>
+<span id="cb9-15"><a href="#cb9-15" tabindex="-1"></a>  <span class="at">p_backward =</span> <span class="fl">0.01</span>,</span>
+<span id="cb9-16"><a href="#cb9-16" tabindex="-1"></a>  <span class="at">max_steps =</span> <span class="dv">20</span></span>
+<span id="cb9-17"><a href="#cb9-17" tabindex="-1"></a>)</span></code></pre></div>
+<p>SCM decisions use nested re-estimation and likelihood-ratio
+thresholds. Keep the complete selection log and review biological
+plausibility rather than treating automated selection as a substitute
+for model judgement.</p>
+</div>
+
+
+
+<!-- code folding -->
+
+
+<!-- dynamically load mathjax for compatibility with self-contained -->
+<script>
+  (function () {
+    var script = document.createElement("script");
+    script.type = "text/javascript";
+    script.src  = "https://mathjax.rstudio.com/latest/MathJax.js?config=TeX-AMS-MML_HTMLorMML";
+    document.getElementsByTagName("head")[0].appendChild(script);
+  })();
+</script>
+
+</body>
+</html>
