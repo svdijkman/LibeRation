@@ -88,6 +88,12 @@ Install LibeRtAD first, then install LibeRation with R 4.1 or newer and a
 C++17 toolchain. Install LibeRties as well to enable persistent local and
 remote job queues.
 
+## AI-assisted development
+
+GPT-5.6 was used as an AI engineering collaborator to help implement and review
+the modelling engines, estimation and simulation workflows, GUI, regression tests, and documentation.
+Scientific direction, architecture, validation criteria, and release decisions remain the responsibility of the project owner.
+
 LibeRation is MIT licensed. The remaining engineering work is tracked in
 [TODO.md](TODO.md).
 Substantial new engine families are planned in
