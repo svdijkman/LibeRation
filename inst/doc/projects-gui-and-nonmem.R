@@ -1,7 +1,6 @@
 ## ----setup, include=FALSE-----------------------------------------------------
 knitr::opts_chunk$set(collapse = TRUE, comment = "#>")
 
-
 ## ----workspace----------------------------------------------------------------
 library(LibeRation)
 
@@ -12,7 +11,6 @@ project <- nm_project_create(
   description = "Example project created from R"
 )
 nm_project_list(workspace)
-
 
 ## ----save-version, eval=FALSE-------------------------------------------------
 # version_id <- nm_project_save(
@@ -38,7 +36,6 @@ nm_project_list(workspace)
 #   list(gof = nm_gof(fit), vpc = nm_vpc(fit, nsim = 200))
 # )
 
-
 ## ----gui, eval=FALSE----------------------------------------------------------
 # liber_gui()
 # 
@@ -49,14 +46,12 @@ nm_project_list(workspace)
 #   data = data
 # )
 
-
 ## ----import-control, eval=FALSE-----------------------------------------------
 # control <- nm_control_read("run001.ctl", strict = FALSE)
 # control$model
 # control$compatibility
 # 
 # fit <- nm_est(control$model, data, method = "FOCEI")
-
 
 ## ----export-control, eval=FALSE-----------------------------------------------
 # text <- nm_control_write(
@@ -69,7 +64,6 @@ nm_project_list(workspace)
 # 
 # nm_control_write(model, file = "exported.ctl", data = "theo.csv")
 
-
 ## ----report, eval=FALSE-------------------------------------------------------
 # report <- nm_report(
 #   fit,
@@ -78,7 +72,6 @@ nm_project_list(workspace)
 #   vpc = vpc,
 #   manifest = TRUE
 # )
-
 
 ## ----report-design, eval=FALSE------------------------------------------------
 # design <- nm_report_design(list(

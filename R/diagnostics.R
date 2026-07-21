@@ -113,6 +113,53 @@ nm_gof <- function(fit) {
   output$IPRED <- individual$IPRED
   output$RES <- output$DV - output$PRED
   output$IRES <- output$DV - output$IPRED
+  if (identical(fit$model$LIK_CONFIG$error, "likelihood")) {
+    output[c("RES", "IRES", "WRES", "IWRES", "CWRES")] <- NA_real_
+    selected <- fit$model$OUTPUT %||% character()
+    generated <- setdiff(selected, names(output))
+    for (name in intersect(generated, names(individual))) {
+      output[[name]] <- individual[[name]]
+    }
+    if (!is.null(fit$model$KALMAN_CONFIG)) {
+      decoded <- nm_kalman_decode(fit, data = fit$data, type = "individual")
+      kalman_columns <- grep("^KF_", names(decoded), value = TRUE)
+      for (name in kalman_columns) output[[name]] <- decoded[[name]]
+      output$KF_STANDARDIZED_INNOVATION <- output$KF_INNOVATION /
+        sqrt(output$KF_INNOVATION_VARIANCE)
+      attr(output, "kalman_log_likelihood") <- attr(decoded, "log_likelihood")
+      attr(output, "residual_note") <- paste(
+        "Ordinary Gaussian WRES/IWRES/CWRES are replaced by one-step-ahead",
+        "Kalman innovations; filtered and smoothed latent states are supplied in KF_* columns."
+      )
+    } else if (!is.null(fit$model$HMM_CONFIG)) {
+      decoded <- nm_hmm_decode(fit, data = fit$data, type = "individual")
+      hmm_columns <- grep("^HMM_", names(decoded), value = TRUE)
+      for (name in hmm_columns) output[[name]] <- decoded[[name]]
+      attr(output, "hmm_log_likelihood") <- attr(decoded, "log_likelihood")
+      state_model <- if (isTRUE(fit$model$HMM_CONFIG$observed_states)) {
+        "an observed continuous-time Markov likelihood"
+      } else "a hidden Markov likelihood"
+      attr(output, "residual_note") <- paste(
+        "Gaussian WRES/IWRES/CWRES are not defined for", state_model,
+        "; filtered state probabilities and classifications are supplied in HMM_* columns."
+      )
+    } else if (!is.null(fit$model$OUTCOMES)) {
+      family <- nm_outcome_diagnostics(fit, predictions = individual)
+      diagnostic_columns <- setdiff(names(family), names(output))
+      for (name in diagnostic_columns) output[[name]] <- family[[name]]
+      attr(output, "outcome_summary") <- attr(family, "summary", exact = TRUE)
+      attr(output, "residual_note") <- paste(
+        "Gaussian WRES/IWRES/CWRES are not defined for the compiled outcome likelihood;",
+        "family-specific expected values, Pearson/deviance residuals and scores are supplied."
+      )
+    } else {
+      attr(output, "residual_note") <- paste(
+        "Gaussian WRES/IWRES/CWRES are not defined for a user likelihood;",
+        "use likelihood-appropriate diagnostics such as categorical or Markov VPCs."
+      )
+    }
+    return(output)
+  }
   dvid <- if ("DVID" %in% names(output)) output$DVID else rep(1L, nrow(output))
   pop_variance <- .nm_residual_variance(fit$model, output$PRED, fit$sigma, dvid)
   ind_variance <- .nm_residual_variance(fit$model, output$IPRED, fit$sigma, dvid)
@@ -170,6 +217,207 @@ nm_gof <- function(fit) {
   for (name in intersect(generated, names(individual))) {
     output[[name]] <- individual[[name]]
   }
+  output
+}
+
+#' Outcome-appropriate diagnostics
+#'
+#' Computes endpoint predictions, conditional variance, observed-category
+#' probability or hazard, Pearson/deviance residuals, Brier/log scores, and
+#' event-model cumulative hazard from a model declared with [nm_outcome()].
+#' Unlike Gaussian CWRES, these quantities retain their natural interpretation
+#' for categorical, count, joint, Markov, and event-time outcomes.
+#'
+#' @param fit An `nm_fit` with first-class `OUTCOMES`.
+#' @param predictions Optional individual prediction table, used internally to
+#'   avoid repeating model propagation.
+#' @return A data frame aligned to the estimation records.
+#' @export
+nm_outcome_diagnostics <- function(fit, predictions = NULL) {
+  if (!inherits(fit, "nm_fit")) .nm_stop("`fit` must be an nm_fit.")
+  outcomes <- fit$model$OUTCOMES
+  if (is.null(outcomes)) .nm_stop("The fitted model has no first-class OUTCOMES declaration.")
+  predictions <- predictions %||% predict(fit, type = "individual")
+  output <- as.data.frame(fit$data)
+  n <- nrow(output)
+  output$OUTCOME <- output$FAMILY <- rep(NA_character_, n)
+  numeric_columns <- c(
+    "EXPECTED", "CONDITIONAL_VARIANCE", "OBSERVED_PROBABILITY", "PRED_CATEGORY",
+    "PEARSON_RESIDUAL", "DEVIANCE_RESIDUAL", "BRIER_SCORE", "LOG_SCORE",
+    "HAZARD", "CUMULATIVE_HAZARD", "MARTINGALE_RESIDUAL"
+  )
+  for (name in numeric_columns) output[[name]] <- NA_real_
+  summaries <- vector("list", length(outcomes))
+  safe_log <- function(value) log(pmax(value, 1e-300))
+  for (endpoint in seq_along(outcomes)) {
+    outcome <- outcomes[[endpoint]]
+    rows <- .nm_outcome_rows(output, outcome, include_mdv = TRUE)
+    if (!length(rows)) next
+    observed <- as.numeric(output$DV[rows])
+    mu <- .nm_outcome_resolve(predictions, outcome$prediction, fit$theta, fit$sigma, rows)
+    family <- outcome$family
+    expected <- variance <- observed_probability <- pred_category <-
+      pearson <- deviance <- brier <- log_score <- rep(NA_real_, length(rows))
+    if (family %in% c("normal", "lognormal", "student_t")) {
+      scale <- pmax(.nm_outcome_resolve(
+        predictions, outcome$scale, fit$theta, fit$sigma, rows
+      ), 1e-12)
+      if (family == "normal") {
+        expected <- mu
+        variance <- scale^2
+      } else if (family == "lognormal") {
+        expected <- pmax(mu, 1e-300) * exp(scale^2 / 2)
+        variance <- (exp(scale^2) - 1) * exp(2 * log(pmax(mu, 1e-300)) + scale^2)
+      } else {
+        expected <- mu
+        variance <- if (outcome$df > 2) scale^2 * outcome$df / (outcome$df - 2) else NA_real_
+      }
+      pearson <- (observed - expected) / sqrt(variance)
+      deviance <- pearson
+    } else if (family == "bernoulli") {
+      expected <- pmin(pmax(mu, 0), 1)
+      variance <- expected * (1 - expected)
+      observed_probability <- ifelse(observed == 1, expected, 1 - expected)
+      pred_category <- as.numeric(expected >= 0.5)
+      pearson <- (observed - expected) / sqrt(pmax(variance, 1e-12))
+      brier <- (observed - expected)^2
+      log_score <- -safe_log(observed_probability)
+    } else if (family %in% c("categorical", "ordinal")) {
+      probability <- vapply(outcome$probabilities, function(symbol) {
+        .nm_outcome_resolve(predictions, symbol, fit$theta, fit$sigma, rows)
+      }, numeric(length(rows)))
+      probability <- pmax(probability, 0)
+      probability <- probability / pmax(rowSums(probability), 1e-300)
+      selected <- match(observed, outcome$categories)
+      valid <- !is.na(selected)
+      observed_probability[valid] <- probability[cbind(which(valid), selected[valid])]
+      pred_category <- outcome$categories[max.col(probability, ties.method = "first")]
+      brier <- rowSums((probability - vapply(outcome$categories, function(category) {
+        as.numeric(observed == category)
+      }, numeric(length(rows))))^2)
+      log_score <- -safe_log(observed_probability)
+    } else if (family %in% c("poisson", "negative_binomial", "binomial",
+                             "zero_inflated_poisson", "hurdle_poisson")) {
+      expected <- pmax(mu, 0)
+      variance <- expected
+      if (family == "negative_binomial") {
+        size <- pmax(.nm_outcome_resolve(
+          predictions, outcome$dispersion, fit$theta, fit$sigma, rows
+        ), 1e-12)
+        variance <- expected + expected^2 / size
+      } else if (family == "binomial") {
+        trials <- pmax(.nm_outcome_resolve(
+          predictions, outcome$trials, fit$theta, fit$sigma, rows
+        ), 0)
+        probability <- pmin(pmax(mu, 0), 1)
+        expected <- trials * probability
+        variance <- trials * probability * (1 - probability)
+      } else if (family %in% c("zero_inflated_poisson", "hurdle_poisson")) {
+        zero <- pmin(pmax(.nm_outcome_resolve(
+          predictions, outcome$zero_probability, fit$theta, fit$sigma, rows
+        ), 0), 1)
+        if (family == "zero_inflated_poisson") {
+          expected <- (1 - zero) * expected
+          variance <- (1 - zero) * mu * (1 + zero * mu)
+        } else {
+          positive_mean <- mu / pmax(1 - exp(-mu), 1e-12)
+          expected <- (1 - zero) * positive_mean
+          second <- (mu + mu^2) / pmax(1 - exp(-mu), 1e-12)
+          variance <- (1 - zero) * second - expected^2
+        }
+      }
+      pearson <- (observed - expected) / sqrt(pmax(variance, 1e-12))
+      deviance <- sign(observed - expected) * sqrt(pmax(
+        2 * (ifelse(observed > 0, observed * log(observed / pmax(expected, 1e-12)), 0) -
+               (observed - expected)), 0
+      ))
+    } else if (family %in% c("tte", "recurrent_event", "competing_risks")) {
+      hazard <- if (family == "competing_risks") {
+        rowSums(vapply(outcome$cause_hazards, function(symbol) {
+          .nm_outcome_resolve(predictions, symbol, fit$theta, fit$sigma, rows)
+        }, numeric(length(rows))))
+      } else mu
+      hazard <- pmax(hazard, 0)
+      output$HAZARD[rows] <- hazard
+      groups <- split(seq_along(rows), interaction(
+        output$.ID_INDEX[rows], if ("DVID" %in% names(output)) output$DVID[rows] else 1,
+        drop = TRUE, lex.order = TRUE
+      ))
+      cumulative <- rep(NA_real_, length(rows))
+      for (group in groups) {
+        order_index <- group[order(output$TIME[rows[group]])]
+        time <- output$TIME[rows[order_index]]
+        cumulative[order_index] <- cumsum(hazard[order_index] * c(0, pmax(diff(time), 0)))
+      }
+      event <- if (family == "competing_risks") as.numeric(observed != 0) else
+        as.numeric(observed == outcome$event)
+      output$CUMULATIVE_HAZARD[rows] <- cumulative
+      output$MARTINGALE_RESIDUAL[rows] <- event - cumulative
+      expected <- hazard
+    } else if (family %in% c("markov", "continuous_time_markov")) {
+      groups <- split(seq_along(rows), interaction(
+        output$.ID_INDEX[rows], if ("DVID" %in% names(output)) output$DVID[rows] else 1,
+        drop = TRUE, lex.order = TRUE
+      ))
+      probability <- matrix(NA_real_, nrow = length(rows), ncol = length(outcome$categories))
+      for (group in groups) {
+        ordered <- group[order(output$TIME[rows[group]])]
+        for (position in seq_along(ordered)) {
+          local <- ordered[[position]]
+          if (position == 1L) {
+            probability[local, ] <- vapply(outcome$initial, function(symbol) {
+              .nm_outcome_resolve(predictions, symbol, fit$theta, fit$sigma, rows[[local]])
+            }, numeric(1))
+          } else {
+            previous <- match(observed[ordered[[position - 1L]]], outcome$categories)
+            if (family == "markov") {
+              probability[local, ] <- vapply(outcome$transition[previous, ], function(symbol) {
+                .nm_outcome_resolve(predictions, symbol, fit$theta, fit$sigma, rows[[local]])
+              }, numeric(1))
+            } else {
+              rates <- vapply(outcome$rates, function(symbol) {
+                .nm_outcome_resolve(predictions, symbol, fit$theta, fit$sigma, rows[[local]])
+              }, numeric(1))
+              total <- max(sum(rates), 1e-12)
+              dt <- max(output$TIME[rows[[local]]] -
+                          output$TIME[rows[[ordered[[position - 1L]]]]], 0)
+              p01 <- rates[[1L]] / total * (1 - exp(-total * dt))
+              p10 <- rates[[2L]] / total * (1 - exp(-total * dt))
+              probability[local, ] <- if (previous == 1L) c(1 - p01, p01) else c(p10, 1 - p10)
+            }
+          }
+        }
+      }
+      probability <- pmax(probability, 0)
+      probability <- probability / pmax(rowSums(probability), 1e-300)
+      selected <- match(observed, outcome$categories)
+      valid <- !is.na(selected)
+      observed_probability[valid] <- probability[cbind(which(valid), selected[valid])]
+      pred_category <- outcome$categories[max.col(probability, ties.method = "first")]
+      brier <- rowSums((probability - vapply(outcome$categories, function(category) {
+        as.numeric(observed == category)
+      }, numeric(length(rows))))^2)
+      log_score <- -safe_log(observed_probability)
+    }
+    output$OUTCOME[rows] <- outcome$name
+    output$FAMILY[rows] <- family
+    output$EXPECTED[rows] <- expected
+    output$CONDITIONAL_VARIANCE[rows] <- variance
+    output$OBSERVED_PROBABILITY[rows] <- observed_probability
+    output$PRED_CATEGORY[rows] <- pred_category
+    output$PEARSON_RESIDUAL[rows] <- pearson
+    output$DEVIANCE_RESIDUAL[rows] <- deviance
+    output$BRIER_SCORE[rows] <- brier
+    output$LOG_SCORE[rows] <- log_score
+    summaries[[endpoint]] <- data.frame(
+      outcome = outcome$name, family = family, records = length(rows),
+      mean_log_score = if (any(is.finite(log_score))) mean(log_score, na.rm = TRUE) else NA_real_,
+      mean_brier_score = if (any(is.finite(brier))) mean(brier, na.rm = TRUE) else NA_real_,
+      stringsAsFactors = FALSE
+    )
+  }
+  attr(output, "summary") <- do.call(rbind, summaries[lengths(summaries) > 0L])
+  class(output) <- c("nm_outcome_diagnostics", class(output))
   output
 }
 
@@ -974,10 +1222,10 @@ nm_npde <- function(fit, nsim = 200L, seed = 20260713L, ridge = 1e-8) {
 
 #' Categorical visual predictive check
 #'
-#' The current engine supports binary categorical VPCs for models whose `F`
-#' is the conditional probability of the non-reference outcome. Random effects
-#' are simulated by the C++ engine and Bernoulli outcomes are then drawn from
-#' those probabilities.
+#' First-class Bernoulli, categorical, ordinal, and Markov outcomes use their
+#' declared probability vectors and can contain any number of categories. A
+#' legacy binary user likelihood remains supported when `F` is the probability
+#' of the non-reference category.
 #'
 #' @param fit An `nm_fit`.
 #' @param outcome Binary observed outcome column.
@@ -999,47 +1247,72 @@ nm_vpc_categorical <- function(fit, outcome = "DV", nsim = 200L, breaks = NULL,
   observed_rows <- data$EVID == 0L & data$MDV == 0L & !is.na(data[[outcome]])
   observed <- data[observed_rows, , drop = FALSE]
   categories <- sort(unique(observed[[outcome]]))
-  if (length(categories) != 2L) {
-    .nm_stop("Automatic categorical VPC currently requires exactly two observed categories.")
+  declared <- NULL
+  if (!is.null(fit$model$OUTCOMES)) {
+    candidates <- Filter(function(value) {
+      value$family %in% c("bernoulli", "categorical", "ordinal", "markov",
+                          "continuous_time_markov")
+    }, fit$model$OUTCOMES)
+    if (length(candidates) == 1L) declared <- candidates[[1L]]
+    if (length(candidates) > 1L && "DVID" %in% names(observed)) {
+      dvid <- unique(observed$DVID)
+      if (length(dvid) == 1L) {
+        matching <- Filter(function(value) identical(as.numeric(value$dvid), as.numeric(dvid)), candidates)
+        if (length(matching) == 1L) declared <- matching[[1L]]
+      }
+    }
+  }
+  if (!is.null(declared)) categories <- declared$categories %||% c(0, 1)
+  if (length(categories) < 2L) .nm_stop("Categorical VPC requires at least two categories.")
+  if (is.null(declared) && length(categories) != 2L) {
+    .nm_stop("A multicategory VPC requires a first-class categorical OUTCOMES declaration.")
   }
   breaks <- .nm_vpc_breaks(observed$TIME, breaks)
   observed$BIN <- cut(observed$TIME, breaks, include.lowest = TRUE)
-  observed_summary <- do.call(rbind, lapply(split(observed, observed$BIN, drop = TRUE), function(frame) {
-    data.frame(
-      BIN = as.character(frame$BIN[[1L]]), TIME = stats::median(frame$TIME),
-      N = nrow(frame), CATEGORY = as.character(categories[[2L]]),
-      PROPORTION = mean(frame[[outcome]] == categories[[2L]]), stringsAsFactors = FALSE
-    )
-  }))
+  observed_summary <- do.call(rbind, lapply(
+    split(observed, observed$BIN, drop = TRUE), function(frame) do.call(rbind, lapply(
+      categories, function(category) data.frame(
+        BIN = as.character(frame$BIN[[1L]]), TIME = stats::median(frame$TIME),
+        N = nrow(frame), CATEGORY = as.character(category),
+        PROPORTION = mean(frame[[outcome]] == category), stringsAsFactors = FALSE
+      )
+    ))
+  ))
   simulated <- nm_simulate(
     fit$model, fit$data, theta = fit$theta, sigma = fit$sigma, omega = fit$omega,
-    nsim = nsim, random_effects = TRUE, residual = FALSE,
+    nsim = nsim, random_effects = TRUE, residual = !is.null(declared),
     sample_mixture = TRUE, seed = seed
   )
   simulated <- simulated[rep(observed_rows, times = nsim), , drop = FALSE]
-  probability <- as.numeric(simulated$IPRED)
-  if (mean(!is.finite(probability) | probability < -1e-6 | probability > 1 + 1e-6) > 0.01) {
-    .nm_stop("Categorical VPC requires F/IPRED to represent a probability in [0, 1].")
+  if (is.null(declared)) {
+    probability <- as.numeric(simulated$IPRED)
+    if (mean(!is.finite(probability) | probability < -1e-6 | probability > 1 + 1e-6) > 0.01) {
+      .nm_stop("Categorical VPC requires F/IPRED to represent a probability in [0, 1].")
+    }
+    probability <- pmin(pmax(probability, 0), 1)
+    set.seed(as.integer(seed) + 1L)
+    simulated$DV <- ifelse(stats::runif(nrow(simulated)) <= probability,
+                           categories[[2L]], categories[[1L]])
   }
-  probability <- pmin(pmax(probability, 0), 1)
-  set.seed(as.integer(seed) + 1L)
-  simulated$CATEGORY <- ifelse(stats::runif(nrow(simulated)) <= probability,
-                               categories[[2L]], categories[[1L]])
+  simulated$CATEGORY <- simulated[[outcome]]
   simulated$BIN <- cut(simulated$TIME, breaks, include.lowest = TRUE)
-  per_simulation <- do.call(rbind, lapply(split(
-    simulated, list(simulated$SIM, simulated$BIN), drop = TRUE
-  ), function(frame) data.frame(
-    SIM = frame$SIM[[1L]], BIN = as.character(frame$BIN[[1L]]),
-    TIME = stats::median(frame$TIME),
-    PROPORTION = mean(frame$CATEGORY == categories[[2L]])
-  )))
+  per_simulation <- do.call(rbind, lapply(
+    split(simulated, list(simulated$SIM, simulated$BIN), drop = TRUE),
+    function(frame) do.call(rbind, lapply(categories, function(category) data.frame(
+      SIM = frame$SIM[[1L]], BIN = as.character(frame$BIN[[1L]]),
+      TIME = stats::median(frame$TIME), CATEGORY = as.character(category),
+      PROPORTION = mean(frame$CATEGORY == category), stringsAsFactors = FALSE
+    )))
+  ))
   alpha <- (1 - level) / 2
-  intervals <- do.call(rbind, lapply(split(per_simulation, per_simulation$BIN), function(frame) {
+  intervals <- do.call(rbind, lapply(split(
+    per_simulation, list(per_simulation$BIN, per_simulation$CATEGORY), drop = TRUE
+  ), function(frame) {
     interval <- stats::quantile(frame$PROPORTION, c(alpha, 0.5, 1 - alpha),
                                 names = FALSE, na.rm = TRUE)
     data.frame(
       BIN = frame$BIN[[1L]], TIME = stats::median(frame$TIME),
-      CATEGORY = as.character(categories[[2L]]), lower = interval[[1L]],
+      CATEGORY = frame$CATEGORY[[1L]], lower = interval[[1L]],
       median = interval[[2L]], upper = interval[[3L]], stringsAsFactors = FALSE
     )
   }))
@@ -1048,6 +1321,88 @@ nm_vpc_categorical <- function(fit, outcome = "DV", nsim = 200L, breaks = NULL,
     per_simulation = per_simulation, categories = categories, outcome = outcome,
     breaks = breaks, level = level, nsim = nsim, seed = seed
   ), class = "nm_vpc_categorical")
+}
+
+#' Count visual predictive check
+#'
+#' Summarizes the mean, variance, zero fraction, median, and upper count
+#' quantile in time bins for first-class Poisson, negative-binomial, binomial,
+#' ZIP, and hurdle models.
+#'
+#' @param fit An `nm_fit`.
+#' @param outcome Count column, normally `DV`.
+#' @param dvid Optional endpoint `DVID` in a joint model.
+#' @param nsim Number of simulations.
+#' @param breaks Optional time bins.
+#' @param level Simulation interval.
+#' @param seed RNG seed.
+#' @return An `nm_vpc_count`.
+#' @export
+nm_vpc_count <- function(fit, outcome = "DV", dvid = NULL, nsim = 200L,
+                         breaks = NULL, level = 0.9, seed = 20260713L) {
+  if (!inherits(fit, "nm_fit")) .nm_stop("`fit` must be an nm_fit.")
+  if (is.null(fit$model$OUTCOMES)) .nm_stop("Count VPC requires first-class OUTCOMES.")
+  if (!is.null(dvid) && (length(dvid) != 1L || !is.finite(dvid))) dvid <- NULL
+  count_families <- c("poisson", "negative_binomial", "binomial",
+                      "zero_inflated_poisson", "hurdle_poisson")
+  candidates <- Filter(function(value) value$family %in% count_families,
+                       fit$model$OUTCOMES)
+  if (!is.null(dvid)) candidates <- Filter(function(value) {
+    identical(as.numeric(value$dvid), as.numeric(dvid))
+  }, candidates)
+  if (length(candidates) != 1L) {
+    .nm_stop("Select a unique count endpoint with `dvid`.")
+  }
+  endpoint <- candidates[[1L]]
+  nsim <- as.integer(nsim)
+  if (is.na(nsim) || nsim < 20L) .nm_stop("`nsim` must be at least 20.")
+  if (!is.finite(level) || level <= 0 || level >= 1) .nm_stop("`level` must lie between zero and one.")
+  data <- as.data.frame(fit$data)
+  rows <- data$EVID == 0L & data$MDV == 0L & is.finite(data[[outcome]])
+  if (!is.null(endpoint$dvid)) rows <- rows & data$DVID == endpoint$dvid
+  observed <- data[rows, , drop = FALSE]
+  if (!nrow(observed)) .nm_stop("No observed count records were found.")
+  breaks <- .nm_vpc_breaks(observed$TIME, breaks)
+  summarize <- function(frame) data.frame(
+    BIN = as.character(frame$BIN[[1L]]), TIME = stats::median(frame$TIME),
+    N = nrow(frame), MEAN = mean(frame[[outcome]]),
+    VARIANCE = if (nrow(frame) > 1L) stats::var(frame[[outcome]]) else 0,
+    ZERO = mean(frame[[outcome]] == 0),
+    Q50 = unname(stats::quantile(frame[[outcome]], 0.5, type = 1)),
+    Q90 = unname(stats::quantile(frame[[outcome]], 0.9, type = 1)),
+    stringsAsFactors = FALSE
+  )
+  observed$BIN <- cut(observed$TIME, breaks, include.lowest = TRUE)
+  observed_summary <- do.call(rbind, lapply(split(observed, observed$BIN, drop = TRUE), summarize))
+  simulated <- nm_simulate(
+    fit$model, fit$data, theta = fit$theta, sigma = fit$sigma, omega = fit$omega,
+    nsim = nsim, random_effects = TRUE, residual = TRUE,
+    sample_mixture = TRUE, seed = seed
+  )
+  simulated <- simulated[rep(rows, times = nsim), , drop = FALSE]
+  simulated$BIN <- cut(simulated$TIME, breaks, include.lowest = TRUE)
+  per_simulation <- do.call(rbind, lapply(split(
+    simulated, list(simulated$SIM, simulated$BIN), drop = TRUE
+  ), function(frame) cbind(SIM = frame$SIM[[1L]], summarize(frame))))
+  measures <- c("MEAN", "VARIANCE", "ZERO", "Q50", "Q90")
+  alpha <- (1 - level) / 2
+  intervals <- do.call(rbind, lapply(split(per_simulation, per_simulation$BIN), function(frame) {
+    row <- data.frame(BIN = frame$BIN[[1L]], TIME = stats::median(frame$TIME))
+    for (measure in measures) {
+      interval <- stats::quantile(frame[[measure]], c(alpha, 0.5, 1 - alpha),
+                                  names = FALSE, na.rm = TRUE)
+      row[[paste0(measure, "_lower")]] <- interval[[1L]]
+      row[[paste0(measure, "_median")]] <- interval[[2L]]
+      row[[paste0(measure, "_upper")]] <- interval[[3L]]
+    }
+    row
+  }))
+  structure(list(
+    observed = observed_summary, simulated = intervals,
+    per_simulation = per_simulation, outcome = outcome, dvid = endpoint$dvid,
+    family = endpoint$family, breaks = breaks, level = level,
+    nsim = nsim, seed = seed
+  ), class = "nm_vpc_count")
 }
 
 .nm_km_at <- function(time, event, grid) {
@@ -1108,13 +1463,20 @@ nm_vpc_tte <- function(fit, event = "DV", nsim = 200L, level = 0.9,
   observed_curve <- data.frame(
     TIME = grid, SURVIVAL = .nm_km_at(subject_records$TIME, subject_records$EVENT, grid)
   )
+  declared <- NULL
+  if (!is.null(fit$model$OUTCOMES)) {
+    candidates <- Filter(function(value) {
+      value$family %in% c("tte", "competing_risks")
+    }, fit$model$OUTCOMES)
+    if (length(candidates) == 1L) declared <- candidates[[1L]]
+  }
   simulated <- nm_simulate(
     fit$model, fit$data, theta = fit$theta, sigma = fit$sigma, omega = fit$omega,
-    nsim = nsim, random_effects = TRUE, residual = FALSE,
+    nsim = nsim, random_effects = TRUE, residual = !is.null(declared),
     sample_mixture = TRUE, seed = seed
   )
   simulated <- simulated[rep(rows, times = nsim), , drop = FALSE]
-  if (any(!is.finite(simulated$IPRED) | simulated$IPRED < 0)) {
+  if (is.null(declared) && any(!is.finite(simulated$IPRED) | simulated$IPRED < 0)) {
     .nm_stop("TTE VPC requires F/IPRED to be a finite non-negative hazard.")
   }
   set.seed(as.integer(seed) + 1L)
@@ -1124,9 +1486,14 @@ nm_vpc_tte <- function(fit, event = "DV", nsim = 200L, level = 0.9,
     sample_subjects <- split(sample, sample$.ID_INDEX)
     records <- do.call(rbind, lapply(sample_subjects, function(frame) {
       frame <- frame[order(frame$TIME), , drop = FALSE]
-      delta <- c(0, pmax(diff(frame$TIME), 0))
-      probability <- 1 - exp(-pmax(frame$IPRED, 0) * delta)
-      event_rows <- which(stats::runif(nrow(frame)) <= probability)
+      event_rows <- if (!is.null(declared)) {
+        if (declared$family == "competing_risks") which(frame[[event]] != 0) else
+          which(frame[[event]] == declared$event)
+      } else {
+        delta <- c(0, pmax(diff(frame$TIME), 0))
+        probability <- 1 - exp(-pmax(frame$IPRED, 0) * delta)
+        which(stats::runif(nrow(frame)) <= probability)
+      }
       data.frame(
         TIME = if (length(event_rows)) frame$TIME[[event_rows[[1L]]]] else max(frame$TIME),
         EVENT = as.integer(length(event_rows) > 0L)
@@ -1146,6 +1513,172 @@ nm_vpc_tte <- function(fit, event = "DV", nsim = 200L, level = 0.9,
     per_simulation = curves, event = event, level = level,
     nsim = nsim, seed = seed
   ), class = "nm_vpc_tte")
+}
+
+.nm_competing_curve <- function(records, causes, grid) {
+  event_times <- sort(unique(records$TIME[records$CAUSE != 0]))
+  survival <- 1
+  cumulative <- stats::setNames(numeric(length(causes)), as.character(causes))
+  history <- matrix(0, nrow = length(event_times), ncol = length(causes),
+                    dimnames = list(NULL, as.character(causes)))
+  for (index in seq_along(event_times)) {
+    time <- event_times[[index]]
+    at_risk <- sum(records$TIME >= time)
+    if (at_risk > 0L) {
+      events <- vapply(causes, function(cause) {
+        sum(records$TIME == time & records$CAUSE == cause)
+      }, numeric(1))
+      cumulative <- cumulative + survival * events / at_risk
+      survival <- survival * (1 - sum(events) / at_risk)
+    }
+    history[index, ] <- cumulative
+  }
+  if (!length(event_times)) history <- matrix(0, nrow = 1L, ncol = length(causes),
+                                             dimnames = list(NULL, as.character(causes)))
+  do.call(rbind, lapply(seq_along(causes), function(column) {
+    position <- findInterval(grid, event_times)
+    value <- if (!length(event_times)) rep(0, length(grid)) else
+      ifelse(position == 0L, 0, history[pmax(position, 1L), column])
+    data.frame(TIME = grid, CAUSE = as.character(causes[[column]]), CIF = value,
+               stringsAsFactors = FALSE)
+  }))
+}
+
+#' Competing-risk visual predictive check
+#'
+#' Uses Aalen-Johansen cumulative incidence curves for every declared cause and
+#' compares them with simulation intervals from a first-class
+#' `competing_risks` outcome.
+#'
+#' @param fit An `nm_fit`.
+#' @param event Cause-code column (`0` denotes no event/censoring).
+#' @param dvid Optional joint-endpoint `DVID`.
+#' @param nsim Number of simulations.
+#' @param level Simulation interval.
+#' @param seed RNG seed.
+#' @return An `nm_vpc_competing`.
+#' @export
+nm_vpc_competing <- function(fit, event = "DV", dvid = NULL, nsim = 200L,
+                             level = 0.9, seed = 20260713L) {
+  if (!inherits(fit, "nm_fit")) .nm_stop("`fit` must be an nm_fit.")
+  if (!is.null(dvid) && (length(dvid) != 1L || !is.finite(dvid))) dvid <- NULL
+  candidates <- Filter(function(value) value$family == "competing_risks",
+                       fit$model$OUTCOMES %||% list())
+  if (!is.null(dvid)) candidates <- Filter(function(value) {
+    identical(as.numeric(value$dvid), as.numeric(dvid))
+  }, candidates)
+  if (length(candidates) != 1L) .nm_stop("Select a unique competing-risk endpoint with `dvid`.")
+  endpoint <- candidates[[1L]]
+  nsim <- as.integer(nsim)
+  if (is.na(nsim) || nsim < 20L) .nm_stop("`nsim` must be at least 20.")
+  data <- as.data.frame(fit$data)
+  rows <- data$EVID == 0L & data$MDV == 0L & is.finite(data[[event]])
+  if (!is.null(endpoint$dvid)) rows <- rows & data$DVID == endpoint$dvid
+  observed <- data[rows, , drop = FALSE]
+  records <- function(frame) do.call(rbind, lapply(split(frame, frame$.ID_INDEX), function(subject) {
+    subject <- subject[order(subject$TIME), , drop = FALSE]
+    event_row <- which(subject[[event]] != 0)[1L]
+    if (is.na(event_row)) event_row <- integer()
+    data.frame(
+      TIME = if (length(event_row)) subject$TIME[[event_row]] else max(subject$TIME),
+      CAUSE = if (length(event_row)) subject[[event]][[event_row]] else 0
+    )
+  }))
+  grid <- sort(unique(observed$TIME))
+  observed_curve <- .nm_competing_curve(records(observed), endpoint$categories, grid)
+  simulated <- nm_simulate(
+    fit$model, fit$data, theta = fit$theta, sigma = fit$sigma, omega = fit$omega,
+    nsim = nsim, random_effects = TRUE, residual = TRUE,
+    sample_mixture = TRUE, seed = seed
+  )
+  simulated <- simulated[rep(rows, times = nsim), , drop = FALSE]
+  curves <- do.call(rbind, lapply(seq_len(nsim), function(index) {
+    curve <- .nm_competing_curve(
+      records(simulated[simulated$SIM == index, , drop = FALSE]),
+      endpoint$categories, grid
+    )
+    curve$SIM <- index
+    curve
+  }))
+  alpha <- (1 - level) / 2
+  intervals <- do.call(rbind, lapply(split(
+    curves, list(curves$CAUSE, curves$TIME), drop = TRUE
+  ), function(frame) {
+    interval <- stats::quantile(frame$CIF, c(alpha, 0.5, 1 - alpha), names = FALSE)
+    data.frame(
+      TIME = frame$TIME[[1L]], CAUSE = frame$CAUSE[[1L]],
+      lower = interval[[1L]], median = interval[[2L]], upper = interval[[3L]],
+      stringsAsFactors = FALSE
+    )
+  }))
+  intervals <- intervals[order(as.numeric(intervals$CAUSE), intervals$TIME), , drop = FALSE]
+  structure(list(
+    observed = observed_curve, simulated = intervals, per_simulation = curves,
+    event = event, dvid = endpoint$dvid, causes = endpoint$categories,
+    level = level, nsim = nsim, seed = seed
+  ), class = "nm_vpc_competing")
+}
+
+#' Recurrent-event visual predictive check
+#'
+#' Compares the observed mean cumulative event function with predictive
+#' intervals from a first-class `recurrent_event` outcome.
+#'
+#' @param fit An `nm_fit`.
+#' @param event Event-indicator column.
+#' @param dvid Optional joint-endpoint `DVID`.
+#' @param nsim Number of simulations.
+#' @param level Simulation interval.
+#' @param seed RNG seed.
+#' @return An `nm_vpc_recurrent`.
+#' @export
+nm_vpc_recurrent <- function(fit, event = "DV", dvid = NULL, nsim = 200L,
+                             level = 0.9, seed = 20260713L) {
+  if (!inherits(fit, "nm_fit")) .nm_stop("`fit` must be an nm_fit.")
+  if (!is.null(dvid) && (length(dvid) != 1L || !is.finite(dvid))) dvid <- NULL
+  candidates <- Filter(function(value) value$family == "recurrent_event",
+                       fit$model$OUTCOMES %||% list())
+  if (!is.null(dvid)) candidates <- Filter(function(value) {
+    identical(as.numeric(value$dvid), as.numeric(dvid))
+  }, candidates)
+  if (length(candidates) != 1L) .nm_stop("Select a unique recurrent-event endpoint with `dvid`.")
+  endpoint <- candidates[[1L]]
+  nsim <- as.integer(nsim)
+  if (is.na(nsim) || nsim < 20L) .nm_stop("`nsim` must be at least 20.")
+  data <- as.data.frame(fit$data)
+  rows <- data$EVID == 0L & data$MDV == 0L & is.finite(data[[event]])
+  if (!is.null(endpoint$dvid)) rows <- rows & data$DVID == endpoint$dvid
+  observed <- data[rows, , drop = FALSE]
+  grid <- sort(unique(observed$TIME))
+  mean_cumulative <- function(frame) {
+    subjects <- split(frame, frame$.ID_INDEX)
+    curves <- vapply(subjects, function(subject) vapply(grid, function(time) {
+      sum(subject[[event]][subject$TIME <= time] == endpoint$event)
+    }, numeric(1)), numeric(length(grid)))
+    if (is.null(dim(curves))) curves <- matrix(curves, ncol = 1L)
+    rowMeans(curves)
+  }
+  observed_curve <- data.frame(TIME = grid, MEAN_CUMULATIVE = mean_cumulative(observed))
+  simulated <- nm_simulate(
+    fit$model, fit$data, theta = fit$theta, sigma = fit$sigma, omega = fit$omega,
+    nsim = nsim, random_effects = TRUE, residual = TRUE,
+    sample_mixture = TRUE, seed = seed
+  )
+  simulated <- simulated[rep(rows, times = nsim), , drop = FALSE]
+  curves <- vapply(seq_len(nsim), function(index) {
+    mean_cumulative(simulated[simulated$SIM == index, , drop = FALSE])
+  }, numeric(length(grid)))
+  alpha <- (1 - level) / 2
+  intervals <- t(apply(curves, 1L, stats::quantile,
+                       probs = c(alpha, 0.5, 1 - alpha), names = FALSE))
+  simulated_curve <- data.frame(
+    TIME = grid, lower = intervals[, 1L], median = intervals[, 2L], upper = intervals[, 3L]
+  )
+  structure(list(
+    observed = observed_curve, simulated = simulated_curve,
+    per_simulation = curves, event = event, dvid = endpoint$dvid,
+    level = level, nsim = nsim, seed = seed
+  ), class = "nm_vpc_recurrent")
 }
 
 #' Subject-level nonparametric bootstrap

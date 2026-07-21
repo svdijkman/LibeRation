@@ -29,6 +29,18 @@
     .Call(`_LibeRation_liberation_engine_simulate`, engine_pointer, data, theta, eta, sigma)
 }
 
+.liberation_engine_hmm_filter <- function(engine_pointer, data, theta, eta, sigma) {
+    .Call(`_LibeRation_liberation_engine_hmm_filter`, engine_pointer, data, theta, eta, sigma)
+}
+
+.liberation_engine_kalman_filter <- function(engine_pointer, data, theta, eta, sigma) {
+    .Call(`_LibeRation_liberation_engine_kalman_filter`, engine_pointer, data, theta, eta, sigma)
+}
+
+.liberation_engine_kalman_simulate <- function(engine_pointer, data, theta, eta, sigma, process_normals, observation_normals) {
+    .Call(`_LibeRation_liberation_engine_kalman_simulate`, engine_pointer, data, theta, eta, sigma, process_normals, observation_normals)
+}
+
 .liberation_engine_derivative <- function(engine_pointer, data, row, subject, time, state, theta, eta, sigma) {
     .Call(`_LibeRation_liberation_engine_derivative`, engine_pointer, data, row, subject, time, state, theta, eta, sigma)
 }

@@ -117,7 +117,7 @@
     return(list(
       loaded = FALSE, name = "Untitled model", advan = "--", trans = "--",
       solver = "auto", language = "R", pred = "# Define a model to begin",
-      error = "Y = F", des = "", compartments = list(), flows = list(),
+      error = "Y = F", des = "", alg = "", compartments = list(), flows = list(),
       theta = list(), omega = list(), sigma = list(), n_theta = 0L,
       n_eta = 0L, n_sigma = 0L, n_state = 0L, input = character(),
       output = character(), outputs = list(),
@@ -164,6 +164,30 @@
     pred = model$PRED,
     error = model$ERROR,
     des = model$DES,
+    alg = model$ALG %||% "",
+    experimental = if (isTRUE(model$EXPERIMENTAL$enabled)) list(
+      enabled = TRUE, strict = isTRUE(model$EXPERIMENTAL$strict),
+      label = model$EXPERIMENTAL$label %||% "",
+      features = unname(model$EXPERIMENTAL$features %||% character())
+    ) else NULL,
+    dde = if (is.null(model$DDE_CONFIG)) NULL else list(
+      step = model$DDE_CONFIG$step, interpolation = model$DDE_CONFIG$interpolation,
+      lag_count = length(model$DDE_CONFIG$lags),
+      delays = unname(vapply(model$DDE_CONFIG$lags, `[[`, character(1), "delay"))
+    ),
+    dae = if (is.null(model$DAE_CONFIG)) NULL else list(
+      variables = unname(model$DAE_CONFIG$variables),
+      tolerance = model$DAE_CONFIG$tolerance, maxit = model$DAE_CONFIG$maxit,
+      sparse = !is.null(model$DAE_CONFIG$sparsity)
+    ),
+    components = unname(lapply(model$COMPONENTS %||% list(), function(value) list(
+      name = value$name, type = value$type, scope = value$scope %||% "pred",
+      outputs = unname(value$outputs), hash = value$hash
+    ))),
+    qsp = if (is.null(model$QSP_SYSTEM)) NULL else list(
+      species = unname(model$QSP_SYSTEM$species),
+      reactions = ncol(model$QSP_SYSTEM$stoichiometry)
+    ),
     compartments = if (nrow(compartments)) {
       lapply(seq_len(nrow(compartments)), function(i) list(
         id = compartments$id[[i]], name = compartments$name[[i]]
@@ -176,6 +200,47 @@
     omega = lapply(seq_len(nrow(model$OMEGAS)), function(i) as.list(model$OMEGAS[i, , drop = FALSE])),
     sigma = lapply(seq_len(nrow(model$SIGMAS)), function(i) as.list(model$SIGMAS[i, , drop = FALSE])),
     omega_structure = model$LIK_CONFIG$omega %||% "diagonal",
+    likelihood_type = model$LIK_CONFIG$error %||% model$ERROR_TYPE %||% "none",
+    outcomes = if (is.null(model$OUTCOMES)) list() else lapply(model$OUTCOMES, function(value) list(
+      name = value$name, family = value$family, dvid = value$dvid,
+      prediction = value$prediction,
+      categories = unname(value$categories %||% numeric()),
+      generated_error = isTRUE(model$outcome_error_generated)
+    )),
+    hmm = if (is.null(model$HMM_CONFIG)) NULL else list(
+      states = unname((attr(model$HMM_CONFIG, "semi_markov", exact = TRUE) %||%
+        list(states = model$HMM_CONFIG$states))$states),
+      model_type = if (inherits(model$HMM_CONFIG, "nm_factorial_hmm_config")) {
+        "factorial hidden Markov"
+      } else if (inherits(model$HMM_CONFIG, "nm_hsmm_config")) {
+        "hidden semi-Markov"
+      } else if (identical(model$HMM_CONFIG$transition_type %||% "discrete", "continuous")) {
+        "continuous-time hidden Markov"
+      } else "hidden Markov",
+      transition_type = model$HMM_CONFIG$transition_type %||% "discrete",
+      initial_scale = model$HMM_CONFIG$initial_scale,
+      transition_scale = model$HMM_CONFIG$transition_scale,
+      rate_scale = model$HMM_CONFIG$rate_scale,
+      emission_scale = model$HMM_CONFIG$emission_scale,
+      by_dvid = isTRUE(model$HMM_CONFIG$by_dvid)
+    ),
+    kalman = if (is.null(model$KALMAN_CONFIG)) NULL else list(
+      states = unname(model$KALMAN_CONFIG$states),
+      baseline = model$KALMAN_CONFIG$baseline,
+      by_dvid = isTRUE(model$KALMAN_CONFIG$by_dvid),
+      filter = model$KALMAN_CONFIG$filter %||% "linear",
+      dynamics = model$KALMAN_CONFIG$dynamics %||% "discrete",
+      model_type = if (inherits(model$KALMAN_CONFIG, "nm_switching_state_space_config")) {
+        "switching state-space"
+      } else "state-space",
+      regimes = unname(model$KALMAN_CONFIG$switching$regimes %||% character())
+    ),
+    random_effects = if (is.null(model$RE_CONFIG)) NULL else list(
+      cluster = model$RE_CONFIG$cluster %||% "auto",
+      blocks = unname(lapply(model$RE_CONFIG$blocks, function(block) list(
+        name = block$name, column = block$column, etas = unname(block$etas)
+      )))
+    ),
     priors = .liber_gui_rows(model$LIK_CONFIG$priors %||% data.frame()),
     n_theta = nrow(model$THETAS),
     n_eta = model$n_eta,
@@ -245,6 +310,16 @@
 
 .liber_ai_default_model <- function() {
   .liber_ai_default_help_model()
+}
+
+.liber_ai_context_setting <- function(value, default = "auto") {
+  value <- as.character(value %||% default)[[1L]]
+  if (identical(tolower(value), "auto")) return("auto")
+  numeric_value <- suppressWarnings(as.integer(value))
+  if (is.na(numeric_value) || numeric_value < 1024L || numeric_value > 16384L) {
+    return(default)
+  }
+  as.character(numeric_value)
 }
 
 .liber_ai_models <- function() {
@@ -326,11 +401,12 @@
 
 .liber_client_settings_read <- function(workspace) {
   path <- .liber_client_settings_path(workspace)
-  defaults <- list(version = 4L, selected_queue = "local", remotes = list(),
+  defaults <- list(version = 5L, selected_queue = "local", remotes = list(),
                    pending_jobs = list(), ai = list(
                      activated = FALSE, consented = FALSE,
                      help_model = .liber_ai_default_help_model(),
                      report_model = .liber_ai_default_report_model(),
+                     help_context = "auto", report_context = "auto",
                      model = .liber_ai_default_help_model()
                    ))
   if (!file.exists(path)) return(defaults)
@@ -357,13 +433,20 @@
   report_model <- as.character(ai$report_model %||%
     defaults$ai$report_model)[[1L]]
   if (!nzchar(report_model)) report_model <- defaults$ai$report_model
+  help_context <- .liber_ai_context_setting(
+    ai$help_context, defaults$ai$help_context
+  )
+  report_context <- .liber_ai_context_setting(
+    ai$report_context, defaults$ai$report_context
+  )
   list(
-    version = 4L,
+    version = 5L,
     selected_queue = as.character(value$selected_queue %||% "local")[[1L]],
     remotes = remotes, pending_jobs = pending_jobs,
     ai = list(
       activated = isTRUE(ai$activated), consented = isTRUE(ai$consented),
       help_model = help_model, report_model = report_model,
+      help_context = help_context, report_context = report_context,
       model = help_model
     )
   )
@@ -374,7 +457,7 @@
                                          ai = list()) {
   path <- .liber_client_settings_path(workspace)
   .nm_workspace_atomic_save(
-    list(version = 4L, selected_queue = as.character(selected_queue)[[1L]],
+    list(version = 5L, selected_queue = as.character(selected_queue)[[1L]],
          remotes = remotes, pending_jobs = pending_jobs,
          ai = list(
            activated = isTRUE(ai$activated), consented = isTRUE(ai$consented),
@@ -382,6 +465,8 @@
              .liber_ai_default_help_model())[[1L]],
            report_model = as.character(ai$report_model %||%
              .liber_ai_default_report_model())[[1L]],
+           help_context = .liber_ai_context_setting(ai$help_context),
+           report_context = .liber_ai_context_setting(ai$report_context),
            model = as.character(ai$help_model %||% ai$model %||%
              .liber_ai_default_help_model())[[1L]]
          )),
@@ -586,6 +671,233 @@
   )
 }
 
+.liber_gui_ai_context <- function(workspace, project, selected_run = NULL,
+                                  max_runs = 20L, max_parameters = 24L,
+                                  detail = c("results", "index"), run_ids = NULL) {
+  detail <- match.arg(detail)
+  unavailable <- function(message = "No saved project results are available.") {
+    list(
+      available = FALSE, project = as.character(project %||% ""),
+      project_name = "", request_id = "", message = message,
+      scope = detail, run_count = 0L, included_runs = 0L,
+      omitted_runs = 0L, runs = list()
+    )
+  }
+  if (is.null(workspace) || !nzchar(as.character(project %||% ""))) {
+    return(unavailable("No project is selected."))
+  }
+  workspace <- if (inherits(workspace, "nm_workspace")) workspace else nm_workspace(workspace)
+  project <- as.character(project)[[1L]]
+  records <- nm_project_list(workspace, project)
+  if (!nrow(records)) return(unavailable("The selected project has no saved model versions or runs."))
+  projects <- nm_project_list(workspace)
+  project_index <- match(project, projects$id)
+  project_name <- if (!is.na(project_index)) {
+    as.character(projects$name[[project_index]] %||% project)
+  } else project
+  versions <- records[records$entry_type == "version", , drop = FALSE]
+  version_labels <- stats::setNames(as.character(versions$label), as.character(versions$id))
+  runs <- records[
+    records$entry_type == "run" & records$has_result %in% TRUE &
+      records$result_type %in% c("estimation", "simulation"), , drop = FALSE
+  ]
+  requested_runs <- unique(as.character(run_ids %||% character()))
+  if (length(requested_runs)) {
+    missing_runs <- setdiff(requested_runs, as.character(runs$id))
+    if (length(missing_runs)) {
+      .nm_stop("Selected report run(s) are unavailable or incomplete: ",
+               paste(missing_runs, collapse = ", "), ".")
+    }
+    runs <- runs[match(requested_runs, as.character(runs$id)), , drop = FALSE]
+  }
+  if (!nrow(runs)) {
+    result <- unavailable("The selected project has no completed estimation or simulation runs.")
+    result$project_name <- project_name
+    return(result)
+  }
+  order_index <- if (length(requested_runs)) seq_len(nrow(runs)) else
+    order(as.character(runs$created), decreasing = TRUE, na.last = TRUE)
+  selected_run <- as.character(selected_run %||% "")
+  if (nzchar(selected_run) && selected_run %in% runs$id) {
+    selected_index <- match(selected_run, runs$id)
+    order_index <- c(selected_index, order_index[order_index != selected_index])
+  }
+  max_runs <- max(1L, as.integer(max_runs)[[1L]])
+  omitted_runs <- max(0L, nrow(runs) - max_runs)
+  runs <- runs[utils::head(order_index, max_runs), , drop = FALSE]
+  diagnostic_names <- c(
+    gof = "has_gof", vpc = "has_vpc", npc = "has_npc", npde = "has_npde",
+    vpc_categorical = "has_vpc_categorical", vpc_count = "has_vpc_count",
+    vpc_tte = "has_vpc_tte", vpc_competing = "has_vpc_competing",
+    vpc_recurrent = "has_vpc_recurrent",
+    bootstrap = "has_bootstrap", profile = "has_profile",
+    scm = "has_scm", covariance = "has_covariance"
+  )
+  summaries <- unname(lapply(seq_len(nrow(runs)), function(index) {
+    metadata <- as.list(runs[index, , drop = FALSE])
+    parent_id <- as.character(metadata$parent_id)
+    version_label <- unname(version_labels[parent_id])
+    if (!length(version_label) || is.na(version_label) || !nzchar(version_label)) {
+      version_label <- parent_id
+    }
+    saved_diagnostics <- tryCatch(
+      nm_project_load_diagnostics(workspace, project, as.character(metadata$id)),
+      error = function(error) list()
+    )
+    base <- list(
+      id = as.character(metadata$id), label = as.character(metadata$label),
+      model_version = as.character(version_label),
+      run_number = suppressWarnings(as.integer(metadata$run_number)),
+      result_type = as.character(metadata$result_type),
+      method = as.character(metadata$method %||% ""),
+      created = as.character(metadata$created),
+      diagnostics = stats::setNames(unname(lapply(diagnostic_names, function(column) {
+        name <- names(diagnostic_names)[[match(column, diagnostic_names)]]
+        isTRUE(metadata[[column]]) || !is.null(saved_diagnostics[[name]])
+      })), names(diagnostic_names))
+    )
+    if (identical(detail, "index")) {
+      base$result_available <- TRUE
+      return(base)
+    }
+    opened <- tryCatch(nm_project_load(workspace, project, metadata$id), error = identity)
+    if (inherits(opened, "error")) {
+      base$result_available <- FALSE
+      base$message <- conditionMessage(opened)
+      return(base)
+    }
+    result <- opened$result
+    if (inherits(result, "nm_fit")) {
+      estimates <- c(result$theta, result$sigma, result$omega)
+      names(estimates) <- .nm_parameter_names(result$theta, result$sigma, result$omega)
+      keep <- utils::head(seq_along(estimates), max(1L, as.integer(max_parameters)[[1L]]))
+      covariance <- result$covariance %||% NULL
+      se <- covariance$se %||% numeric()
+      rse <- covariance$rse %||% numeric()
+      parameters <- unname(lapply(keep, function(parameter) {
+        name <- names(estimates)[[parameter]]
+        list(
+          name = name, estimate = unname(estimates[[parameter]]),
+          se = if (name %in% names(se)) unname(se[[name]]) else NULL,
+          rse = if (name %in% names(rse)) unname(rse[[name]]) else NULL
+        )
+      }))
+      timing <- result$timing %||% list()
+      base$result_available <- TRUE
+      base$method <- .nm_fit_method_label(result)
+      base$method_sequence <- as.character(result$method_sequence %||% result$method)
+      base$objective <- unname(result$objective)
+      base$convergence <- unname(result$convergence)
+      base$iterations <- suppressWarnings(as.integer(result$iterations %||%
+        result$evaluations[["gradient"]] %||% result$evaluations[["function"]] %||% NA_integer_))
+      base$parameters <- parameters
+      base$parameters_omitted <- max(0L, length(estimates) - length(keep))
+      base$covariance <- list(
+        status = if (is.null(covariance)) "not requested" else
+          as.character(covariance$status %||% "completed"),
+        method = if (is.null(covariance)) "" else
+          toupper(as.character(covariance$type %||% ""))
+      )
+      base$timing_seconds <- list(
+        model_fit = unname(timing$model_fit_seconds %||% NULL),
+        covariance = unname(timing$covariance_seconds %||% NULL),
+        total = unname(timing$total_seconds %||% NULL)
+      )
+      base$output_columns <- names(result$output %||% data.frame())
+      return(base)
+    }
+    if (is.data.frame(result)) {
+      id_column <- if (".ID_INDEX" %in% names(result)) ".ID_INDEX" else
+        if ("ID" %in% names(result)) "ID" else NULL
+      base$result_available <- TRUE
+      base$records <- nrow(result)
+      base$subjects <- if (is.null(id_column)) NULL else length(unique(result[[id_column]]))
+      base$output_columns <- names(result)
+      return(base)
+    }
+    base$result_available <- FALSE
+    base$message <- "The saved run has an unsupported result type."
+    base
+  }))
+  list(
+    available = TRUE, project = project, project_name = project_name,
+    request_id = "", message = "", scope = detail,
+    run_count = nrow(records[records$entry_type == "run" & records$has_result %in% TRUE, , drop = FALSE]),
+    included_runs = length(summaries), omitted_runs = omitted_runs,
+    runs = summaries
+  )
+}
+
+.liber_gui_report_ai_context <- function(workspace, project, run_ids,
+                                         max_parameters = 48L) {
+  run_ids <- unique(as.character(run_ids %||% character()))
+  if (!length(run_ids)) {
+    return(list(
+      available = FALSE, project = as.character(project %||% ""),
+      project_name = "", request_id = "", run_ids = character(), runs = list(),
+      message = "No model runs are selected in the report workflow."
+    ))
+  }
+  context <- .liber_gui_ai_context(
+    workspace, project, max_runs = length(run_ids),
+    max_parameters = max_parameters, detail = "results", run_ids = run_ids
+  )
+  if (!isTRUE(context$available)) return(context)
+  context$run_ids <- run_ids
+  context$runs <- unname(lapply(context$runs, function(summary) {
+    opened <- nm_project_load(workspace, project, summary$id)
+    model <- opened$model
+    result <- opened$result
+    data <- opened$data
+    summary$model <- list(
+      name = attr(model, "name", exact = TRUE) %||% paste0("ADVAN", model$ADVAN, " model"),
+      advan = model$ADVAN, trans = model$TRANS, solver = model$SOLVER,
+      language = model$LANGUAGE, omega_structure = model$LIK_CONFIG$omega %||% "diagonal",
+      theta_definitions = .liber_gui_rows(model$THETAS),
+      omega_definitions = .liber_gui_rows(model$OMEGAS),
+      sigma_definitions = .liber_gui_rows(model$SIGMAS),
+      pred = as.character(model$PRED %||% ""),
+      des = as.character(model$DES %||% ""),
+      error = as.character(model$ERROR %||% "")
+    )
+    summary$data <- list(
+      records = nrow(data), subjects = length(unique(data$.ID_INDEX)),
+      observations = sum(data$EVID == 0L & data$MDV == 0L),
+      columns = setdiff(names(data), grep("^[.]", names(data), value = TRUE))
+    )
+    if (inherits(result, "nm_fit")) {
+      gof <- tryCatch(nm_gof(result), error = function(error) NULL)
+      if (!is.null(gof)) {
+        observed <- gof$EVID == 0L & gof$MDV == 0L & is.finite(gof$DV)
+        gof <- gof[observed, , drop = FALSE]
+        n_parameters <- sum(!result$model$THETAS$FIX) +
+          sum(!result$model$SIGMAS$FIX) + sum(!result$model$OMEGAS$FIX)
+        summary$gof_summary <- list(
+          observations = nrow(gof), free_parameters = n_parameters,
+          aic = result$objective + 2 * n_parameters,
+          bic = result$objective + log(max(1, nrow(gof))) * n_parameters,
+          population_rmse = sqrt(mean((gof$DV - gof$PRED)^2, na.rm = TRUE)),
+          individual_rmse = sqrt(mean((gof$DV - gof$IPRED)^2, na.rm = TRUE)),
+          mean_cwres = mean(gof$CWRES, na.rm = TRUE),
+          sd_cwres = stats::sd(gof$CWRES, na.rm = TRUE)
+        )
+      }
+    }
+    diagnostics <- tryCatch(
+      nm_project_load_diagnostics(workspace, project, summary$id),
+      error = function(error) list()
+    )
+    summary$diagnostic_details <- unname(lapply(names(diagnostics), function(name) {
+      item <- diagnostics[[name]]
+      fields <- c("nsim", "seed", "pc_correct", "stratify", "level", "n", "status")
+      details <- item[intersect(fields, names(item))]
+      c(list(type = name, class = class(item)[[1L]] %||% "list"), details)
+    }))
+    summary
+  }))
+  context
+}
+
 .liber_gui_report <- function(report) {
   if (inherits(report, "nm_report_bundle")) {
     return(list(docx = report$docx, pdf = report$pdf, json = report$json,
@@ -652,10 +964,38 @@
       simulated = .liber_gui_rows(result$simulated)
     ))
   }
+  if (inherits(result, "nm_vpc_count")) {
+    return(list(
+      status = "completed", kind = "vpc_count", message = "Count VPC completed",
+      nsim = result$nsim, outcome = result$outcome, family = result$family,
+      dvid = result$dvid,
+      observed = .liber_gui_rows(result$observed),
+      simulated = .liber_gui_rows(result$simulated)
+    ))
+  }
   if (inherits(result, "nm_vpc_tte")) {
     return(list(
       status = "completed", kind = "vpc_tte", message = "TTE VPC completed",
       nsim = result$nsim, event = result$event,
+      observed = .liber_gui_rows(result$observed),
+      simulated = .liber_gui_rows(result$simulated)
+    ))
+  }
+  if (inherits(result, "nm_vpc_competing")) {
+    return(list(
+      status = "completed", kind = "vpc_competing",
+      message = "Competing-risk VPC completed", nsim = result$nsim,
+      event = result$event, dvid = result$dvid,
+      causes = as.character(result$causes),
+      observed = .liber_gui_rows(result$observed),
+      simulated = .liber_gui_rows(result$simulated)
+    ))
+  }
+  if (inherits(result, "nm_vpc_recurrent")) {
+    return(list(
+      status = "completed", kind = "vpc_recurrent",
+      message = "Recurrent-event VPC completed", nsim = result$nsim,
+      event = result$event, dvid = result$dvid,
       observed = .liber_gui_rows(result$observed),
       simulated = .liber_gui_rows(result$simulated)
     ))
@@ -740,7 +1080,9 @@
 
 .liber_gui_diagnostics <- function(diagnostics = list(), payload = names(diagnostics)) {
   diagnostics <- diagnostics %||% list()
-  types <- c("vpc", "npc", "npde", "vpc_categorical", "vpc_tte",
+  types <- c("vpc", "npc", "npde", "vpc_categorical", "vpc_count", "vpc_tte",
+             "vpc_competing",
+             "vpc_recurrent",
              "bootstrap", "profile", "scm")
   payload <- intersect(as.character(payload %||% character()), types)
   list(
@@ -749,10 +1091,128 @@
     npc = if (is.null(diagnostics$npc) || !"npc" %in% payload) NULL else .liber_gui_result(diagnostics$npc),
     npde = if (is.null(diagnostics$npde) || !"npde" %in% payload) NULL else .liber_gui_result(diagnostics$npde),
     vpc_categorical = if (is.null(diagnostics$vpc_categorical) || !"vpc_categorical" %in% payload) NULL else .liber_gui_result(diagnostics$vpc_categorical),
+    vpc_count = if (is.null(diagnostics$vpc_count) || !"vpc_count" %in% payload) NULL else .liber_gui_result(diagnostics$vpc_count),
     vpc_tte = if (is.null(diagnostics$vpc_tte) || !"vpc_tte" %in% payload) NULL else .liber_gui_result(diagnostics$vpc_tte),
+    vpc_competing = if (is.null(diagnostics$vpc_competing) || !"vpc_competing" %in% payload) NULL else .liber_gui_result(diagnostics$vpc_competing),
+    vpc_recurrent = if (is.null(diagnostics$vpc_recurrent) || !"vpc_recurrent" %in% payload) NULL else .liber_gui_result(diagnostics$vpc_recurrent),
     bootstrap = if (is.null(diagnostics$bootstrap) || !"bootstrap" %in% payload) NULL else .liber_gui_result(diagnostics$bootstrap),
     profile = if (is.null(diagnostics$profile) || !"profile" %in% payload) NULL else .liber_gui_result(diagnostics$profile),
     scm = if (is.null(diagnostics$scm) || !"scm" %in% payload) NULL else .liber_gui_result(diagnostics$scm)
+  )
+}
+
+.liber_gui_hmm <- function(decoded = NULL, available = FALSE, limit = 50000L) {
+  unloaded <- function() list(
+    available = isTRUE(available), loaded = FALSE, states = list(), rows = list(),
+    sequence_summary = list(), observations = 0L, sequences = 0L,
+    truncated = FALSE, log_likelihood = NULL, eta_type = ""
+  )
+  if (is.null(decoded)) return(unloaded())
+  if (!inherits(decoded, "nm_hmm_decode")) {
+    .nm_stop("`decoded` must be returned by `nm_hmm_decode()`.")
+  }
+  method <- as.character(attr(decoded, "method", exact = TRUE) %||% "")
+  if (!identical(method, "all")) {
+    .nm_stop("The GUI HMM payload requires `nm_hmm_decode(..., method = \"all\")`.")
+  }
+  state_names <- as.character(attr(decoded, "states", exact = TRUE) %||% character())
+  state_keys <- make.names(state_names, unique = TRUE)
+  frame <- as.data.frame(decoded, stringsAsFactors = FALSE)
+  observed <- if ("HMM_ROW_NLL" %in% names(frame)) {
+    is.finite(suppressWarnings(as.numeric(frame$HMM_ROW_NLL)))
+  } else rep(TRUE, nrow(frame))
+  frame <- frame[observed, , drop = FALSE]
+  frame$SUBJECT <- if ("ID" %in% names(frame)) frame$ID else frame$.ID_INDEX
+  frame$SEQUENCE <- if ("DVID" %in% names(frame)) frame$DVID else 1L
+  keep <- unique(c(
+    "SUBJECT", "SEQUENCE", "TIME", "DVID", "HMM_ROW_NLL",
+    grep("^HMM_(FILTER|SMOOTH|VITERBI)_", names(frame), value = TRUE)
+  ))
+  keep <- intersect(keep, names(frame))
+  total_observations <- nrow(frame)
+  summary <- as.data.frame(
+    attr(decoded, "sequence_summary", exact = TRUE) %||% data.frame(),
+    stringsAsFactors = FALSE
+  )
+  if (nrow(summary)) {
+    summary$SUBJECT <- if ("ID" %in% names(summary)) {
+      summary$ID
+    } else summary$.ID_INDEX
+    summary$SEQUENCE <- if ("DVID" %in% names(summary)) {
+      summary$DVID
+    } else if ("HMM_SEQUENCE" %in% names(summary)) {
+      summary$HMM_SEQUENCE
+    } else 1L
+    summary_keep <- intersect(unique(c(
+      "SUBJECT", "SEQUENCE", "LOG_LIKELIHOOD", "VITERBI_LOG_JOINT",
+      "VITERBI_LOG_POSTERIOR"
+    )), names(summary))
+    summary <- summary[, summary_keep, drop = FALSE]
+  }
+  list(
+    available = TRUE, loaded = TRUE,
+    states = unname(lapply(seq_along(state_names), function(index) list(
+      label = state_names[[index]], key = state_keys[[index]], index = index
+    ))),
+    rows = .liber_gui_rows(frame[, keep, drop = FALSE], limit),
+    sequence_summary = .liber_gui_rows(summary),
+    observations = total_observations,
+    sequences = nrow(summary),
+    truncated = total_observations > as.integer(limit),
+    log_likelihood = as.numeric(attr(decoded, "log_likelihood", exact = TRUE)),
+    eta_type = as.character(attr(decoded, "eta_type", exact = TRUE) %||% "")
+  )
+}
+
+.liber_gui_kalman <- function(decoded = NULL, available = FALSE, limit = 50000L) {
+  unloaded <- function() list(
+    available = isTRUE(available), loaded = FALSE, states = list(), rows = list(),
+    observations = 0L, sequences = 0L, truncated = FALSE,
+    log_likelihood = NULL, eta_type = "", filter = "", smoother = ""
+  )
+  if (is.null(decoded)) return(unloaded())
+  if (!inherits(decoded, "nm_kalman_decode")) {
+    .nm_stop("`decoded` must be returned by `nm_kalman_decode()`.")
+  }
+  state_names <- as.character(attr(decoded, "states", exact = TRUE) %||% character())
+  state_keys <- make.names(state_names, unique = TRUE)
+  frame <- as.data.frame(decoded, stringsAsFactors = FALSE)
+  observed <- if ("KF_ROW_NLL" %in% names(frame)) {
+    is.finite(suppressWarnings(as.numeric(frame$KF_ROW_NLL)))
+  } else rep(TRUE, nrow(frame))
+  frame <- frame[observed, , drop = FALSE]
+  frame$SUBJECT <- if ("ID" %in% names(frame)) frame$ID else frame$.ID_INDEX
+  frame$SEQUENCE <- if ("DVID" %in% names(frame)) frame$DVID else 1L
+  if ("KF_INNOVATION_VARIANCE" %in% names(frame)) {
+    denominator <- sqrt(suppressWarnings(as.numeric(frame$KF_INNOVATION_VARIANCE)))
+    frame$KF_STANDARDIZED_INNOVATION <- suppressWarnings(
+      as.numeric(frame$KF_INNOVATION) / denominator
+    )
+    frame$KF_STANDARDIZED_INNOVATION[!is.finite(frame$KF_STANDARDIZED_INNOVATION)] <- NA_real_
+  }
+  keep <- unique(c(
+    "SUBJECT", "SEQUENCE", "TIME", "DVID", "DV", "KF_INNOVATION",
+    "KF_INNOVATION_VARIANCE", "KF_STANDARDIZED_INNOVATION", "KF_ROW_NLL",
+    grep("^KF_(PRED|FILTER|SMOOTH|FILTER_SD|SMOOTH_SD)_", names(frame), value = TRUE)
+  ))
+  keep <- intersect(keep, names(frame))
+  total_observations <- nrow(frame)
+  sequence_keys <- if (nrow(frame)) {
+    unique(paste(frame$SUBJECT, frame$SEQUENCE, sep = "\r"))
+  } else character()
+  list(
+    available = TRUE, loaded = TRUE,
+    states = unname(lapply(seq_along(state_names), function(index) list(
+      label = state_names[[index]], key = state_keys[[index]], index = index
+    ))),
+    rows = .liber_gui_rows(frame[, keep, drop = FALSE], limit),
+    observations = total_observations,
+    sequences = length(sequence_keys),
+    truncated = total_observations > as.integer(limit),
+    log_likelihood = as.numeric(attr(decoded, "log_likelihood", exact = TRUE)),
+    eta_type = as.character(attr(decoded, "eta_type", exact = TRUE) %||% ""),
+    filter = as.character(attr(decoded, "filter", exact = TRUE) %||% "linear"),
+    smoother = as.character(attr(decoded, "smoother", exact = TRUE) %||% "RTS")
   )
 }
 
@@ -762,6 +1222,7 @@
     id = design$id,
     title = design$title,
     name = design$style$filename %||% "liberation-report",
+    directory = design$style$output_directory %||% "",
     formats = unname(as.character(design$formats)),
     updated = design$updated,
     blocks = unname(lapply(design$blocks, function(block) list(
@@ -786,12 +1247,25 @@
 #'   visual report designer.
 #' @param diagnostics Optional saved VPC, NPC, and NPDE results for the selected
 #'   estimation run.
+#' @param hmm Optional decoded HMM GUI payload. When omitted, availability is
+#'   inferred from the selected model and fit and rows remain lazy.
+#' @param kalman Optional decoded linear state-space GUI payload. When omitted,
+#'   availability is inferred from the selected model and fit and rows remain
+#'   lazy.
 #' @param log Optional application-log payload.
 #' @param job_log Optional stdout/stderr lines for the selected queued job.
 #' @param server Optional runtime/server status passed to the workbench.
 #' @param workspace Optional [nm_workspace()] and current project metadata.
 #' @param library Optional LibeRary catalogue payload.
-#' @param ai Optional browser-local WebGPU AI settings and model catalogue.
+#' @param ai Optional browser-local WebGPU AI settings, independent Help and
+#'   Report context-window choices, and model catalogue.
+#' @param ai_context Optional compact, on-demand summaries of saved project
+#'   runs supplied to the browser-local Help model. Full result datasets are
+#'   never included in this payload.
+#' @param report_ai_context Optional detailed, on-demand summaries of the runs
+#'   selected in the visual report workflow.
+#' @param report_directory Default report output directory displayed by the
+#'   visual report builder.
 #' @param output_catalog Optional draft output catalogue used by the GUI after
 #'   validation but before editor changes are applied.
 #' @param run_output Optional selected model-run output columns, aligned by a
@@ -808,19 +1282,46 @@
 #' @export
 liber_workbench <- function(model = NULL, data = NULL, jobs = NULL, result = NULL,
                              fit = NULL, report = NULL, report_design = NULL,
-                             diagnostics = NULL,
+                             diagnostics = NULL, hmm = NULL, kalman = NULL,
                              log = NULL, job_log = NULL,
                              server = NULL,
                              workspace = NULL,
-                             library = NULL, ai = NULL, output_catalog = NULL,
+                             library = NULL, ai = NULL, ai_context = NULL,
+                             report_ai_context = NULL, report_directory = "",
+                             output_catalog = NULL,
                              run_output = if (inherits(fit, "nm_fit")) fit$output else NULL,
                              data_payload = TRUE, gof_payload = TRUE,
                              diagnostic_payload = names(diagnostics),
                              input_id = "liber_workbench", width = NULL,
                             height = "780px", elementId = NULL) {
   jobs <- as.data.frame(jobs %||% data.frame(), stringsAsFactors = FALSE)
+  model_payload <- .liber_gui_model(model, output_catalog = output_catalog)
+  fit_payload <- if (is.list(fit) && !inherits(fit, "nm_fit") &&
+                     !is.null(fit$available)) {
+    fit
+  } else {
+    .liber_gui_fit(fit, include_gof = gof_payload)
+  }
+  hmm_payload <- if (is.list(hmm) && !inherits(hmm, "nm_hmm_decode") &&
+                     !is.null(hmm$available)) {
+    hmm
+  } else {
+    .liber_gui_hmm(
+      hmm,
+      available = !is.null(model_payload$hmm) && isTRUE(fit_payload$available)
+    )
+  }
+  kalman_payload <- if (is.list(kalman) && !inherits(kalman, "nm_kalman_decode") &&
+                        !is.null(kalman$available)) {
+    kalman
+  } else {
+    .liber_gui_kalman(
+      kalman,
+      available = !is.null(model_payload$kalman) && isTRUE(fit_payload$available)
+    )
+  }
   content <- reactR::component("LibeRWorkbench", list(
-    model = .liber_gui_model(model, output_catalog = output_catalog),
+    model = model_payload,
     dataset = .liber_gui_data(
       data, include_rows = data_payload,
       run_output = if (isTRUE(data_payload)) run_output else NULL
@@ -828,7 +1329,9 @@ liber_workbench <- function(model = NULL, data = NULL, jobs = NULL, result = NUL
     jobs = unname(lapply(seq_len(nrow(jobs)), function(i) as.list(jobs[i, , drop = FALSE]))),
     result = .liber_gui_result(result),
     diagnostics = .liber_gui_diagnostics(diagnostics, diagnostic_payload),
-    fit = if (is.list(fit) && !inherits(fit, "nm_fit") && !is.null(fit$available)) fit else .liber_gui_fit(fit, include_gof = gof_payload),
+    fit = fit_payload,
+    hmm = hmm_payload,
+    kalman = kalman_payload,
     report = .liber_gui_report(report),
     report_design = .liber_gui_report_design(report_design),
     log = log %||% list(level = "info", current = "Workbench ready",
@@ -836,10 +1339,22 @@ liber_workbench <- function(model = NULL, data = NULL, jobs = NULL, result = NUL
     job_log = as.character(job_log %||% character()),
     workspace = workspace %||% .liber_gui_workspace(),
     library = library %||% .liber_gui_library(),
+    ai_context = ai_context %||% list(
+      available = FALSE, project = "", project_name = "", request_id = "",
+      scope = "index", message = "Project result summaries have not been requested.",
+      runs = list()
+    ),
+    report_ai_context = report_ai_context %||% list(
+      available = FALSE, project = "", project_name = "", request_id = "",
+      run_ids = character(), message = "Report evidence has not been requested.",
+      runs = list()
+    ),
+    report_directory = as.character(report_directory %||% "")[[1L]],
     ai = ai %||% list(
       activated = FALSE, consented = FALSE,
       help_model = .liber_ai_default_help_model(),
       report_model = .liber_ai_default_report_model(),
+      help_context = "auto", report_context = "auto",
       model = .liber_ai_default_help_model(),
       worker_url = "", models = list(), secure_context = TRUE
     ),
@@ -961,6 +1476,7 @@ renderLiberWorkbench <- function(expr, env = parent.frame(), quoted = FALSE) {
   arguments$PRED <- as.character(event$pred %||% model$PRED)
   arguments$ERROR <- as.character(event$error %||% model$ERROR)
   arguments$DES <- as.character(event$des %||% model$DES)
+  arguments$ALG <- as.character(event$alg %||% model$ALG %||% "")
   arguments$INPUT <- unique(as.character(unlist(event$input %||% model$INPUT)))
   arguments$OUTPUT <- unique(as.character(unlist(event$output %||% model$OUTPUT %||% character())))
   arguments$THETAS <- .liber_parameter_table_update(model$THETAS, event$theta, "THETA")
@@ -968,6 +1484,13 @@ renderLiberWorkbench <- function(expr, env = parent.frame(), quoted = FALSE) {
   arguments$SIGMAS <- .liber_parameter_table_update(model$SIGMAS, event$sigma, "SIGMA")
   likelihood <- as.list(model$LIK_CONFIG)
   likelihood$version <- NULL
+  inferred_error <- .nm_error_type(arguments$ERROR, "auto")
+  if (identical(inferred_error, "likelihood")) {
+    likelihood$error <- "likelihood"
+  } else if (identical(likelihood$error, "likelihood") &&
+             !identical(inferred_error, "none")) {
+    likelihood$error <- inferred_error
+  }
   likelihood$omega <- as.character(
     event$omega_structure %||% model$LIK_CONFIG$omega %||% "diagonal"
   )
@@ -976,7 +1499,9 @@ renderLiberWorkbench <- function(expr, env = parent.frame(), quoted = FALSE) {
   } else {
     .liber_prior_table_update(event$priors)
   }
-  arguments$LIK_CONFIG <- do.call(nm_lik_config, likelihood)
+  arguments$LIK_CONFIG <- .nm_lik_config(
+    likelihood, likelihood$error, as.integer(likelihood$iov %||% model$IOV)
+  )
   if (!identical(arguments$ADVAN, old_advan)) arguments$GRAPH <- NULL
   arguments$ERROR_TYPE <- "auto"
   edited <- do.call(nm_model, arguments)

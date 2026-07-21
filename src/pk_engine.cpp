@@ -8,6 +8,7 @@
 #include "eigen_solver.h"
 
 #include <algorithm>
+#include <cstdint>
 #include <cmath>
 #include <functional>
 #include <limits>
@@ -336,6 +337,15 @@ Topology build_graph_topology(const MatrixGraph& graph, const Parameters& p) {
   return topology;
 }
 
+struct ResidualGroupSpec {
+  std::string label;
+  std::vector<double> dvid;
+  std::vector<std::string> source;
+  std::vector<int> index;
+  std::vector<double> value;
+  std::string transform = "tanh";
+};
+
 class ModelEngine {
  public:
   int advan;
@@ -353,17 +363,79 @@ class ModelEngine {
   std::string sigma_parameterization = "sd";
   std::string blq_method;
   double ar1_rho = 0.0;
+  std::string ar1_parameter_source = "fixed";
+  int ar1_parameter_index = -1;
+  std::string ar1_transform = "tanh";
   double lloq = std::numeric_limits<double>::quiet_NaN();
   int iov = 0;
   bool specialized_advan = true;
   std::vector<int> omega_rows;
   std::vector<int> omega_cols;
+  bool re_enabled = false;
+  std::vector<std::vector<int>> re_blocks;
   std::vector<double> mixture_probabilities;
+  std::vector<ResidualGroupSpec> residual_groups;
   std::shared_ptr<const libertad::Program> pred;
   std::shared_ptr<const libertad::Program> des;
+  std::shared_ptr<const libertad::Program> alg;
+  std::shared_ptr<const libertad::Program> error;
   std::vector<std::size_t> all_outputs;
+  std::vector<std::size_t> likelihood_output;
+  std::string likelihood_scale;
+  bool hmm_enabled = false;
+  bool hmm_by_dvid = true;
+  bool hmm_continuous = false;
+  int hmm_states = 0;
+  std::vector<std::string> hmm_state_names;
+  std::vector<std::size_t> hmm_outputs;
+  std::string hmm_initial_scale;
+  std::string hmm_transition_scale;
+  std::string hmm_rate_scale;
+  std::string hmm_emission_scale;
+  bool kalman_enabled = false;
+  bool kalman_by_dvid = true;
+  bool kalman_prediction_baseline = true;
+  std::string kalman_filter_type = "linear";
+  int kalman_states = 0;
+  std::vector<std::string> kalman_state_names;
+  std::vector<std::string> kalman_state_inputs;
+  double kalman_jacobian_step = 1e-5;
+  double kalman_ukf_alpha = 0.5;
+  double kalman_ukf_beta = 2.0;
+  double kalman_ukf_kappa = 0.0;
+  int kalman_particles = 256;
+  double kalman_ess_threshold = 0.5;
+  int kalman_seed = 20260721;
+  std::string kalman_dynamics = "discrete";
+  std::string kalman_sde_method = "euler";
+  int kalman_sde_substeps = 8;
+  std::vector<std::size_t> kalman_outputs;
+  bool switching_enabled = false;
+  int switching_regimes = 0;
+  std::vector<std::string> switching_regime_names;
+  std::string switching_initial_scale = "probability";
+  std::string switching_transition_scale = "probability";
+  std::vector<std::size_t> switching_outputs;
   std::vector<std::string> selected_output_names;
   std::vector<std::size_t> derivative_outputs;
+  std::vector<std::size_t> algebraic_outputs;
+  bool dde_enabled = false;
+  double dde_step = 0.05;
+  int dde_max_steps = 100000;
+  double dde_minimum_delay = 0.0;
+  std::vector<double> dde_history;
+  std::vector<std::string> dde_lag_inputs;
+  std::vector<int> dde_lag_states;
+  std::vector<std::string> dde_lag_delays;
+  bool dae_enabled = false;
+  std::vector<std::string> dae_variables;
+  std::vector<double> dae_initial;
+  double dae_tolerance = 1e-9;
+  int dae_maxit = 12;
+  double dae_jacobian_step = 1e-6;
+  std::vector<bool> dae_sparsity;
+  std::vector<std::vector<int>> dae_block_rows;
+  std::vector<std::vector<int>> dae_block_columns;
   std::vector<std::string> state_names;
   OdeControl ode_control;
   MatrixGraph matrix_graph;
@@ -396,6 +468,347 @@ class ModelEngine {
         derivative_outputs.push_back(des->select_outputs({"DADT_" + std::to_string(i)}).front());
       }
     }
+    Rcpp::RObject dde_object = spec.containsElementNamed("dde_config") ?
+      Rcpp::RObject(spec["dde_config"]) : Rcpp::RObject(R_NilValue);
+    if (!Rf_isNull(dde_object)) {
+      Rcpp::List dde(dde_object);
+      dde_enabled = true;
+      dde_step = Rcpp::as<double>(dde["step"]);
+      dde_max_steps = Rcpp::as<int>(dde["max_steps"]);
+      dde_history = Rcpp::as<std::vector<double>>(dde["history"]);
+      if (dde.containsElementNamed("minimum_delay") &&
+          !Rf_isNull(dde["minimum_delay"])) {
+        dde_minimum_delay = Rcpp::as<double>(dde["minimum_delay"]);
+      } else {
+        dde_minimum_delay = dde_step;
+      }
+      Rcpp::List lags(dde["lags"]);
+      for (R_xlen_t lag = 0; lag < lags.size(); ++lag) {
+        Rcpp::List value(lags[lag]);
+        dde_lag_inputs.push_back(Rcpp::as<std::string>(value["input"]));
+        dde_lag_states.push_back(Rcpp::as<int>(value["state"]) - 1);
+        dde_lag_delays.push_back(Rcpp::as<std::string>(value["delay"]));
+      }
+      if (!des || dde_step <= 0.0 || dde_max_steps < 1 ||
+          dde_history.size() != static_cast<std::size_t>(n_state) ||
+          dde_lag_inputs.empty() || dde_lag_inputs.size() != dde_lag_states.size() ||
+          dde_lag_inputs.size() != dde_lag_delays.size()) {
+        throw std::invalid_argument("DDE configuration is inconsistent with the compiled model.");
+      }
+    }
+    Rcpp::RObject alg_ir = spec.containsElementNamed("alg_ir") ?
+      Rcpp::RObject(spec["alg_ir"]) : Rcpp::RObject(R_NilValue);
+    Rcpp::RObject dae_object = spec.containsElementNamed("dae_config") ?
+      Rcpp::RObject(spec["dae_config"]) : Rcpp::RObject(R_NilValue);
+    if (!Rf_isNull(dae_object)) {
+      if (Rf_isNull(alg_ir)) {
+        throw std::invalid_argument("DAE configuration requires a compiled ALG residual program.");
+      }
+      alg = std::make_shared<const libertad::Program>(Rcpp::as<Rcpp::List>(alg_ir));
+      Rcpp::List dae(dae_object);
+      dae_enabled = true;
+      dae_variables = Rcpp::as<std::vector<std::string>>(dae["variables"]);
+      dae_initial = Rcpp::as<std::vector<double>>(dae["initial"]);
+      dae_tolerance = Rcpp::as<double>(dae["tolerance"]);
+      dae_maxit = Rcpp::as<int>(dae["maxit"]);
+      dae_jacobian_step = Rcpp::as<double>(dae["jacobian_step"]);
+      std::vector<std::string> names;
+      names.reserve(dae_variables.size());
+      for (std::size_t index = 0; index < dae_variables.size(); ++index) {
+        names.push_back("DAE_RES_" + std::to_string(index + 1U));
+      }
+      algebraic_outputs = alg->select_outputs(names);
+      if (dae.containsElementNamed("sparsity") && !Rf_isNull(dae["sparsity"])) {
+        Rcpp::LogicalMatrix sparsity(dae["sparsity"]);
+        if (sparsity.nrow() != static_cast<int>(dae_variables.size()) ||
+            sparsity.ncol() != static_cast<int>(dae_variables.size())) {
+          throw std::invalid_argument("DAE sparsity dimensions are inconsistent.");
+        }
+        for (int row = 0; row < sparsity.nrow(); ++row) {
+          for (int column = 0; column < sparsity.ncol(); ++column) {
+            dae_sparsity.push_back(sparsity(row, column) == TRUE);
+          }
+        }
+      }
+      if (!des || dae_variables.empty() || dae_initial.size() != dae_variables.size() ||
+          dae_tolerance <= 0.0 || dae_maxit < 1 || dae_jacobian_step <= 0.0) {
+        throw std::invalid_argument("DAE configuration is inconsistent with the compiled model.");
+      }
+      const int dimension = static_cast<int>(dae_variables.size());
+      if (dae_sparsity.empty()) {
+        std::vector<int> all(static_cast<std::size_t>(dimension));
+        std::iota(all.begin(), all.end(), 0);
+        dae_block_rows.push_back(all);
+        dae_block_columns.push_back(all);
+      } else {
+        std::vector<bool> visited(static_cast<std::size_t>(2 * dimension), false);
+        for (int start = 0; start < 2 * dimension; ++start) {
+          if (visited[static_cast<std::size_t>(start)]) continue;
+          std::queue<int> pending; pending.push(start);
+          std::vector<int> rows, columns;
+          visited[static_cast<std::size_t>(start)] = true;
+          while (!pending.empty()) {
+            const int node = pending.front(); pending.pop();
+            if (node < dimension) {
+              rows.push_back(node);
+              for (int column = 0; column < dimension; ++column) {
+                if (dae_sparsity[static_cast<std::size_t>(node * dimension + column)] &&
+                    !visited[static_cast<std::size_t>(dimension + column)]) {
+                  visited[static_cast<std::size_t>(dimension + column)] = true;
+                  pending.push(dimension + column);
+                }
+              }
+            } else {
+              const int column = node - dimension;
+              columns.push_back(column);
+              for (int row = 0; row < dimension; ++row) {
+                if (dae_sparsity[static_cast<std::size_t>(row * dimension + column)] &&
+                    !visited[static_cast<std::size_t>(row)]) {
+                  visited[static_cast<std::size_t>(row)] = true;
+                  pending.push(row);
+                }
+              }
+            }
+          }
+          if (rows.size() != columns.size() || rows.empty()) {
+            throw std::invalid_argument(
+              "Every DAE sparsity block must contain the same non-zero number of residuals and variables.");
+          }
+          dae_block_rows.push_back(std::move(rows));
+          dae_block_columns.push_back(std::move(columns));
+        }
+      }
+    }
+    Rcpp::RObject error_ir = spec.containsElementNamed("error_ir") ?
+      Rcpp::RObject(spec["error_ir"]) : Rcpp::RObject(R_NilValue);
+    if (!Rf_isNull(error_ir)) {
+      error = std::make_shared<const libertad::Program>(Rcpp::as<Rcpp::List>(error_ir));
+      Rcpp::RObject hmm_object = spec.containsElementNamed("hmm_config") ?
+        Rcpp::RObject(spec["hmm_config"]) : Rcpp::RObject(R_NilValue);
+      if (!Rf_isNull(hmm_object)) {
+        Rcpp::List hmm(hmm_object);
+        hmm_enabled = true;
+        hmm_state_names = Rcpp::as<std::vector<std::string>>(hmm["states"]);
+        hmm_states = static_cast<int>(hmm_state_names.size());
+        hmm_by_dvid = Rcpp::as<bool>(hmm["by_dvid"]);
+        const std::string transition_type = hmm.containsElementNamed("transition_type") ?
+          Rcpp::as<std::string>(hmm["transition_type"]) : "discrete";
+        hmm_continuous = transition_type == "continuous";
+        hmm_initial_scale = Rcpp::as<std::string>(hmm["initial_scale"]);
+        if (hmm_continuous) {
+          hmm_rate_scale = Rcpp::as<std::string>(hmm["rate_scale"]);
+        } else {
+          hmm_transition_scale = Rcpp::as<std::string>(hmm["transition_scale"]);
+        }
+        hmm_emission_scale = Rcpp::as<std::string>(hmm["emission_scale"]);
+        if (hmm_states < 2 ||
+            (hmm_initial_scale != "probability" && hmm_initial_scale != "log") ||
+            (!hmm_continuous && hmm_transition_scale != "probability" &&
+             hmm_transition_scale != "log") ||
+            (hmm_continuous && hmm_rate_scale != "rate" && hmm_rate_scale != "log") ||
+            (hmm_emission_scale != "likelihood" && hmm_emission_scale != "log")) {
+          throw std::invalid_argument("Hidden Markov likelihood scales or state count are inconsistent.");
+        }
+        std::vector<std::string> names =
+          Rcpp::as<std::vector<std::string>>(hmm["initial"]);
+        const std::vector<std::string> emission =
+          Rcpp::as<std::vector<std::string>>(hmm["emission"]);
+        if (names.size() != static_cast<std::size_t>(hmm_states) ||
+            emission.size() != static_cast<std::size_t>(hmm_states)) {
+          throw std::invalid_argument("Hidden Markov output dimensions are inconsistent.");
+        }
+        if (hmm_continuous) {
+          Rcpp::CharacterMatrix generator(hmm["generator"]);
+          if (generator.nrow() != hmm_states || generator.ncol() != hmm_states) {
+            throw std::invalid_argument("Continuous-time HMM generator dimensions are inconsistent.");
+          }
+          names.reserve(static_cast<std::size_t>(hmm_states * (hmm_states + 1)));
+          for (int from = 0; from < hmm_states; ++from) {
+            for (int to = 0; to < hmm_states; ++to) {
+              if (from != to) {
+                names.push_back(Rcpp::as<std::string>(generator(from, to)));
+              }
+            }
+          }
+        } else {
+          Rcpp::CharacterMatrix transition(hmm["transition"]);
+          if (transition.nrow() != hmm_states || transition.ncol() != hmm_states) {
+            throw std::invalid_argument("Discrete-time HMM transition dimensions are inconsistent.");
+          }
+          names.reserve(static_cast<std::size_t>(hmm_states * (hmm_states + 2)));
+          for (int from = 0; from < hmm_states; ++from) {
+            for (int to = 0; to < hmm_states; ++to) {
+              names.push_back(Rcpp::as<std::string>(transition(from, to)));
+            }
+          }
+        }
+        names.insert(names.end(), emission.begin(), emission.end());
+        hmm_outputs = error->select_outputs(names);
+      } else {
+        Rcpp::RObject kalman_object = spec.containsElementNamed("kalman_config") ?
+          Rcpp::RObject(spec["kalman_config"]) : Rcpp::RObject(R_NilValue);
+        if (!Rf_isNull(kalman_object)) {
+          Rcpp::List kalman(kalman_object);
+          kalman_enabled = true;
+          kalman_state_names = Rcpp::as<std::vector<std::string>>(kalman["states"]);
+          kalman_states = static_cast<int>(kalman_state_names.size());
+          kalman_by_dvid = Rcpp::as<bool>(kalman["by_dvid"]);
+          kalman_prediction_baseline =
+            Rcpp::as<std::string>(kalman["baseline"]) == "prediction";
+          kalman_filter_type = kalman.containsElementNamed("filter") ?
+            Rcpp::as<std::string>(kalman["filter"]) : "linear";
+          kalman_state_inputs = kalman.containsElementNamed("state_inputs") ?
+            Rcpp::as<std::vector<std::string>>(kalman["state_inputs"]) :
+            std::vector<std::string>();
+          kalman_jacobian_step = kalman.containsElementNamed("jacobian_step") ?
+            Rcpp::as<double>(kalman["jacobian_step"]) : 1e-5;
+          kalman_ukf_alpha = kalman.containsElementNamed("ukf_alpha") ?
+            Rcpp::as<double>(kalman["ukf_alpha"]) : 0.5;
+          kalman_ukf_beta = kalman.containsElementNamed("ukf_beta") ?
+            Rcpp::as<double>(kalman["ukf_beta"]) : 2.0;
+          kalman_ukf_kappa = kalman.containsElementNamed("ukf_kappa") ?
+            Rcpp::as<double>(kalman["ukf_kappa"]) : 0.0;
+          kalman_particles = kalman.containsElementNamed("particles") ?
+            Rcpp::as<int>(kalman["particles"]) : 256;
+          kalman_ess_threshold = kalman.containsElementNamed("ess_threshold") ?
+            Rcpp::as<double>(kalman["ess_threshold"]) : 0.5;
+          kalman_seed = kalman.containsElementNamed("seed") ?
+            Rcpp::as<int>(kalman["seed"]) : 20260721;
+          kalman_dynamics = kalman.containsElementNamed("dynamics") ?
+            Rcpp::as<std::string>(kalman["dynamics"]) : "discrete";
+          kalman_sde_method = kalman.containsElementNamed("sde_method") ?
+            Rcpp::as<std::string>(kalman["sde_method"]) : "euler";
+          kalman_sde_substeps = kalman.containsElementNamed("sde_substeps") ?
+            Rcpp::as<int>(kalman["sde_substeps"]) : 8;
+          if (kalman_filter_type != "linear" && kalman_filter_type != "ekf" &&
+              kalman_filter_type != "ukf" && kalman_filter_type != "particle") {
+            throw std::invalid_argument("Unknown state-space filter type.");
+          }
+          if ((kalman_dynamics != "discrete" && kalman_dynamics != "sde") ||
+              (kalman_sde_method != "euler" && kalman_sde_method != "milstein") ||
+              kalman_sde_substeps < 1) {
+            throw std::invalid_argument("Invalid state-space dynamics controls.");
+          }
+          std::vector<std::string> names =
+            Rcpp::as<std::vector<std::string>>(kalman["initial_mean"]);
+          const std::vector<std::string> observation =
+            Rcpp::as<std::vector<std::string>>(kalman["observation"]);
+          const std::vector<std::string> observation_variance =
+            Rcpp::as<std::vector<std::string>>(kalman["observation_variance"]);
+          Rcpp::CharacterMatrix initial_covariance(kalman["initial_covariance"]);
+          Rcpp::CharacterMatrix process_covariance(kalman["process_covariance"]);
+          if (kalman_states < 1 || names.size() != static_cast<std::size_t>(kalman_states) ||
+              observation_variance.size() != 1U ||
+              initial_covariance.nrow() != kalman_states ||
+              initial_covariance.ncol() != kalman_states ||
+              process_covariance.nrow() != kalman_states ||
+              process_covariance.ncol() != kalman_states) {
+            throw std::invalid_argument("Kalman state-space output dimensions are inconsistent.");
+          }
+          names.reserve(static_cast<std::size_t>(
+            3 * kalman_states * kalman_states + 2 * kalman_states + 1));
+          auto append_matrix = [&](const Rcpp::CharacterMatrix& matrix) {
+            for (int row = 0; row < kalman_states; ++row) {
+              for (int column = 0; column < kalman_states; ++column) {
+                names.push_back(Rcpp::as<std::string>(matrix(row, column)));
+              }
+            }
+          };
+          append_matrix(initial_covariance);
+          if (kalman_filter_type == "linear") {
+            Rcpp::CharacterMatrix transition(kalman["transition"]);
+            if (transition.nrow() != kalman_states || transition.ncol() != kalman_states ||
+                observation.size() != static_cast<std::size_t>(kalman_states)) {
+              throw std::invalid_argument("Linear Kalman transition/observation dimensions are inconsistent.");
+            }
+            append_matrix(transition);
+          } else {
+            const std::vector<std::string> transition =
+              Rcpp::as<std::vector<std::string>>(kalman["transition"]);
+            if (transition.size() != static_cast<std::size_t>(kalman_states) ||
+                observation.size() != 1U ||
+                kalman_state_inputs.size() != static_cast<std::size_t>(kalman_states)) {
+              throw std::invalid_argument("Nonlinear state-space transition/observation dimensions are inconsistent.");
+            }
+            names.insert(names.end(), transition.begin(), transition.end());
+          }
+          append_matrix(process_covariance);
+          names.insert(names.end(), observation.begin(), observation.end());
+          names.push_back(observation_variance.front());
+          kalman_outputs = error->select_outputs(names);
+          if (kalman.containsElementNamed("switching") &&
+              !Rf_isNull(kalman["switching"])) {
+            if (kalman_filter_type != "particle") {
+              throw std::invalid_argument("Switching state-space inference requires the particle filter.");
+            }
+            Rcpp::List switching(kalman["switching"]);
+            switching_regime_names =
+              Rcpp::as<std::vector<std::string>>(switching["regimes"]);
+            switching_regimes = static_cast<int>(switching_regime_names.size());
+            switching_initial_scale =
+              Rcpp::as<std::string>(switching["initial_scale"]);
+            switching_transition_scale =
+              Rcpp::as<std::string>(switching["transition_scale"]);
+            std::vector<std::string> switching_names =
+              Rcpp::as<std::vector<std::string>>(switching["initial"]);
+            Rcpp::CharacterMatrix regime_transition(switching["transition"]);
+            Rcpp::List state_transition(switching["state_transition"]);
+            Rcpp::List process(switching["process"]);
+            const std::vector<std::string> observation =
+              Rcpp::as<std::vector<std::string>>(switching["observation"]);
+            const std::vector<std::string> observation_variance =
+              Rcpp::as<std::vector<std::string>>(switching["observation_variance"]);
+            if (switching_regimes < 2 ||
+                switching_names.size() != static_cast<std::size_t>(switching_regimes) ||
+                regime_transition.nrow() != switching_regimes ||
+                regime_transition.ncol() != switching_regimes ||
+                state_transition.size() != switching_regimes ||
+                process.size() != switching_regimes ||
+                observation.size() != static_cast<std::size_t>(switching_regimes) ||
+                observation_variance.size() != static_cast<std::size_t>(switching_regimes)) {
+              throw std::invalid_argument("Switching state-space dimensions are inconsistent.");
+            }
+            for (int from = 0; from < switching_regimes; ++from) {
+              for (int to = 0; to < switching_regimes; ++to) {
+                switching_names.push_back(
+                  Rcpp::as<std::string>(regime_transition(from, to)));
+              }
+            }
+            for (int regime = 0; regime < switching_regimes; ++regime) {
+              const std::vector<std::string> local_transition =
+                Rcpp::as<std::vector<std::string>>(state_transition[regime]);
+              Rcpp::CharacterMatrix local_process(process[regime]);
+              if (local_transition.size() != static_cast<std::size_t>(kalman_states) ||
+                  local_process.nrow() != kalman_states ||
+                  local_process.ncol() != kalman_states) {
+                throw std::invalid_argument("Switching regime state dimensions are inconsistent.");
+              }
+              switching_names.insert(
+                switching_names.end(), local_transition.begin(), local_transition.end());
+              for (int matrix_row = 0; matrix_row < kalman_states; ++matrix_row) {
+                for (int matrix_column = 0; matrix_column < kalman_states; ++matrix_column) {
+                  switching_names.push_back(
+                    Rcpp::as<std::string>(local_process(matrix_row, matrix_column)));
+                }
+              }
+              switching_names.push_back(observation[static_cast<std::size_t>(regime)]);
+              switching_names.push_back(
+                observation_variance[static_cast<std::size_t>(regime)]);
+            }
+            switching_outputs = error->select_outputs(switching_names);
+            switching_enabled = true;
+          }
+        } else {
+        const std::string output = Rcpp::as<std::string>(spec["likelihood_output"]);
+        likelihood_scale = Rcpp::as<std::string>(spec["likelihood_scale"]);
+        likelihood_output = error->select_outputs({output});
+        if (likelihood_output.size() != 1U ||
+            (likelihood_scale != "log" && likelihood_scale != "likelihood")) {
+          throw std::invalid_argument("User likelihood specification is inconsistent.");
+        }
+        }
+      }
+    }
     state_names = Rcpp::as<std::vector<std::string>>(spec["state_names"]);
     if (state_names.size() != static_cast<std::size_t>(n_state)) {
       state_names.clear();
@@ -415,8 +828,49 @@ class ModelEngine {
     }
     blq_method = Rcpp::as<std::string>(likelihood["blq_method"]);
     ar1_rho = Rcpp::as<double>(likelihood["ar1_rho"]);
+    if (likelihood.containsElementNamed("ar1_source")) {
+      ar1_parameter_source = Rcpp::as<std::string>(likelihood["ar1_source"]);
+    }
+    if (likelihood.containsElementNamed("ar1_index")) {
+      ar1_parameter_index = Rcpp::as<int>(likelihood["ar1_index"]) - 1;
+    }
+    if (likelihood.containsElementNamed("ar1_transform")) {
+      ar1_transform = Rcpp::as<std::string>(likelihood["ar1_transform"]);
+    }
     lloq = Rcpp::as<double>(likelihood["lloq"]);
     iov = Rcpp::as<int>(likelihood["iov"]);
+    if (likelihood.containsElementNamed("residual_groups") &&
+        !Rf_isNull(likelihood["residual_groups"])) {
+      Rcpp::List groups(likelihood["residual_groups"]);
+      residual_groups.reserve(groups.size());
+      for (R_xlen_t group_index = 0; group_index < groups.size(); ++group_index) {
+        Rcpp::List input(groups[group_index]);
+        ResidualGroupSpec group;
+        group.label = Rcpp::as<std::string>(input["label"]);
+        group.dvid = Rcpp::as<std::vector<double>>(input["dvid"]);
+        group.transform = Rcpp::as<std::string>(input["parameter_transform"]);
+        Rcpp::CharacterMatrix source(input["source"]);
+        Rcpp::IntegerMatrix index(input["index"]);
+        Rcpp::NumericMatrix value(input["value"]);
+        const int dimension = static_cast<int>(group.dvid.size());
+        if (dimension < 2 || source.nrow() != dimension || source.ncol() != dimension ||
+            index.nrow() != dimension || index.ncol() != dimension ||
+            value.nrow() != dimension || value.ncol() != dimension) {
+          throw std::invalid_argument("Correlated residual group dimensions are inconsistent.");
+        }
+        group.source.reserve(static_cast<std::size_t>(dimension * dimension));
+        group.index.reserve(static_cast<std::size_t>(dimension * dimension));
+        group.value.reserve(static_cast<std::size_t>(dimension * dimension));
+        for (int row = 0; row < dimension; ++row) {
+          for (int column = 0; column < dimension; ++column) {
+            group.source.push_back(Rcpp::as<std::string>(source(row, column)));
+            group.index.push_back(index(row, column) - 1);
+            group.value.push_back(value(row, column));
+          }
+        }
+        residual_groups.push_back(std::move(group));
+      }
+    }
     if (spec.containsElementNamed("specialized_advan")) {
       specialized_advan = Rcpp::as<bool>(spec["specialized_advan"]);
     }
@@ -430,6 +884,30 @@ class ModelEngine {
     for (R_xlen_t i = 0; i < omega_row.size(); ++i) {
       omega_rows.push_back(omega_row[i] - 1);
       omega_cols.push_back(omega_col[i] - 1);
+    }
+    Rcpp::RObject re_object = spec.containsElementNamed("re_config") ?
+      Rcpp::RObject(spec["re_config"]) : Rcpp::RObject(R_NilValue);
+    if (!Rf_isNull(re_object)) {
+      Rcpp::List re_config(re_object);
+      Rcpp::List blocks(re_config["blocks"]);
+      re_blocks.reserve(blocks.size());
+      std::vector<bool> assigned(static_cast<std::size_t>(n_eta), false);
+      for (R_xlen_t block_index = 0; block_index < blocks.size(); ++block_index) {
+        Rcpp::List block(blocks[block_index]);
+        std::vector<int> indices = Rcpp::as<std::vector<int>>(block["etas"]);
+        for (int& index : indices) {
+          --index;
+          if (index < 0 || index >= n_eta || assigned[static_cast<std::size_t>(index)]) {
+            throw std::invalid_argument("Random-effect block ETA indices are inconsistent.");
+          }
+          assigned[static_cast<std::size_t>(index)] = true;
+        }
+        re_blocks.push_back(std::move(indices));
+      }
+      if (std::find(assigned.begin(), assigned.end(), false) != assigned.end()) {
+        throw std::invalid_argument("Random-effect design does not assign every ETA.");
+      }
+      re_enabled = true;
     }
     Rcpp::RObject mixture_object = likelihood.containsElementNamed("mixtures") ?
       Rcpp::RObject(likelihood["mixtures"]) : Rcpp::RObject(R_NilValue);
@@ -508,6 +986,17 @@ int eta_column(const ModelEngine& engine, const Rcpp::DataFrame& data,
   if (eta_index < 0 || eta_index >= engine.n_eta) {
     throw std::out_of_range("ETA index exceeds the model ETA definitions.");
   }
+  if (engine.re_enabled) {
+    const std::string column_name = ".ETA_COLUMN_" + std::to_string(eta_index + 1);
+    if (!data.containsElementNamed(column_name.c_str())) {
+      throw std::invalid_argument("General random-effect execution requires compiled ETA mapping columns.");
+    }
+    const int column = static_cast<int>(data_value(data, column_name, row)) - 1;
+    if (column < 0 || column >= eta_columns) {
+      throw std::out_of_range("Mapped random-effect ETA index exceeds the supplied ETA matrix.");
+    }
+    return column;
+  }
   if (engine.iov <= 0 || eta_index < engine.n_eta - engine.iov) return eta_index;
   if (!data.containsElementNamed(".OCC_INDEX")) {
     throw std::invalid_argument("IOV execution requires compiled .OCC_INDEX data.");
@@ -519,6 +1008,30 @@ int eta_column(const ModelEngine& engine, const Rcpp::DataFrame& data,
     throw std::out_of_range("Occasion-specific ETA index exceeds the supplied ETA matrix.");
   }
   return column;
+}
+
+int required_eta_columns(const ModelEngine& engine,
+                         const Rcpp::DataFrame& data) {
+  if (engine.re_enabled) {
+    int maximum = 0;
+    for (int eta = 1; eta <= engine.n_eta; ++eta) {
+      const std::string name = ".ETA_COLUMN_" + std::to_string(eta);
+      if (!data.containsElementNamed(name.c_str())) {
+        throw std::invalid_argument("Compiled random-effect ETA mapping is missing.");
+      }
+      Rcpp::IntegerVector values(data[name]);
+      for (int value : values) maximum = std::max(maximum, value);
+    }
+    return maximum;
+  }
+  if (engine.iov <= 0) return engine.n_eta;
+  if (!data.containsElementNamed(".OCC_INDEX")) {
+    throw std::invalid_argument("IOV execution requires compiled .OCC_INDEX data.");
+  }
+  Rcpp::IntegerVector occasion(data[".OCC_INDEX"]);
+  int count = 0;
+  for (int value : occasion) count = std::max(count, value);
+  return engine.n_eta - engine.iov + count * engine.iov;
 }
 
 Parameters evaluate_parameters(const ModelEngine& engine,
@@ -574,6 +1087,139 @@ Parameters evaluate_parameters(const ModelEngine& engine,
   return parameters;
 }
 
+Vector evaluate_algebraic_residuals(
+    const ModelEngine& engine, const Rcpp::DataFrame& data,
+    int row, int subject, double time, const Vector& state,
+    const Parameters& parameters, const Rcpp::NumericVector& theta,
+    const Rcpp::NumericMatrix& eta, const Rcpp::NumericVector& sigma,
+    const Vector& algebraic) {
+  if (!engine.alg) throw std::logic_error("DAE algebraic residual program is missing.");
+  std::vector<double> inputs(engine.alg->input_names.size(), 0.0);
+  for (std::size_t i = 0; i < engine.alg->input_names.size(); ++i) {
+    const std::string& name = engine.alg->input_names[i];
+    int index = indexed_name(name, "A_");
+    if (index >= 0) {
+      if (index >= state.size()) throw std::out_of_range("A() index exceeds the DAE state dimension.");
+      inputs[i] = state[index];
+      continue;
+    }
+    if (name == "T") { inputs[i] = time; continue; }
+    auto variable = std::find(engine.dae_variables.begin(), engine.dae_variables.end(), name);
+    if (variable != engine.dae_variables.end()) {
+      inputs[i] = algebraic[std::distance(engine.dae_variables.begin(), variable)];
+      continue;
+    }
+    auto parameter = parameters.find(name);
+    if (parameter != parameters.end()) { inputs[i] = parameter->second; continue; }
+    index = indexed_name(name, "THETA_");
+    if (index >= 0) { inputs[i] = theta[index]; continue; }
+    index = indexed_name(name, "ETA_");
+    if (index >= 0) {
+      inputs[i] = eta(subject, eta_column(engine, data, row, index, eta.ncol()));
+      continue;
+    }
+    index = indexed_name(name, "SIGMA_");
+    if (index >= 0) { inputs[i] = sigma[index]; continue; }
+    if (starts_with(name, "ERR_") || name == "F") continue;
+    inputs[i] = data_value(data, name, row);
+  }
+  const std::vector<double> output = engine.alg->eval_outputs(inputs, engine.algebraic_outputs);
+  Vector residual(static_cast<Eigen::Index>(output.size()));
+  for (std::size_t i = 0; i < output.size(); ++i) residual[static_cast<Eigen::Index>(i)] = output[i];
+  return residual;
+}
+
+Vector solve_algebraic(
+    const ModelEngine& engine, const Rcpp::DataFrame& data,
+    int row, int subject, double time, const Vector& state,
+    const Parameters& parameters, const Rcpp::NumericVector& theta,
+    const Rcpp::NumericMatrix& eta, const Rcpp::NumericVector& sigma) {
+  Vector value(static_cast<Eigen::Index>(engine.dae_initial.size()));
+  for (std::size_t i = 0; i < engine.dae_initial.size(); ++i) value[static_cast<Eigen::Index>(i)] = engine.dae_initial[i];
+  Vector residual;
+  for (int iteration = 0; iteration < engine.dae_maxit; ++iteration) {
+    residual = evaluate_algebraic_residuals(
+      engine, data, row, subject, time, state, parameters, theta, eta, sigma, value);
+    if (!residual.allFinite()) throw std::domain_error("DAE residual is non-finite.");
+    if (residual.cwiseAbs().maxCoeff() <= engine.dae_tolerance) return value;
+    Matrix jacobian = Matrix::Zero(value.size(), value.size());
+    for (Eigen::Index column = 0; column < value.size(); ++column) {
+      const double delta = engine.dae_jacobian_step * std::max(1.0, std::abs(value[column]));
+      Vector plus = value; plus[column] += delta;
+      Vector minus = value; minus[column] -= delta;
+      const Vector upper = evaluate_algebraic_residuals(
+        engine, data, row, subject, time, state, parameters, theta, eta, sigma, plus);
+      const Vector lower = evaluate_algebraic_residuals(
+        engine, data, row, subject, time, state, parameters, theta, eta, sigma, minus);
+      jacobian.col(column) = (upper - lower) / (2.0 * delta);
+      if (!engine.dae_sparsity.empty()) {
+        for (Eigen::Index row_index = 0; row_index < value.size(); ++row_index) {
+          if (!engine.dae_sparsity[static_cast<std::size_t>(row_index * value.size() + column)]) {
+            jacobian(row_index, column) = 0.0;
+          }
+        }
+      }
+    }
+    Vector update = Vector::Zero(value.size());
+    for (std::size_t block = 0; block < engine.dae_block_rows.size(); ++block) {
+      const auto& rows = engine.dae_block_rows[block];
+      const auto& columns = engine.dae_block_columns[block];
+      Matrix local(rows.size(), columns.size());
+      Vector rhs(rows.size());
+      for (std::size_t local_row = 0; local_row < rows.size(); ++local_row) {
+        rhs[static_cast<Eigen::Index>(local_row)] = -residual[rows[local_row]];
+        for (std::size_t local_column = 0; local_column < columns.size(); ++local_column) {
+          local(static_cast<Eigen::Index>(local_row),
+                static_cast<Eigen::Index>(local_column)) =
+            jacobian(rows[local_row], columns[local_column]);
+        }
+      }
+      Eigen::FullPivLU<Matrix> lu(local);
+      if (!lu.isInvertible()) throw std::runtime_error("DAE Newton Jacobian block is singular.");
+      const Vector local_update = lu.solve(rhs);
+      for (std::size_t local_column = 0; local_column < columns.size(); ++local_column) {
+        update[columns[local_column]] = local_update[static_cast<Eigen::Index>(local_column)];
+      }
+    }
+    if (!update.allFinite()) throw std::runtime_error("DAE Newton update is non-finite.");
+    value += update;
+    if (update.cwiseAbs().maxCoeff() <= engine.dae_tolerance) {
+      residual = evaluate_algebraic_residuals(
+        engine, data, row, subject, time, state, parameters, theta, eta, sigma, value);
+      if (residual.cwiseAbs().maxCoeff() <= 10.0 * engine.dae_tolerance) return value;
+    }
+  }
+  throw std::runtime_error("DAE algebraic Newton solve did not converge.");
+}
+
+struct DdeHistory {
+  std::vector<double> time;
+  std::vector<Vector> state;
+  std::vector<double> baseline;
+
+  void reset(double at, const Vector& value, const std::vector<double>& history) {
+    time.assign(1U, at); state.assign(1U, value); baseline = history;
+  }
+  void append(double at, const Vector& value) {
+    if (!time.empty() && std::abs(time.back() - at) <= 1e-12) {
+      state.back() = value; return;
+    }
+    time.push_back(at); state.push_back(value);
+  }
+  double at(double target, int component) const {
+    if (component < 0 || component >= static_cast<int>(baseline.size())) {
+      throw std::out_of_range("DDE lag state is outside the state vector.");
+    }
+    if (time.empty() || target < time.front() - 1e-12) return baseline[static_cast<std::size_t>(component)];
+    if (target >= time.back() - 1e-12) return state.back()[component];
+    auto upper = std::upper_bound(time.begin(), time.end(), target);
+    const std::size_t right = static_cast<std::size_t>(std::distance(time.begin(), upper));
+    const std::size_t left = right - 1U;
+    const double fraction = (target - time[left]) / (time[right] - time[left]);
+    return state[left][component] + fraction * (state[right][component] - state[left][component]);
+  }
+};
+
 Vector evaluate_derivatives(const ModelEngine& engine,
                             const Rcpp::DataFrame& data,
                             int row, int subject, double t,
@@ -581,8 +1227,11 @@ Vector evaluate_derivatives(const ModelEngine& engine,
                             const Parameters& parameters,
                             const Rcpp::NumericVector& theta,
                             const Rcpp::NumericMatrix& eta,
-                            const Rcpp::NumericVector& sigma) {
+                            const Rcpp::NumericVector& sigma,
+                            const Vector* lag_values = nullptr) {
   if (!engine.des) throw std::logic_error("ODE derivative program is missing.");
+  const Vector algebraic = engine.dae_enabled ? solve_algebraic(
+    engine, data, row, subject, t, state, parameters, theta, eta, sigma) : Vector();
   std::vector<double> inputs(engine.des->input_names.size(), 0.0);
   for (std::size_t i = 0; i < engine.des->input_names.size(); ++i) {
     const std::string& name = engine.des->input_names[i];
@@ -594,6 +1243,17 @@ Vector evaluate_derivatives(const ModelEngine& engine,
     }
     if (name == "T") {
       inputs[i] = t;
+      continue;
+    }
+    auto lag = std::find(engine.dde_lag_inputs.begin(), engine.dde_lag_inputs.end(), name);
+    if (lag != engine.dde_lag_inputs.end()) {
+      if (lag_values == nullptr) throw std::logic_error("DDE lag history is unavailable.");
+      inputs[i] = (*lag_values)[std::distance(engine.dde_lag_inputs.begin(), lag)];
+      continue;
+    }
+    auto variable = std::find(engine.dae_variables.begin(), engine.dae_variables.end(), name);
+    if (variable != engine.dae_variables.end()) {
+      inputs[i] = algebraic[std::distance(engine.dae_variables.begin(), variable)];
       continue;
     }
     auto parameter = parameters.find(name);
@@ -858,7 +1518,8 @@ Vector propagate_ode_to(const ModelEngine& engine,
                         const Rcpp::NumericVector& sigma,
                         const Parameters& parameters,
                         Vector state, double from, double to,
-                        std::vector<ActiveInfusion>& active) {
+                        std::vector<ActiveInfusion>& active,
+                        DdeHistory* dde_history = nullptr) {
   double cursor = from;
   remove_finished(active, cursor);
   while (cursor < to - 1e-12) {
@@ -867,6 +1528,47 @@ Vector propagate_ode_to(const ModelEngine& engine,
       if (infusion.end > cursor + 1e-12) segment_end = std::min(segment_end, infusion.end);
     }
     const Vector input = infusion_input(engine.n_state, active);
+    if (engine.dde_enabled) {
+      if (dde_history == nullptr) {
+        throw std::logic_error("DDE propagation requires an initialized history.");
+      }
+      double time = cursor;
+      int steps = 0;
+      while (time < segment_end - 1e-12) {
+        if (++steps > engine.dde_max_steps) {
+          throw std::runtime_error("DDE method-of-steps exceeded max_steps.");
+        }
+        const double h = std::min(engine.dde_step, segment_end - time);
+        auto rhs = [&](double stage_time, const Vector& value) {
+          Vector lag_values(static_cast<Eigen::Index>(engine.dde_lag_inputs.size()));
+          for (std::size_t lag = 0; lag < engine.dde_lag_inputs.size(); ++lag) {
+            auto delay = parameters.find(engine.dde_lag_delays[lag]);
+            if (delay == parameters.end() || !std::isfinite(delay->second) ||
+                delay->second < engine.dde_minimum_delay || delay->second < h) {
+              throw std::domain_error("DDE delay '" + engine.dde_lag_delays[lag] +
+                                      "' must be finite and at least the integration step.");
+            }
+            lag_values[static_cast<Eigen::Index>(lag)] = dde_history->at(
+              stage_time - delay->second, engine.dde_lag_states[lag]);
+          }
+          Vector derivative = evaluate_derivatives(
+            engine, data, row, subject, stage_time, value, parameters,
+            theta, eta, sigma, &lag_values);
+          derivative += input;
+          return derivative;
+        };
+        const Vector k1 = rhs(time, state);
+        const Vector k2 = rhs(time + 0.5 * h, state + 0.5 * h * k1);
+        const Vector k3 = rhs(time + 0.5 * h, state + 0.5 * h * k2);
+        const Vector k4 = rhs(time + h, state + h * k3);
+        state += (h / 6.0) * (k1 + 2.0 * k2 + 2.0 * k3 + k4);
+        time += h;
+        dde_history->append(time, state);
+      }
+      cursor = segment_end;
+      remove_finished(active, cursor);
+      continue;
+    }
     OdeRhs rhs = [&](double t, const Vector& y) {
       Vector derivative = evaluate_derivatives(
         engine, data, row, subject, t, y, parameters, theta, eta, sigma
@@ -976,19 +1678,11 @@ Rcpp::List simulate(ModelEngine& engine,
                     const Rcpp::NumericVector& sigma) {
   const int n_rows = data.nrows();
   if (theta.size() != engine.n_theta) Rcpp::stop("Theta vector has the wrong length.");
-  int minimum_eta_columns = engine.n_eta;
-  if (engine.iov > 0) {
-    if (!data.containsElementNamed(".OCC_INDEX")) {
-      Rcpp::stop("IOV execution requires .OCC_INDEX in the normalized data.");
-    }
-    Rcpp::IntegerVector occasion = data[".OCC_INDEX"];
-    int n_occasions = 0;
-    for (int value : occasion) n_occasions = std::max(n_occasions, value);
-    minimum_eta_columns = engine.n_eta - engine.iov + n_occasions * engine.iov;
-  }
+  const int minimum_eta_columns = required_eta_columns(engine, data);
   const int between_eta = engine.n_eta - engine.iov;
   if (eta.ncol() < minimum_eta_columns ||
-      (engine.iov > 0 && (eta.ncol() - between_eta) % engine.iov != 0)) {
+      (!engine.re_enabled && engine.iov > 0 &&
+       (eta.ncol() - between_eta) % engine.iov != 0)) {
     Rcpp::stop("ETA matrix has the wrong number of between-subject/occasion columns.");
   }
 
@@ -999,9 +1693,11 @@ Rcpp::List simulate(ModelEngine& engine,
   Rcpp::IntegerVector evid = data["EVID"];
   Rcpp::IntegerVector cmt = data["CMT"];
   Rcpp::IntegerVector ss = data["SS"];
-  Rcpp::IntegerVector subject_index = data[".ID_INDEX"];
+  Rcpp::IntegerVector eta_subject_index = data[".ID_INDEX"];
+  Rcpp::IntegerVector subject_index = data.containsElementNamed(".STRUCT_ID_INDEX") ?
+    Rcpp::IntegerVector(data[".STRUCT_ID_INDEX"]) : eta_subject_index;
   int n_subjects = 0;
-  for (int value : subject_index) n_subjects = std::max(n_subjects, value);
+  for (int value : eta_subject_index) n_subjects = std::max(n_subjects, value);
   if (eta.nrow() != n_subjects) Rcpp::stop("ETA matrix has the wrong number of subject rows.");
 
   const int n_state = engine.n_state;
@@ -1011,6 +1707,7 @@ Rcpp::List simulate(ModelEngine& engine,
   Rcpp::NumericMatrix generated(n_rows, engine.selected_output_names.size());
   Vector state = Vector::Zero(n_state);
   std::vector<ActiveInfusion> active;
+  DdeHistory dde_history;
   Matrix previous_k = Matrix::Zero(n_state, n_state);
   Parameters previous_parameters;
   int previous_row = -1;
@@ -1020,13 +1717,15 @@ Rcpp::List simulate(ModelEngine& engine,
   std::vector<std::string> state_names;
 
   for (int row = 0; row < n_rows; ++row) {
-    const int subject = subject_index[row] - 1;
-    if (subject != previous_subject) {
+    const int structural_subject = subject_index[row] - 1;
+    const int subject = eta_subject_index[row] - 1;
+    if (structural_subject != previous_subject) {
       state.setZero();
       active.clear();
       have_previous = false;
       previous_time = time[row];
-      previous_subject = subject;
+      previous_subject = structural_subject;
+      if (engine.dde_enabled) dde_history.reset(time[row], state, engine.dde_history);
     }
     if (have_previous) {
       if (time[row] < previous_time - 1e-12) Rcpp::stop("Subject event times are decreasing.");
@@ -1034,6 +1733,7 @@ Rcpp::List simulate(ModelEngine& engine,
         state = propagate_ode_to(
           engine, data, previous_row, subject, theta, eta, sigma,
           previous_parameters, state, previous_time, time[row], active
+          , engine.dde_enabled ? &dde_history : nullptr
         );
       } else {
         state = propagate_to(previous_k, state, previous_time, time[row], active);
@@ -1062,6 +1762,7 @@ Rcpp::List simulate(ModelEngine& engine,
     if (reset) {
       state.setZero();
       active.clear();
+      if (engine.dde_enabled) dde_history.reset(time[row], state, engine.dde_history);
     }
     const bool dosing = amount[row] > 0.0 && (evid[row] == 1 || evid[row] == 4 || evid[row] == 0);
     if (dosing) {
@@ -1076,6 +1777,9 @@ Rcpp::List simulate(ModelEngine& engine,
         active.clear();
       } else if (ss_flag != 0 && ss_flag != 2) {
         Rcpp::stop("Only SS=0, SS=1, and SS=2 are supported.");
+      }
+      if (engine.dde_enabled && ss_flag != 0) {
+        Rcpp::stop("Experimental DDE models currently require SS=0; provide an explicit warm-up regimen.");
       }
 
       if (event_rate > 0.0) {
@@ -1109,6 +1813,7 @@ Rcpp::List simulate(ModelEngine& engine,
           state += dose;
         }
       }
+      if (engine.dde_enabled) dde_history.append(time[row], state);
     }
 
     const int observation_cmt = cmt[row] > 0 && evid[row] == 0 ? cmt[row] : engine.obs_cmp;
@@ -1116,7 +1821,9 @@ Rcpp::List simulate(ModelEngine& engine,
       observation_cmt, topology.default_observation, n_state
     );
     const double scale = observation_scale(parameters, data, row, observation_cmt, topology);
-    prediction[row] = state[observation_index] / scale;
+    const auto direct_prediction = parameters.find("F");
+    prediction[row] = direct_prediction == parameters.end() ?
+      state[observation_index] / scale : direct_prediction->second;
     for (int j = 0; j < n_state; ++j) amounts(row, j) = state[j];
 
     previous_k = topology.k;
@@ -1458,6 +2165,11 @@ inline bool use_specialized_advan(const ModelEngine& engine) {
 }
 
 inline std::string propagation_kernel_name(const ModelEngine& engine) {
+  if (engine.dde_enabled) return "dde-rk4-method-of-steps";
+  if (engine.dae_enabled) {
+    return engine.advan == 13 ? "dae-advan13-implicit-newton" :
+      "dae-advan6-rk45-newton";
+  }
   if (engine.is_ode()) {
     return engine.advan == 13 ? "advan13-implicit" : "advan6-rk45";
   }
@@ -1876,14 +2588,170 @@ ParametersT<Scalar> evaluate_parameters_t(
 }
 
 template <class Scalar>
-VectorT<Scalar> evaluate_derivatives_t(
+VectorT<Scalar> evaluate_algebraic_residuals_t(
+    const ModelEngine& engine, const Rcpp::DataFrame& data,
+    int row, int subject, const Scalar& time, const VectorT<Scalar>& state,
+    const ParametersT<Scalar>& parameters,
+    const std::vector<Scalar>& theta, const std::vector<Scalar>& eta,
+    int eta_columns, const std::vector<Scalar>& sigma, int mixture_number,
+    const VectorT<Scalar>& algebraic,
+    const DynamicDataT<Scalar>* dynamic_data = nullptr) {
+  if (!engine.alg) throw std::logic_error("DAE algebraic residual program is missing.");
+  std::vector<Scalar> inputs(engine.alg->input_names.size(), Scalar(0.0));
+  for (std::size_t i = 0; i < engine.alg->input_names.size(); ++i) {
+    const std::string& name = engine.alg->input_names[i];
+    int index = indexed_name(name, "A_");
+    if (index >= 0) { inputs[i] = state[index]; continue; }
+    if (name == "T") { inputs[i] = time; continue; }
+    auto variable = std::find(engine.dae_variables.begin(), engine.dae_variables.end(), name);
+    if (variable != engine.dae_variables.end()) {
+      inputs[i] = algebraic[std::distance(engine.dae_variables.begin(), variable)];
+      continue;
+    }
+    auto parameter = parameters.find(name);
+    if (parameter != parameters.end()) { inputs[i] = parameter->second; continue; }
+    index = indexed_name(name, "THETA_");
+    if (index >= 0) { inputs[i] = theta.at(static_cast<std::size_t>(index)); continue; }
+    index = indexed_name(name, "ETA_");
+    if (index >= 0) {
+      const int column = eta_column(engine, data, row, index, eta_columns);
+      inputs[i] = eta.at(static_cast<std::size_t>(subject * eta_columns + column));
+      continue;
+    }
+    index = indexed_name(name, "SIGMA_");
+    if (index >= 0) { inputs[i] = sigma.at(static_cast<std::size_t>(index)); continue; }
+    if (starts_with(name, "ERR_") || name == "F") continue;
+    if (name == "MIXNUM") { inputs[i] = Scalar(mixture_number); continue; }
+    inputs[i] = dynamic_row_value(data, name, row, dynamic_data);
+  }
+  const std::vector<Scalar> output = engine.alg->eval_outputs(inputs, engine.algebraic_outputs);
+  VectorT<Scalar> residual(static_cast<Eigen::Index>(output.size()));
+  for (std::size_t i = 0; i < output.size(); ++i) residual[static_cast<Eigen::Index>(i)] = output[i];
+  return residual;
+}
+
+template <class Scalar>
+VectorT<Scalar> solve_algebraic_t(
     const ModelEngine& engine, const Rcpp::DataFrame& data,
     int row, int subject, const Scalar& time, const VectorT<Scalar>& state,
     const ParametersT<Scalar>& parameters,
     const std::vector<Scalar>& theta, const std::vector<Scalar>& eta,
     int eta_columns, const std::vector<Scalar>& sigma, int mixture_number,
     const DynamicDataT<Scalar>* dynamic_data = nullptr) {
+  VectorT<Scalar> value(static_cast<Eigen::Index>(engine.dae_initial.size()));
+  for (std::size_t i = 0; i < engine.dae_initial.size(); ++i) value[static_cast<Eigen::Index>(i)] = Scalar(engine.dae_initial[i]);
+  for (int iteration = 0; iteration < engine.dae_maxit; ++iteration) {
+    const VectorT<Scalar> residual = evaluate_algebraic_residuals_t(
+      engine, data, row, subject, time, state, parameters, theta, eta,
+      eta_columns, sigma, mixture_number, value, dynamic_data);
+    Scalar maximum = Scalar(0.0);
+    for (Eigen::Index i = 0; i < residual.size(); ++i) {
+      maximum = libertad::choose_gt(
+        libertad::scalar_abs(residual[i]), maximum,
+        libertad::scalar_abs(residual[i]), maximum);
+    }
+    if (path_le(maximum, Scalar(engine.dae_tolerance))) return value;
+    MatrixT<Scalar> jacobian = MatrixT<Scalar>::Zero(value.size(), value.size());
+    for (Eigen::Index column = 0; column < value.size(); ++column) {
+      const double delta = engine.dae_jacobian_step *
+        std::max(1.0, std::abs(scalar_value(value[column])));
+      VectorT<Scalar> plus = value; plus[column] += Scalar(delta);
+      VectorT<Scalar> minus = value; minus[column] -= Scalar(delta);
+      const VectorT<Scalar> upper = evaluate_algebraic_residuals_t(
+        engine, data, row, subject, time, state, parameters, theta, eta,
+        eta_columns, sigma, mixture_number, plus, dynamic_data);
+      const VectorT<Scalar> lower = evaluate_algebraic_residuals_t(
+        engine, data, row, subject, time, state, parameters, theta, eta,
+        eta_columns, sigma, mixture_number, minus, dynamic_data);
+      jacobian.col(column) = (upper - lower) / Scalar(2.0 * delta);
+      if (!engine.dae_sparsity.empty()) {
+        for (Eigen::Index row_index = 0; row_index < value.size(); ++row_index) {
+          if (!engine.dae_sparsity[static_cast<std::size_t>(row_index * value.size() + column)]) {
+            jacobian(row_index, column) = Scalar(0.0);
+          }
+        }
+      }
+    }
+    VectorT<Scalar> update = VectorT<Scalar>::Zero(value.size());
+    for (std::size_t block = 0; block < engine.dae_block_rows.size(); ++block) {
+      const auto& rows = engine.dae_block_rows[block];
+      const auto& columns = engine.dae_block_columns[block];
+      MatrixT<Scalar> local(rows.size(), columns.size());
+      MatrixT<Scalar> rhs(rows.size(), 1);
+      for (std::size_t local_row = 0; local_row < rows.size(); ++local_row) {
+        rhs(static_cast<Eigen::Index>(local_row), 0) = -residual[rows[local_row]];
+        for (std::size_t local_column = 0; local_column < columns.size(); ++local_column) {
+          local(static_cast<Eigen::Index>(local_row),
+                static_cast<Eigen::Index>(local_column)) =
+            jacobian(rows[local_row], columns[local_column]);
+        }
+      }
+      const MatrixT<Scalar> local_update = solve_linear(local, rhs, "DAE Newton block");
+      for (std::size_t local_column = 0; local_column < columns.size(); ++local_column) {
+        update[columns[local_column]] = local_update(static_cast<Eigen::Index>(local_column), 0);
+      }
+    }
+    value += update;
+  }
+  const VectorT<Scalar> residual = evaluate_algebraic_residuals_t(
+    engine, data, row, subject, time, state, parameters, theta, eta,
+    eta_columns, sigma, mixture_number, value, dynamic_data);
+  double maximum = 0.0;
+  for (Eigen::Index i = 0; i < residual.size(); ++i) {
+    maximum = std::max(maximum, std::abs(scalar_value(residual[i])));
+  }
+  if (maximum > 10.0 * engine.dae_tolerance) {
+    throw std::runtime_error("DAE algebraic Newton solve did not converge.");
+  }
+  return value;
+}
+
+template <class Scalar>
+struct DdeHistoryT {
+  std::vector<Scalar> time;
+  std::vector<VectorT<Scalar>> state;
+  std::vector<double> baseline;
+
+  void reset(const Scalar& at, const VectorT<Scalar>& value,
+             const std::vector<double>& history) {
+    time.assign(1U, at); state.assign(1U, value); baseline = history;
+  }
+  void append(const Scalar& at, const VectorT<Scalar>& value) {
+    if (!time.empty() && std::abs(scalar_value(time.back() - at)) <= 1e-12) {
+      state.back() = value; return;
+    }
+    time.push_back(at); state.push_back(value);
+  }
+  Scalar at(const Scalar& target, int component) const {
+    if (component < 0 || component >= static_cast<int>(baseline.size())) {
+      throw std::out_of_range("DDE lag state is outside the state vector.");
+    }
+    const double target_value = scalar_value(target);
+    if (time.empty() || target_value < scalar_value(time.front()) - 1e-12) {
+      return Scalar(baseline[static_cast<std::size_t>(component)]);
+    }
+    if (target_value >= scalar_value(time.back()) - 1e-12) return state.back()[component];
+    std::size_t right = 1U;
+    while (right < time.size() && scalar_value(time[right]) <= target_value) ++right;
+    const std::size_t left = right - 1U;
+    const Scalar fraction = (target - time[left]) / (time[right] - time[left]);
+    return state[left][component] + fraction * (state[right][component] - state[left][component]);
+  }
+};
+
+template <class Scalar>
+VectorT<Scalar> evaluate_derivatives_t(
+    const ModelEngine& engine, const Rcpp::DataFrame& data,
+    int row, int subject, const Scalar& time, const VectorT<Scalar>& state,
+    const ParametersT<Scalar>& parameters,
+    const std::vector<Scalar>& theta, const std::vector<Scalar>& eta,
+    int eta_columns, const std::vector<Scalar>& sigma, int mixture_number,
+    const DynamicDataT<Scalar>* dynamic_data = nullptr,
+    const VectorT<Scalar>* lag_values = nullptr) {
   if (!engine.des) throw std::logic_error("ODE derivative program is missing.");
+  const VectorT<Scalar> algebraic = engine.dae_enabled ? solve_algebraic_t(
+    engine, data, row, subject, time, state, parameters, theta, eta,
+    eta_columns, sigma, mixture_number, dynamic_data) : VectorT<Scalar>();
   std::vector<Scalar> inputs(engine.des->input_names.size(), Scalar(0.0));
   for (std::size_t i = 0; i < engine.des->input_names.size(); ++i) {
     const std::string& name = engine.des->input_names[i];
@@ -1895,6 +2763,17 @@ VectorT<Scalar> evaluate_derivatives_t(
     }
     if (name == "T") {
       inputs[i] = time;
+      continue;
+    }
+    auto lag = std::find(engine.dde_lag_inputs.begin(), engine.dde_lag_inputs.end(), name);
+    if (lag != engine.dde_lag_inputs.end()) {
+      if (lag_values == nullptr) throw std::logic_error("DDE lag history is unavailable.");
+      inputs[i] = (*lag_values)[std::distance(engine.dde_lag_inputs.begin(), lag)];
+      continue;
+    }
+    auto variable = std::find(engine.dae_variables.begin(), engine.dae_variables.end(), name);
+    if (variable != engine.dae_variables.end()) {
+      inputs[i] = algebraic[std::distance(engine.dae_variables.begin(), variable)];
       continue;
     }
     auto parameter = parameters.find(name);
@@ -2211,7 +3090,8 @@ VectorT<Scalar> propagate_ode_to_t(
     const std::vector<Scalar>& sigma, const ParametersT<Scalar>& parameters,
     int mixture_number, VectorT<Scalar> state, double from, double to,
     std::vector<ActiveInfusionT<Scalar>>& active,
-    const DynamicDataT<Scalar>* dynamic_data = nullptr) {
+    const DynamicDataT<Scalar>* dynamic_data = nullptr,
+    DdeHistoryT<Scalar>* dde_history = nullptr) {
   Scalar cursor = Scalar(from);
   const Scalar endpoint = Scalar(to);
   remove_finished_t(active, cursor);
@@ -2224,6 +3104,50 @@ VectorT<Scalar> propagate_ode_to_t(
       }
     }
     const VectorT<Scalar> input = infusion_input_t(engine.n_state, active);
+    if (engine.dde_enabled) {
+      if (dde_history == nullptr) {
+        throw std::logic_error("DDE propagation requires an initialized history.");
+      }
+      Scalar time = cursor;
+      int steps = 0;
+      while (path_lt(time, segment_end - Scalar(1e-12))) {
+        if (++steps > engine.dde_max_steps) {
+          throw std::runtime_error("DDE method-of-steps exceeded max_steps.");
+        }
+        const double remaining = scalar_value(segment_end - time);
+        const double h = std::min(engine.dde_step, remaining);
+        auto rhs = [&](const Scalar& stage_time, const VectorT<Scalar>& value) {
+          VectorT<Scalar> lag_values(static_cast<Eigen::Index>(engine.dde_lag_inputs.size()));
+          for (std::size_t lag = 0; lag < engine.dde_lag_inputs.size(); ++lag) {
+            auto delay = parameters.find(engine.dde_lag_delays[lag]);
+            if (delay == parameters.end() ||
+                !std::isfinite(scalar_value(delay->second)) ||
+                path_lt(delay->second, Scalar(engine.dde_minimum_delay)) ||
+                path_lt(delay->second, Scalar(h))) {
+              throw std::domain_error("DDE delay '" + engine.dde_lag_delays[lag] +
+                                      "' must be finite and at least the integration step.");
+            }
+            lag_values[static_cast<Eigen::Index>(lag)] = dde_history->at(
+              stage_time - delay->second, engine.dde_lag_states[lag]);
+          }
+          VectorT<Scalar> derivative = evaluate_derivatives_t(
+            engine, data, row, subject, stage_time, value, parameters,
+            theta, eta, eta_columns, sigma, mixture_number, dynamic_data, &lag_values);
+          derivative += input;
+          return derivative;
+        };
+        const VectorT<Scalar> k1 = rhs(time, state);
+        const VectorT<Scalar> k2 = rhs(time + Scalar(0.5 * h), state + Scalar(0.5 * h) * k1);
+        const VectorT<Scalar> k3 = rhs(time + Scalar(0.5 * h), state + Scalar(0.5 * h) * k2);
+        const VectorT<Scalar> k4 = rhs(time + Scalar(h), state + Scalar(h) * k3);
+        state += Scalar(h / 6.0) * (k1 + Scalar(2.0) * k2 + Scalar(2.0) * k3 + k4);
+        time += Scalar(h);
+        dde_history->append(time, state);
+      }
+      cursor = segment_end;
+      remove_finished_t(active, cursor);
+      continue;
+    }
     auto rhs = [&](const Scalar& time, const VectorT<Scalar>& value) {
       VectorT<Scalar> derivative = evaluate_derivatives_t(
         engine, data, row, subject, time, value, parameters,
@@ -2378,9 +3302,11 @@ std::vector<Scalar> simulate_analytical_t(
   Rcpp::IntegerVector evid = data["EVID"];
   Rcpp::IntegerVector cmt = data["CMT"];
   Rcpp::IntegerVector ss = data["SS"];
-  Rcpp::IntegerVector subject_index = data[".ID_INDEX"];
+  Rcpp::IntegerVector eta_subject_index = data[".ID_INDEX"];
+  Rcpp::IntegerVector subject_index = data.containsElementNamed(".STRUCT_ID_INDEX") ?
+    Rcpp::IntegerVector(data[".STRUCT_ID_INDEX"]) : eta_subject_index;
   int n_subjects = 0;
-  for (int value : subject_index) n_subjects = std::max(n_subjects, value);
+  for (int value : eta_subject_index) n_subjects = std::max(n_subjects, value);
   if (n_subjects < 1 || eta.size() % static_cast<std::size_t>(n_subjects) != 0U) {
     throw std::invalid_argument("ETA vector cannot be divided into subject rows.");
   }
@@ -2389,6 +3315,7 @@ std::vector<Scalar> simulate_analytical_t(
   std::vector<Scalar> prediction(static_cast<std::size_t>(n_rows), Scalar(0.0));
   VectorT<Scalar> state = VectorT<Scalar>::Zero(n_state);
   std::vector<ActiveInfusionT<Scalar>> active;
+  DdeHistoryT<Scalar> dde_history;
   MatrixT<Scalar> previous_k = MatrixT<Scalar>::Zero(n_state, n_state);
   ParametersT<Scalar> previous_parameters;
   int previous_row = -1;
@@ -2398,13 +3325,15 @@ std::vector<Scalar> simulate_analytical_t(
   bool have_previous = false;
 
   for (int row = 0; row < n_rows; ++row) {
-    const int subject = subject_index[row] - 1;
-    if (subject != previous_subject) {
+    const int structural_subject = subject_index[row] - 1;
+    const int subject = eta_subject_index[row] - 1;
+    if (structural_subject != previous_subject) {
       state.setZero();
       active.clear();
       have_previous = false;
       previous_time = time[row];
-      previous_subject = subject;
+      previous_subject = structural_subject;
+      if (engine.dde_enabled) dde_history.reset(Scalar(time[row]), state, engine.dde_history);
     }
     if (have_previous) {
       if (time[row] < previous_time - 1e-12) throw std::domain_error("Subject event times decrease.");
@@ -2412,7 +3341,8 @@ std::vector<Scalar> simulate_analytical_t(
         state = propagate_ode_to_t(
           engine, data, previous_row, subject, theta, eta, eta_columns, sigma,
           previous_parameters, previous_mixture, state,
-          previous_time, time[row], active, dynamic_data);
+          previous_time, time[row], active, dynamic_data,
+          engine.dde_enabled ? &dde_history : nullptr);
       } else {
         state = propagate_to_t(
           engine, previous_k, state, Scalar(previous_time), Scalar(time[row]), active);
@@ -2437,6 +3367,7 @@ std::vector<Scalar> simulate_analytical_t(
     if (evid[row] == 3 || evid[row] == 4) {
       state.setZero();
       active.clear();
+      if (engine.dde_enabled) dde_history.reset(Scalar(time[row]), state, engine.dde_history);
     }
     const bool dosing = amount[row] > 0.0 &&
       (evid[row] == 1 || evid[row] == 4 || evid[row] == 0);
@@ -2453,6 +3384,9 @@ std::vector<Scalar> simulate_analytical_t(
         active.clear();
       } else if (ss_flag != 0 && ss_flag != 2) {
         throw std::domain_error("Only SS=0, SS=1, and SS=2 are supported.");
+      }
+      if (engine.dde_enabled && ss_flag != 0) {
+        throw std::domain_error("Experimental DDE models currently require SS=0; provide an explicit warm-up regimen.");
       }
       if (scalar_positive(event_rate)) {
         const Scalar duration = Scalar(amount[row]) / event_rate;
@@ -2485,13 +3419,16 @@ std::vector<Scalar> simulate_analytical_t(
           state += dose;
         }
       }
+      if (engine.dde_enabled) dde_history.append(Scalar(time[row]), state);
     }
     const int observation_cmt = cmt[row] > 0 && evid[row] == 0 ? cmt[row] : engine.obs_cmp;
     const int observation_index = compartment_index(
       observation_cmt, topology.default_observation, n_state);
     const Scalar scale = observation_scale_t(
       parameters, data, row, observation_cmt, topology, dynamic_data);
-    prediction[static_cast<std::size_t>(row)] = state[observation_index] / scale;
+    const auto direct_prediction = parameters.find("F");
+    prediction[static_cast<std::size_t>(row)] = direct_prediction == parameters.end() ?
+      state[observation_index] / scale : direct_prediction->second;
     previous_k = topology.k;
     previous_parameters = std::move(parameters);
     previous_row = row;
@@ -2700,16 +3637,11 @@ std::unique_ptr<PredictionTape> record_prediction_tape(
     const ModelEngine& engine, const Rcpp::DataFrame& data,
     const Rcpp::NumericVector& theta, const Rcpp::NumericMatrix& eta,
     const Rcpp::NumericVector& sigma) {
-  int minimum_eta_columns = engine.n_eta;
-  if (engine.iov > 0) {
-    Rcpp::IntegerVector occasion = data[".OCC_INDEX"];
-    int n_occasions = 0;
-    for (int value : occasion) n_occasions = std::max(n_occasions, value);
-    minimum_eta_columns = engine.n_eta - engine.iov + n_occasions * engine.iov;
-  }
+  const int minimum_eta_columns = required_eta_columns(engine, data);
   const int between_eta = engine.n_eta - engine.iov;
   if (theta.size() != engine.n_theta || eta.ncol() < minimum_eta_columns ||
-      (engine.iov > 0 && (eta.ncol() - between_eta) % engine.iov != 0)) {
+      (!engine.re_enabled && engine.iov > 0 &&
+       (eta.ncol() - between_eta) % engine.iov != 0)) {
     throw std::invalid_argument("Prediction tape parameter dimensions are inconsistent with the model.");
   }
   std::vector<double> point = flatten_parameters(theta, eta, sigma);
@@ -2833,6 +3765,54 @@ MatrixT<Scalar> omega_matrix_t(const ModelEngine& engine,
 }
 
 template <class Scalar>
+MatrixT<Scalar> expanded_omega_t(const ModelEngine& engine,
+                                 const Rcpp::DataFrame& data,
+                                 const MatrixT<Scalar>& base,
+                                 int expanded_dimension) {
+  if (engine.re_enabled) {
+    MatrixT<Scalar> output = MatrixT<Scalar>::Zero(
+      expanded_dimension, expanded_dimension);
+    int offset = 0;
+    for (std::size_t block_index = 0; block_index < engine.re_blocks.size(); ++block_index) {
+      const std::vector<int>& indices = engine.re_blocks[block_index];
+      const std::string total_name = ".RE_TOTAL_" + std::to_string(block_index + 1U);
+      const int units = static_cast<int>(data_value(data, total_name, 0));
+      for (int unit = 0; unit < units; ++unit) {
+        for (std::size_t row = 0; row < indices.size(); ++row) {
+          for (std::size_t column = 0; column < indices.size(); ++column) {
+            output(offset + unit * static_cast<int>(indices.size()) + static_cast<int>(row),
+                   offset + unit * static_cast<int>(indices.size()) + static_cast<int>(column)) =
+              base(indices[row], indices[column]);
+          }
+        }
+      }
+      offset += units * static_cast<int>(indices.size());
+    }
+    if (offset != expanded_dimension) {
+      throw std::invalid_argument("Expanded random-effect covariance has the wrong dimension.");
+    }
+    return output;
+  }
+  if (engine.iov == 0) return base;
+  const int between = engine.n_eta - engine.iov;
+  if (expanded_dimension < between ||
+      (expanded_dimension - between) % engine.iov != 0) {
+    throw std::invalid_argument("Expanded IOV covariance has an invalid layout.");
+  }
+  const int occasions = (expanded_dimension - between) / engine.iov;
+  MatrixT<Scalar> output = MatrixT<Scalar>::Zero(
+    expanded_dimension, expanded_dimension);
+  if (between) output.topLeftCorner(between, between) =
+    base.topLeftCorner(between, between);
+  for (int occasion = 0; occasion < occasions; ++occasion) {
+    const int target = between + occasion * engine.iov;
+    output.block(target, target, engine.iov, engine.iov) =
+      base.bottomRightCorner(engine.iov, engine.iov);
+  }
+  return output;
+}
+
+template <class Scalar>
 Scalar omega_subject_prior_t(const MatrixT<Scalar>& covariance,
                              const VectorT<Scalar>& eta) {
   const Eigen::Index n = covariance.rows();
@@ -2869,10 +3849,1363 @@ Scalar omega_subject_prior_t(const MatrixT<Scalar>& covariance,
 }
 
 template <class Scalar>
+std::vector<Scalar> evaluate_error_outputs_t(
+    const ModelEngine& engine, const Rcpp::DataFrame& data, int row, int subject,
+    const std::vector<Scalar>& theta, const std::vector<Scalar>& eta,
+    int eta_columns, const std::vector<Scalar>& sigma, int mixture_number,
+    const Scalar& prediction, bool first, double previous_dv,
+    double previous_time, const std::vector<std::size_t>& selected,
+    const char* context,
+    const ParametersT<Scalar>* input_overrides = nullptr) {
+  if (!engine.error || selected.empty()) {
+    throw std::logic_error(std::string("Compiled ") + context + " outputs are missing.");
+  }
+  const double current_time = row_optional(data, "TIME", row, 0.0);
+  const double current_dv = row_optional(data, "DV", row, NA_REAL);
+  ParametersT<Scalar> parameters = evaluate_parameters_t(
+    engine, data, row, subject, theta, eta, eta_columns, sigma,
+    mixture_number);
+  std::vector<Scalar> inputs(engine.error->input_names.size(), Scalar(0.0));
+  for (std::size_t index = 0; index < engine.error->input_names.size(); ++index) {
+    const std::string& name = engine.error->input_names[index];
+    int parameter_index = indexed_name(name, "THETA_");
+    if (parameter_index >= 0) {
+      if (parameter_index >= static_cast<int>(theta.size())) {
+        throw std::out_of_range("THETA index exceeds values in user likelihood.");
+      }
+      inputs[index] = theta[static_cast<std::size_t>(parameter_index)];
+      continue;
+    }
+    parameter_index = indexed_name(name, "ETA_");
+    if (parameter_index >= 0) {
+      const int column = eta_column(
+        engine, data, row, parameter_index, eta_columns);
+      const std::size_t position =
+        static_cast<std::size_t>(subject * eta_columns + column);
+      if (position >= eta.size()) {
+        throw std::out_of_range("ETA index exceeds values in user likelihood.");
+      }
+      inputs[index] = eta[position];
+      continue;
+    }
+    parameter_index = indexed_name(name, "SIGMA_");
+    if (parameter_index >= 0) {
+      if (parameter_index >= static_cast<int>(sigma.size())) {
+        throw std::out_of_range("SIGMA index exceeds values in user likelihood.");
+      }
+      inputs[index] = sigma[static_cast<std::size_t>(parameter_index)];
+      continue;
+    }
+    if (name == "F" || name == "PRED" || name == "IPRED") {
+      inputs[index] = prediction;
+      continue;
+    }
+    if (name == "DV") {
+      inputs[index] = Scalar(current_dv);
+      continue;
+    }
+    if (name == "PREV_DV") {
+      inputs[index] = Scalar(previous_dv);
+      continue;
+    }
+    if (name == "PREV_TIME") {
+      inputs[index] = Scalar(previous_time);
+      continue;
+    }
+    if (name == "DT") {
+      inputs[index] = Scalar(first ? 0.0 : current_time - previous_time);
+      continue;
+    }
+    if (name == "FIRST") {
+      inputs[index] = Scalar(first ? 1.0 : 0.0);
+      continue;
+    }
+    if (name == "MIXNUM") {
+      inputs[index] = Scalar(mixture_number);
+      continue;
+    }
+    if (input_overrides != nullptr) {
+      const auto overridden = input_overrides->find(name);
+      if (overridden != input_overrides->end()) {
+        inputs[index] = overridden->second;
+        continue;
+      }
+    }
+    const auto assigned = parameters.find(name);
+    if (assigned != parameters.end()) {
+      inputs[index] = assigned->second;
+      continue;
+    }
+    inputs[index] = Scalar(data_value(data, name, row));
+    if (!std::isfinite(scalar_value(inputs[index]))) {
+      throw std::domain_error("User likelihood input '" + name +
+                              "' is non-finite at row " +
+                              std::to_string(row + 1) + ".");
+    }
+  }
+  const std::vector<Scalar> output = engine.error->eval_outputs(inputs, selected);
+  for (const Scalar& value : output) {
+    if (!std::isfinite(scalar_value(value))) {
+      throw std::domain_error(std::string(context) +
+                              " returned a non-finite value at row " +
+                              std::to_string(row + 1) + ".");
+    }
+  }
+  return output;
+}
+
+template <class Scalar>
+Scalar user_likelihood_nll_t(
+    const ModelEngine& engine, const Rcpp::DataFrame& data, int row, int subject,
+    const std::vector<Scalar>& theta, const std::vector<Scalar>& eta,
+    int eta_columns, const std::vector<Scalar>& sigma, int mixture_number,
+    const Scalar& prediction, bool first, double previous_dv,
+    double previous_time) {
+  if (engine.likelihood_output.size() != 1U) {
+    throw std::logic_error("Compiled user likelihood is missing.");
+  }
+  const std::vector<Scalar> output = evaluate_error_outputs_t(
+    engine, data, row, subject, theta, eta, eta_columns, sigma,
+    mixture_number, prediction, first, previous_dv, previous_time,
+    engine.likelihood_output, "User likelihood");
+  if (engine.likelihood_scale == "log") return Scalar(-2.0) * output[0];
+  if (!(scalar_value(output[0]) > 0.0)) {
+    throw std::domain_error("LIK must be positive at row " +
+                            std::to_string(row + 1) + ".");
+  }
+  return Scalar(-2.0) * libertad::scalar_log(
+    scalar_floor_t(output[0], 1e-300));
+}
+
+template <class Scalar>
+Scalar log_sum_exp_t(const std::vector<Scalar>& values) {
+  if (values.empty()) throw std::invalid_argument("log-sum-exp requires values.");
+  Scalar maximum = values.front();
+  for (std::size_t index = 1; index < values.size(); ++index) {
+    maximum = libertad::choose_gt(values[index], maximum, values[index], maximum);
+  }
+  Scalar total = Scalar(0.0);
+  for (const Scalar& value : values) total += libertad::scalar_exp(value - maximum);
+  return maximum + libertad::scalar_log(total);
+}
+
+template <class Scalar>
+std::vector<Scalar> hmm_normalize_weights_t(
+    const std::vector<Scalar>& values, const std::string& scale,
+    const char* label, int row) {
+  if (values.empty()) throw std::invalid_argument("Hidden Markov weights are empty.");
+  std::vector<Scalar> result(values.size());
+  if (scale == "log") {
+    const Scalar normalizer = log_sum_exp_t(values);
+    for (std::size_t index = 0; index < values.size(); ++index) {
+      result[index] = libertad::scalar_exp(values[index] - normalizer);
+    }
+    return result;
+  }
+  Scalar total = Scalar(0.0);
+  for (const Scalar& value : values) {
+    if (scalar_value(value) < 0.0) {
+      throw std::domain_error(std::string("HMM ") + label +
+                              " weights must be non-negative at row " +
+                              std::to_string(row + 1) + ".");
+    }
+    total += value;
+  }
+  if (!(scalar_value(total) > 0.0)) {
+    throw std::domain_error(std::string("HMM ") + label +
+                            " weights sum to zero at row " +
+                            std::to_string(row + 1) + ".");
+  }
+  for (std::size_t index = 0; index < values.size(); ++index) {
+    result[index] = values[index] / total;
+  }
+  return result;
+}
+
+template <class Scalar>
+struct HmmRowComponents {
+  std::vector<Scalar> initial;
+  std::vector<std::vector<Scalar>> transition;
+  std::vector<Scalar> emission;
+  std::vector<Scalar> log_emission;
+};
+
+template <class Scalar>
+HmmRowComponents<Scalar> hmm_row_components_t(
+    const ModelEngine& engine, const Rcpp::DataFrame& data, int row, int subject,
+    const std::vector<Scalar>& theta, const std::vector<Scalar>& eta,
+    int eta_columns, const std::vector<Scalar>& sigma, int mixture_number,
+    const Scalar& prediction, bool first, double previous_dv,
+    double previous_time) {
+  const int states = engine.hmm_states;
+  const std::size_t state_count = static_cast<std::size_t>(states);
+  const std::size_t transition_count = engine.hmm_continuous ?
+    state_count * (state_count - 1U) : state_count * state_count;
+  const std::size_t expected = state_count + transition_count + state_count;
+  if (!engine.hmm_enabled || states < 2 || engine.hmm_outputs.size() != expected) {
+    throw std::logic_error("Compiled hidden Markov likelihood is inconsistent.");
+  }
+  const std::vector<Scalar> output = evaluate_error_outputs_t(
+    engine, data, row, subject, theta, eta, eta_columns, sigma,
+    mixture_number, prediction, first, previous_dv, previous_time,
+    engine.hmm_outputs, "Hidden Markov likelihood");
+  HmmRowComponents<Scalar> result;
+  if (first) {
+    result.initial = hmm_normalize_weights_t(
+      std::vector<Scalar>(output.begin(), output.begin() + states),
+      engine.hmm_initial_scale, "initial", row);
+  } else {
+    const std::size_t transition_offset = state_count;
+    result.transition.resize(state_count);
+    if (engine.hmm_continuous) {
+      MatrixT<Scalar> generator = MatrixT<Scalar>::Zero(states, states);
+      std::size_t rate_index = transition_offset;
+      for (int from = 0; from < states; ++from) {
+        for (int to = 0; to < states; ++to) {
+          if (from == to) continue;
+          Scalar rate = output[rate_index++];
+          if (engine.hmm_rate_scale == "log") rate = libertad::scalar_exp(rate);
+          if (scalar_value(rate) < 0.0) {
+            throw std::domain_error(
+              "Continuous-time HMM rates must be non-negative at row " +
+              std::to_string(row + 1) + ".");
+          }
+          generator(from, to) = rate;
+          generator(from, from) -= rate;
+        }
+      }
+      const double current_time = row_optional(data, "TIME", row, 0.0);
+      const double dt = current_time - previous_time;
+      if (!std::isfinite(dt) || dt < 0.0) {
+        throw std::domain_error(
+          "Continuous-time HMM observations must be ordered by non-decreasing TIME within sequence.");
+      }
+      const MatrixT<Scalar> transition = matrix_exp_pade(
+        MatrixT<Scalar>(generator * Scalar(dt)));
+      for (int from = 0; from < states; ++from) {
+        result.transition[static_cast<std::size_t>(from)].resize(state_count);
+        for (int to = 0; to < states; ++to) {
+          result.transition[static_cast<std::size_t>(from)]
+                           [static_cast<std::size_t>(to)] = transition(from, to);
+        }
+      }
+    } else {
+      for (int from = 0; from < states; ++from) {
+        const auto begin = output.begin() + static_cast<std::ptrdiff_t>(
+          transition_offset + static_cast<std::size_t>(from * states));
+        result.transition[static_cast<std::size_t>(from)] =
+          hmm_normalize_weights_t(
+            std::vector<Scalar>(begin, begin + states),
+            engine.hmm_transition_scale, "transition", row);
+      }
+    }
+  }
+  const std::size_t emission_offset = state_count + transition_count;
+  result.emission.resize(state_count);
+  result.log_emission.resize(state_count);
+  for (std::size_t state = 0; state < state_count; ++state) {
+    const Scalar value = output[emission_offset + state];
+    if (engine.hmm_emission_scale == "log") {
+      result.log_emission[state] = value;
+      result.emission[state] = Scalar(0.0);
+    } else {
+      if (scalar_value(value) < 0.0) {
+        throw std::domain_error(
+          "HMM emission likelihoods must be non-negative at row " +
+          std::to_string(row + 1) + ".");
+      }
+      result.emission[state] = value;
+      result.log_emission[state] = libertad::scalar_log(
+        scalar_floor_t(value, 1e-300));
+    }
+  }
+  return result;
+}
+
+template <class Scalar>
+Scalar hmm_row_nll_t(
+    const ModelEngine& engine, const Rcpp::DataFrame& data, int row, int subject,
+    const std::vector<Scalar>& theta, const std::vector<Scalar>& eta,
+    int eta_columns, const std::vector<Scalar>& sigma, int mixture_number,
+    const Scalar& prediction, bool first, double previous_dv,
+    double previous_time, std::vector<Scalar>& filtered,
+    HmmRowComponents<Scalar>* components_output = nullptr) {
+  const int states = engine.hmm_states;
+  const std::size_t state_count = static_cast<std::size_t>(states);
+  HmmRowComponents<Scalar> components = hmm_row_components_t(
+    engine, data, row, subject, theta, eta, eta_columns, sigma,
+    mixture_number, prediction, first, previous_dv, previous_time);
+  std::vector<Scalar> prior(state_count);
+  if (first) {
+    prior = components.initial;
+  } else {
+    if (filtered.size() != state_count) {
+      throw std::logic_error("Hidden Markov filter state has the wrong dimension.");
+    }
+    std::fill(prior.begin(), prior.end(), Scalar(0.0));
+    for (int from = 0; from < states; ++from) {
+      for (int to = 0; to < states; ++to) {
+        prior[static_cast<std::size_t>(to)] +=
+          filtered[static_cast<std::size_t>(from)] *
+          components.transition[static_cast<std::size_t>(from)]
+                               [static_cast<std::size_t>(to)];
+      }
+    }
+  }
+  if (components_output != nullptr) *components_output = components;
+  filtered.assign(state_count, Scalar(0.0));
+  if (engine.hmm_emission_scale == "log") {
+    std::vector<Scalar> log_weight(state_count);
+    for (std::size_t state = 0; state < state_count; ++state) {
+      log_weight[state] = libertad::scalar_log(
+        scalar_floor_t(prior[state], 1e-300)) + components.log_emission[state];
+    }
+    const Scalar log_likelihood = log_sum_exp_t(log_weight);
+    for (std::size_t state = 0; state < state_count; ++state) {
+      filtered[state] = libertad::scalar_exp(log_weight[state] - log_likelihood);
+    }
+    return Scalar(-2.0) * log_likelihood;
+  }
+  Scalar likelihood = Scalar(0.0);
+  for (std::size_t state = 0; state < state_count; ++state) {
+    filtered[state] = prior[state] * components.emission[state];
+    likelihood += filtered[state];
+  }
+  if (!(scalar_value(likelihood) > 0.0)) {
+    throw std::domain_error("HMM observation likelihood is zero at row " +
+                            std::to_string(row + 1) + ".");
+  }
+  for (Scalar& value : filtered) value /= likelihood;
+  return Scalar(-2.0) * libertad::scalar_log(
+    scalar_floor_t(likelihood, 1e-300));
+}
+
+template <class Scalar>
+Scalar positive_definite_gaussian_nll_t(
+    const MatrixT<Scalar>& covariance, const VectorT<Scalar>& residual,
+    const std::string& context);
+
+inline int residual_group_endpoint(const ResidualGroupSpec& group, double dvid) {
+  for (std::size_t index = 0; index < group.dvid.size(); ++index) {
+    if (group.dvid[index] == dvid) return static_cast<int>(index);
+  }
+  return -1;
+}
+
+inline int residual_group_for_dvid(const ModelEngine& engine, double dvid) {
+  for (std::size_t index = 0; index < engine.residual_groups.size(); ++index) {
+    if (residual_group_endpoint(engine.residual_groups[index], dvid) >= 0) {
+      return static_cast<int>(index);
+    }
+  }
+  return -1;
+}
+
+template <class Scalar>
+Scalar residual_group_correlation_t(
+    const ResidualGroupSpec& group, int row, int column,
+    const std::vector<Scalar>& theta, const std::vector<Scalar>& sigma) {
+  const int dimension = static_cast<int>(group.dvid.size());
+  if (row < 0 || column < 0 || row >= dimension || column >= dimension) {
+    throw std::out_of_range("Residual-group endpoint index is outside its correlation matrix.");
+  }
+  const std::size_t position = static_cast<std::size_t>(row * dimension + column);
+  const std::string& source = group.source[position];
+  if (source == "fixed") return Scalar(group.value[position]);
+  const std::vector<Scalar>& parameters = source == "theta" ? theta : sigma;
+  const int index = group.index[position];
+  if (index < 0 || index >= static_cast<int>(parameters.size())) {
+    throw std::out_of_range("Residual correlation parameter index is outside its parameter vector.");
+  }
+  Scalar correlation = parameters[static_cast<std::size_t>(index)];
+  if (group.transform == "tanh") correlation = libertad::scalar_tanh(correlation);
+  if (!(std::abs(scalar_value(correlation)) < 1.0)) {
+    throw std::domain_error("Cross-endpoint residual correlations must be strictly between -1 and 1.");
+  }
+  return correlation;
+}
+
+template <class Scalar>
+std::vector<Scalar> residual_grouped_subject_nll_t(
+    const ModelEngine& engine, const Rcpp::DataFrame& data,
+    const std::vector<Scalar>& prediction, const std::vector<Scalar>& theta,
+    const std::vector<Scalar>& sigma,
+    const std::vector<Scalar>* variance_prediction = nullptr) {
+  Rcpp::NumericVector dv = data["DV"];
+  Rcpp::IntegerVector evid = data["EVID"];
+  Rcpp::IntegerVector mdv = data["MDV"];
+  Rcpp::IntegerVector subjects = data[".ID_INDEX"];
+  const bool has_dvid = data.containsElementNamed("DVID");
+  int n_subjects = 0;
+  for (int value : subjects) n_subjects = std::max(n_subjects, value);
+  std::vector<Scalar> result(static_cast<std::size_t>(n_subjects), Scalar(0.0));
+  std::vector<bool> processed(static_cast<std::size_t>(data.nrows()), false);
+  auto observed = [&](int row) {
+    return evid[row] == 0 && mdv[row] == 0 && std::isfinite(dv[row]);
+  };
+  for (int row = 0; row < data.nrows(); ++row) {
+    if (!observed(row) || processed[static_cast<std::size_t>(row)]) continue;
+    const int subject = subjects[row] - 1;
+    const double dvid = has_dvid ? row_optional(data, "DVID", row, 1.0) : 1.0;
+    const int group_index = residual_group_for_dvid(engine, dvid);
+    std::vector<int> rows{row};
+    if (group_index >= 0) {
+      rows.clear();
+      const double time = row_optional(data, "TIME", row, 0.0);
+      std::vector<bool> endpoint_seen(
+        engine.residual_groups[static_cast<std::size_t>(group_index)].dvid.size(), false);
+      for (int candidate = 0; candidate < data.nrows(); ++candidate) {
+        if (!observed(candidate) || subjects[candidate] - 1 != subject ||
+            row_optional(data, "TIME", candidate, 0.0) != time) continue;
+        const double candidate_dvid = has_dvid ?
+          row_optional(data, "DVID", candidate, 1.0) : 1.0;
+        const int endpoint = residual_group_endpoint(
+          engine.residual_groups[static_cast<std::size_t>(group_index)], candidate_dvid);
+        if (endpoint < 0) continue;
+        if (endpoint_seen[static_cast<std::size_t>(endpoint)]) {
+          throw std::domain_error(
+            "A correlated residual group has duplicate DVID observations at one subject/time.");
+        }
+        endpoint_seen[static_cast<std::size_t>(endpoint)] = true;
+        rows.push_back(candidate);
+      }
+    }
+    const Eigen::Index dimension = static_cast<Eigen::Index>(rows.size());
+    VectorT<Scalar> residual(dimension);
+    VectorT<Scalar> variance(dimension);
+    std::vector<int> endpoint(rows.size(), -1);
+    for (Eigen::Index position = 0; position < dimension; ++position) {
+      const int selected_row = rows[static_cast<std::size_t>(position)];
+      const Scalar f = prediction[static_cast<std::size_t>(selected_row)];
+      const Scalar scale_prediction = variance_prediction == nullptr ? f :
+        variance_prediction->at(static_cast<std::size_t>(selected_row));
+      const double selected_dvid = has_dvid ?
+        row_optional(data, "DVID", selected_row, 1.0) : 1.0;
+      variance[position] = residual_variance_t(
+        engine, scale_prediction, sigma, std::max(1, static_cast<int>(selected_dvid)));
+      if (engine.error_type == "exponential") {
+        if (!(dv[selected_row] > 0.0)) {
+          throw std::domain_error("Exponential residual likelihood requires positive DV.");
+        }
+        residual[position] = Scalar(std::log(dv[selected_row])) -
+          libertad::scalar_log(scalar_floor_t(f, 1e-300));
+      } else {
+        residual[position] = Scalar(dv[selected_row]) - f;
+      }
+      if (group_index >= 0) {
+        endpoint[static_cast<std::size_t>(position)] = residual_group_endpoint(
+          engine.residual_groups[static_cast<std::size_t>(group_index)], selected_dvid);
+      }
+      processed[static_cast<std::size_t>(selected_row)] = true;
+    }
+    MatrixT<Scalar> covariance(dimension, dimension);
+    for (Eigen::Index first = 0; first < dimension; ++first) {
+      for (Eigen::Index second = 0; second < dimension; ++second) {
+        Scalar correlation = first == second ? Scalar(1.0) : Scalar(0.0);
+        if (group_index >= 0 && first != second) {
+          correlation = residual_group_correlation_t(
+            engine.residual_groups[static_cast<std::size_t>(group_index)],
+            endpoint[static_cast<std::size_t>(first)],
+            endpoint[static_cast<std::size_t>(second)], theta, sigma);
+        }
+        covariance(first, second) = correlation *
+          libertad::scalar_sqrt(variance[first] * variance[second]);
+      }
+    }
+    result[static_cast<std::size_t>(subject)] += positive_definite_gaussian_nll_t(
+      covariance, residual, "Cross-endpoint residual covariance");
+  }
+  return result;
+}
+
+template <class Scalar>
+struct KalmanFilterState {
+  VectorT<Scalar> mean;
+  MatrixT<Scalar> covariance;
+};
+
+template <class Scalar>
+struct KalmanRowComponents {
+  VectorT<Scalar> predicted_mean;
+  MatrixT<Scalar> predicted_covariance;
+  VectorT<Scalar> filtered_mean;
+  MatrixT<Scalar> filtered_covariance;
+  MatrixT<Scalar> transition;
+  MatrixT<Scalar> smoother_cross_covariance;
+  VectorT<Scalar> observation;
+  Scalar observation_variance = Scalar(0.0);
+  Scalar innovation = Scalar(0.0);
+  Scalar innovation_variance = Scalar(0.0);
+  std::vector<VectorT<Scalar>> particle_states;
+  std::vector<Scalar> particle_weights;
+  std::vector<int> particle_ancestors;
+  std::vector<int> particle_regimes;
+};
+
+template <class Scalar>
+MatrixT<Scalar> state_space_cholesky_t(const MatrixT<Scalar>& covariance,
+                                       const char* context) {
+  const Eigen::Index dimension = covariance.rows();
+  MatrixT<Scalar> lower = MatrixT<Scalar>::Zero(dimension, dimension);
+  for (Eigen::Index row = 0; row < dimension; ++row) {
+    for (Eigen::Index column = 0; column <= row; ++column) {
+      Scalar value = Scalar(0.5) *
+        (covariance(row, column) + covariance(column, row));
+      for (Eigen::Index k = 0; k < column; ++k) {
+        value -= lower(row, k) * lower(column, k);
+      }
+      if (row == column) {
+        if (!(scalar_value(value) > -1e-10)) {
+          throw std::domain_error(std::string(context) + " is not positive semidefinite.");
+        }
+        lower(row, column) = libertad::scalar_sqrt(scalar_floor_t(value, 1e-12));
+      } else {
+        lower(row, column) = value / lower(column, column);
+      }
+    }
+  }
+  return lower;
+}
+
+inline std::uint64_t state_space_hash(std::uint64_t value) {
+  value += 0x9e3779b97f4a7c15ULL;
+  value = (value ^ (value >> 30U)) * 0xbf58476d1ce4e5b9ULL;
+  value = (value ^ (value >> 27U)) * 0x94d049bb133111ebULL;
+  return value ^ (value >> 31U);
+}
+
+inline double state_space_uniform(int seed, int row, int particle,
+                                  int dimension, int stream = 0) {
+  std::uint64_t value = static_cast<std::uint64_t>(static_cast<std::uint32_t>(seed));
+  value ^= static_cast<std::uint64_t>(row + 1) * 0x9e3779b97f4a7c15ULL;
+  value ^= static_cast<std::uint64_t>(particle + 1) * 0xbf58476d1ce4e5b9ULL;
+  value ^= static_cast<std::uint64_t>(dimension + 1) * 0x94d049bb133111ebULL;
+  value ^= static_cast<std::uint64_t>(stream + 1) * 0xd6e8feb86659fd93ULL;
+  const std::uint64_t hashed = state_space_hash(value);
+  return (static_cast<double>((hashed >> 11U) + 1ULL)) /
+    9007199254740993.0;
+}
+
+inline double state_space_normal(int seed, int row, int particle,
+                                 int dimension, int stream = 0) {
+  const double first = state_space_uniform(seed, row, particle, 2 * dimension, stream);
+  const double second = state_space_uniform(seed, row, particle, 2 * dimension + 1, stream);
+  return std::sqrt(-2.0 * std::log(std::max(first, 1e-15))) *
+    std::cos(2.0 * 3.14159265358979323846 * second);
+}
+
+template <class Scalar>
+struct NonlinearStateOutputs {
+  VectorT<Scalar> initial_mean;
+  MatrixT<Scalar> initial_covariance;
+  VectorT<Scalar> transition;
+  MatrixT<Scalar> process_covariance;
+  Scalar observation = Scalar(0.0);
+  Scalar observation_variance = Scalar(0.0);
+};
+
+template <class Scalar>
+struct ParticleFilterState {
+  std::vector<VectorT<Scalar>> particles;
+  std::vector<Scalar> weights;
+  std::vector<int> regimes;
+};
+
+template <class Scalar>
+NonlinearStateOutputs<Scalar> nonlinear_state_raw_outputs_t(
+    const ModelEngine& engine, const Rcpp::DataFrame& data, int row, int subject,
+    const std::vector<Scalar>& theta, const std::vector<Scalar>& eta,
+    int eta_columns, const std::vector<Scalar>& sigma, int mixture_number,
+    const Scalar& prediction, bool first, double previous_dv,
+    double previous_time, const VectorT<Scalar>& state) {
+  ParametersT<Scalar> overrides;
+  for (int index = 0; index < engine.kalman_states; ++index) {
+    overrides[engine.kalman_state_inputs[static_cast<std::size_t>(index)]] = state[index];
+  }
+  const std::vector<Scalar> output = evaluate_error_outputs_t(
+    engine, data, row, subject, theta, eta, eta_columns, sigma,
+    mixture_number, prediction, first, previous_dv, previous_time,
+    engine.kalman_outputs, "Nonlinear state-space likelihood", &overrides);
+  const int states = engine.kalman_states;
+  const std::size_t state_count = static_cast<std::size_t>(states);
+  const std::size_t expected = 2U * state_count * state_count +
+    2U * state_count + 2U;
+  if (output.size() != expected) {
+    throw std::logic_error("Compiled nonlinear state-space outputs are inconsistent.");
+  }
+  std::size_t cursor = 0U;
+  NonlinearStateOutputs<Scalar> result;
+  result.initial_mean.resize(states);
+  result.transition.resize(states);
+  for (int index = 0; index < states; ++index) result.initial_mean[index] = output[cursor++];
+  auto read_matrix = [&]() {
+    MatrixT<Scalar> matrix(states, states);
+    for (int matrix_row = 0; matrix_row < states; ++matrix_row) {
+      for (int matrix_column = 0; matrix_column < states; ++matrix_column) {
+        matrix(matrix_row, matrix_column) = output[cursor++];
+      }
+    }
+    return matrix;
+  };
+  result.initial_covariance = read_matrix();
+  for (int index = 0; index < states; ++index) result.transition[index] = output[cursor++];
+  result.process_covariance = read_matrix();
+  result.observation = output[cursor++];
+  result.observation_variance = output[cursor++];
+  return result;
+}
+
+template <class Scalar>
+NonlinearStateOutputs<Scalar> nonlinear_state_outputs_t(
+    const ModelEngine& engine, const Rcpp::DataFrame& data, int row, int subject,
+    const std::vector<Scalar>& theta, const std::vector<Scalar>& eta,
+    int eta_columns, const std::vector<Scalar>& sigma, int mixture_number,
+    const Scalar& prediction, bool first, double previous_dv,
+    double previous_time, const VectorT<Scalar>& state) {
+  NonlinearStateOutputs<Scalar> result = nonlinear_state_raw_outputs_t(
+    engine, data, row, subject, theta, eta, eta_columns, sigma,
+    mixture_number, prediction, first, previous_dv, previous_time, state);
+  if (engine.kalman_dynamics != "sde" || first) return result;
+  const double current_time = row_optional(data, "TIME", row, previous_time);
+  const double interval = std::max(0.0, current_time - previous_time);
+  const double step = interval / static_cast<double>(engine.kalman_sde_substeps);
+  VectorT<Scalar> current = state;
+  MatrixT<Scalar> covariance = MatrixT<Scalar>::Zero(
+    engine.kalman_states, engine.kalman_states);
+  if (step > 0.0) {
+    for (int substep = 0; substep < engine.kalman_sde_substeps; ++substep) {
+      const NonlinearStateOutputs<Scalar> local = nonlinear_state_raw_outputs_t(
+        engine, data, row, subject, theta, eta, eta_columns, sigma,
+        mixture_number, prediction, false, previous_dv,
+        previous_time + substep * step, current);
+      current += Scalar(step) * local.transition;
+      covariance += Scalar(step) * local.process_covariance *
+        local.process_covariance.transpose();
+    }
+  }
+  result.transition = current;
+  result.process_covariance = Scalar(0.5) *
+    (covariance + covariance.transpose());
+  return result;
+}
+
+template <class Scalar>
+struct SwitchingStateOutputs {
+  std::vector<Scalar> initial;
+  MatrixT<Scalar> regime_transition;
+  std::vector<NonlinearStateOutputs<Scalar>> regime;
+};
+
+template <class Scalar>
+void normalize_switching_weights(std::vector<Scalar>& value,
+                                 const std::string& scale,
+                                 const char* context) {
+  Scalar total = Scalar(0.0);
+  if (scale == "log") {
+    double maximum = -std::numeric_limits<double>::infinity();
+    for (const Scalar& item : value) maximum = std::max(maximum, scalar_value(item));
+    for (Scalar& item : value) {
+      item = libertad::scalar_exp(item - Scalar(maximum));
+      total += item;
+    }
+  } else {
+    for (const Scalar& item : value) {
+      if (scalar_value(item) < 0.0) {
+        throw std::domain_error(std::string(context) + " contains a negative weight.");
+      }
+      total += item;
+    }
+  }
+  if (!(scalar_value(total) > 0.0)) {
+    throw std::domain_error(std::string(context) + " has zero total weight.");
+  }
+  for (Scalar& item : value) item /= total;
+}
+
+template <class Scalar>
+SwitchingStateOutputs<Scalar> switching_state_raw_outputs_t(
+    const ModelEngine& engine, const Rcpp::DataFrame& data, int row, int subject,
+    const std::vector<Scalar>& theta, const std::vector<Scalar>& eta,
+    int eta_columns, const std::vector<Scalar>& sigma, int mixture_number,
+    const Scalar& prediction, bool first, double previous_dv,
+    double previous_time, const VectorT<Scalar>& state) {
+  ParametersT<Scalar> overrides;
+  for (int index = 0; index < engine.kalman_states; ++index) {
+    overrides[engine.kalman_state_inputs[static_cast<std::size_t>(index)]] = state[index];
+  }
+  const std::vector<Scalar> output = evaluate_error_outputs_t(
+    engine, data, row, subject, theta, eta, eta_columns, sigma,
+    mixture_number, prediction, first, previous_dv, previous_time,
+    engine.switching_outputs, "Switching state-space likelihood", &overrides);
+  const int regimes = engine.switching_regimes;
+  const int states = engine.kalman_states;
+  const std::size_t expected = static_cast<std::size_t>(regimes + regimes * regimes +
+    regimes * (states + states * states + 2));
+  if (output.size() != expected) {
+    throw std::logic_error("Compiled switching state-space outputs are inconsistent.");
+  }
+  std::size_t cursor = 0U;
+  SwitchingStateOutputs<Scalar> result;
+  result.initial.resize(static_cast<std::size_t>(regimes));
+  for (int regime = 0; regime < regimes; ++regime) result.initial[regime] = output[cursor++];
+  normalize_switching_weights(
+    result.initial, engine.switching_initial_scale, "Initial regime distribution");
+  result.regime_transition.resize(regimes, regimes);
+  for (int from = 0; from < regimes; ++from) {
+    std::vector<Scalar> local(static_cast<std::size_t>(regimes));
+    for (int to = 0; to < regimes; ++to) local[to] = output[cursor++];
+    normalize_switching_weights(
+      local, engine.switching_transition_scale, "Regime transition row");
+    for (int to = 0; to < regimes; ++to) result.regime_transition(from, to) = local[to];
+  }
+  result.regime.resize(static_cast<std::size_t>(regimes));
+  for (int regime = 0; regime < regimes; ++regime) {
+    NonlinearStateOutputs<Scalar>& local = result.regime[static_cast<std::size_t>(regime)];
+    local.transition.resize(states);
+    for (int index = 0; index < states; ++index) local.transition[index] = output[cursor++];
+    local.process_covariance.resize(states, states);
+    for (int matrix_row = 0; matrix_row < states; ++matrix_row) {
+      for (int matrix_column = 0; matrix_column < states; ++matrix_column) {
+        local.process_covariance(matrix_row, matrix_column) = output[cursor++];
+      }
+    }
+    local.observation = output[cursor++];
+    local.observation_variance = output[cursor++];
+  }
+  return result;
+}
+
+template <class Scalar>
+int sample_switching_regime(const std::vector<Scalar>& probability,
+                            double uniform) {
+  Scalar cumulative = probability.front();
+  int selected = 0;
+  while (selected + 1 < static_cast<int>(probability.size()) &&
+         path_lt(cumulative, Scalar(uniform))) {
+    ++selected;
+    cumulative += probability[static_cast<std::size_t>(selected)];
+  }
+  return selected;
+}
+
+template <class Scalar>
+Scalar particle_row_nll_t(
+    const ModelEngine& engine, const Rcpp::DataFrame& data, int row, int subject,
+    const std::vector<Scalar>& theta, const std::vector<Scalar>& eta,
+    int eta_columns, const std::vector<Scalar>& sigma, int mixture_number,
+    const Scalar& prediction, bool first, double previous_dv,
+    double previous_time, ParticleFilterState<Scalar>& filter,
+    KalmanRowComponents<Scalar>* components_output = nullptr) {
+  const int states = engine.kalman_states;
+  const int particles = engine.kalman_particles;
+  const VectorT<Scalar> zero = VectorT<Scalar>::Zero(states);
+  const NonlinearStateOutputs<Scalar> base = nonlinear_state_outputs_t(
+    engine, data, row, subject, theta, eta, eta_columns, sigma,
+    mixture_number, prediction, first, previous_dv, previous_time,
+    first ? zero : filter.particles.front());
+  MatrixT<Scalar> root = MatrixT<Scalar>::Zero(states, states);
+  if (first || !engine.switching_enabled) {
+    const MatrixT<Scalar> covariance = first ?
+      base.initial_covariance : base.process_covariance;
+    root = state_space_cholesky_t(
+      covariance, first ? "Particle initial covariance" : "Particle process covariance");
+  }
+  std::vector<VectorT<Scalar>> propagated(static_cast<std::size_t>(particles));
+  std::vector<int> propagated_regime(static_cast<std::size_t>(particles), 0);
+  std::vector<Scalar> regime_importance(
+    static_cast<std::size_t>(particles), Scalar(1.0));
+  std::vector<Scalar> prior_weight(static_cast<std::size_t>(particles),
+                                   Scalar(1.0 / static_cast<double>(particles)));
+  if (!first) {
+    if (filter.particles.size() != static_cast<std::size_t>(particles) ||
+        filter.weights.size() != static_cast<std::size_t>(particles) ||
+        (engine.switching_enabled &&
+         filter.regimes.size() != static_cast<std::size_t>(particles))) {
+      throw std::logic_error("Particle filter state dimension changed within a sequence.");
+    }
+    prior_weight = filter.weights;
+  }
+  for (int particle = 0; particle < particles; ++particle) {
+    VectorT<Scalar> normal(states);
+    for (int state = 0; state < states; ++state) {
+      normal[state] = Scalar(state_space_normal(
+        engine.kalman_seed + 7919 * subject, row, particle, state, first ? 1 : 2));
+    }
+    if (engine.switching_enabled) {
+      const VectorT<Scalar>& current = first ? zero :
+        filter.particles[static_cast<std::size_t>(particle)];
+      const SwitchingStateOutputs<Scalar> switching = switching_state_raw_outputs_t(
+        engine, data, row, subject, theta, eta, eta_columns, sigma,
+        mixture_number, prediction, first, previous_dv, previous_time, current);
+      std::vector<Scalar> regime_probability;
+      if (first) {
+        regime_probability = switching.initial;
+      } else {
+        regime_probability.resize(static_cast<std::size_t>(engine.switching_regimes));
+        const int previous_regime = filter.regimes[static_cast<std::size_t>(particle)];
+        for (int regime = 0; regime < engine.switching_regimes; ++regime) {
+          regime_probability[static_cast<std::size_t>(regime)] =
+            switching.regime_transition(previous_regime, regime);
+        }
+      }
+      const int target_regime = particle % engine.switching_regimes;
+      propagated_regime[static_cast<std::size_t>(particle)] = target_regime;
+      const int target_count = particles / engine.switching_regimes +
+        (target_regime < particles % engine.switching_regimes ? 1 : 0);
+      const double proposal_probability =
+        static_cast<double>(target_count) / static_cast<double>(particles);
+      regime_importance[static_cast<std::size_t>(particle)] =
+        regime_probability[static_cast<std::size_t>(target_regime)] /
+        Scalar(proposal_probability);
+    }
+    if (first) {
+      propagated[static_cast<std::size_t>(particle)] = base.initial_mean + root * normal;
+    } else if (engine.kalman_dynamics == "sde") {
+      VectorT<Scalar> current = filter.particles[static_cast<std::size_t>(particle)];
+      const double current_time = row_optional(data, "TIME", row, previous_time);
+      const double interval = std::max(0.0, current_time - previous_time);
+      const double step = interval / static_cast<double>(engine.kalman_sde_substeps);
+      for (int substep = 0; substep < engine.kalman_sde_substeps; ++substep) {
+        const NonlinearStateOutputs<Scalar> local = engine.switching_enabled ?
+          switching_state_raw_outputs_t(
+            engine, data, row, subject, theta, eta, eta_columns, sigma,
+            mixture_number, prediction, false, previous_dv,
+            previous_time + substep * step, current).regime[
+              static_cast<std::size_t>(propagated_regime[static_cast<std::size_t>(particle)])] :
+          nonlinear_state_raw_outputs_t(
+            engine, data, row, subject, theta, eta, eta_columns, sigma,
+            mixture_number, prediction, false, previous_dv,
+            previous_time + substep * step, current);
+        VectorT<Scalar> increment(states);
+        for (int state = 0; state < states; ++state) {
+          increment[state] = Scalar(std::sqrt(step) * state_space_normal(
+            engine.kalman_seed + 7919 * subject, row, particle,
+            substep * states + state, 6));
+        }
+        VectorT<Scalar> next = current + Scalar(step) * local.transition +
+          local.process_covariance * increment;
+        if (engine.kalman_sde_method == "milstein") {
+          for (int first_state = 0; first_state < states; ++first_state) {
+            for (int second_state = 0; second_state < states; ++second_state) {
+              if (first_state != second_state &&
+                  std::abs(scalar_value(local.process_covariance(first_state, second_state))) > 1e-12) {
+                throw std::domain_error(
+                  "Milstein propagation currently requires diagonal diffusion.");
+              }
+            }
+            const double derivative_step = engine.kalman_jacobian_step *
+              std::max(1.0, std::abs(scalar_value(current[first_state])));
+            VectorT<Scalar> plus = current;
+            VectorT<Scalar> minus = current;
+            plus[first_state] += Scalar(derivative_step);
+            minus[first_state] -= Scalar(derivative_step);
+            const int regime = propagated_regime[static_cast<std::size_t>(particle)];
+            const Scalar upper = engine.switching_enabled ?
+              switching_state_raw_outputs_t(
+                engine, data, row, subject, theta, eta, eta_columns, sigma,
+                mixture_number, prediction, false, previous_dv,
+                previous_time + substep * step, plus).regime[
+                  static_cast<std::size_t>(regime)].process_covariance(first_state, first_state) :
+              nonlinear_state_raw_outputs_t(
+                engine, data, row, subject, theta, eta, eta_columns, sigma,
+                mixture_number, prediction, false, previous_dv,
+                previous_time + substep * step, plus).process_covariance(first_state, first_state);
+            const Scalar lower = engine.switching_enabled ?
+              switching_state_raw_outputs_t(
+                engine, data, row, subject, theta, eta, eta_columns, sigma,
+                mixture_number, prediction, false, previous_dv,
+                previous_time + substep * step, minus).regime[
+                  static_cast<std::size_t>(regime)].process_covariance(first_state, first_state) :
+              nonlinear_state_raw_outputs_t(
+                engine, data, row, subject, theta, eta, eta_columns, sigma,
+                mixture_number, prediction, false, previous_dv,
+                previous_time + substep * step, minus).process_covariance(first_state, first_state);
+            const Scalar derivative = (upper - lower) / Scalar(2.0 * derivative_step);
+            const Scalar diffusion = local.process_covariance(first_state, first_state);
+            next[first_state] += Scalar(0.5) * diffusion * derivative *
+              (increment[first_state] * increment[first_state] - Scalar(step));
+          }
+        }
+        current = next;
+      }
+      propagated[static_cast<std::size_t>(particle)] = current;
+    } else {
+      const VectorT<Scalar>& current = filter.particles[static_cast<std::size_t>(particle)];
+      const NonlinearStateOutputs<Scalar> point = engine.switching_enabled ?
+        switching_state_raw_outputs_t(
+          engine, data, row, subject, theta, eta, eta_columns, sigma,
+          mixture_number, prediction, first, previous_dv, previous_time, current).regime[
+            static_cast<std::size_t>(propagated_regime[static_cast<std::size_t>(particle)])] :
+        nonlinear_state_outputs_t(
+          engine, data, row, subject, theta, eta, eta_columns, sigma,
+          mixture_number, prediction, first, previous_dv, previous_time, current);
+      const MatrixT<Scalar> local_root = engine.switching_enabled ?
+        state_space_cholesky_t(point.process_covariance,
+                               "Switching particle process covariance") : root;
+      propagated[static_cast<std::size_t>(particle)] =
+        point.transition + local_root * normal;
+    }
+  }
+  KalmanRowComponents<Scalar> components;
+  std::vector<Scalar> predictive_weight = prior_weight;
+  if (engine.switching_enabled) {
+    Scalar predictive_total = Scalar(0.0);
+    for (int particle = 0; particle < particles; ++particle) {
+      predictive_weight[static_cast<std::size_t>(particle)] *=
+        regime_importance[static_cast<std::size_t>(particle)];
+      predictive_total += predictive_weight[static_cast<std::size_t>(particle)];
+    }
+    if (!(scalar_value(predictive_total) > 0.0)) {
+      throw std::domain_error("Switching-state predictive regime mass is zero.");
+    }
+    for (Scalar& weight : predictive_weight) weight /= predictive_total;
+  }
+  components.predicted_mean = VectorT<Scalar>::Zero(states);
+  for (int particle = 0; particle < particles; ++particle) {
+    components.predicted_mean += predictive_weight[static_cast<std::size_t>(particle)] *
+      propagated[static_cast<std::size_t>(particle)];
+  }
+  components.predicted_covariance = MatrixT<Scalar>::Zero(states, states);
+  for (int particle = 0; particle < particles; ++particle) {
+    const VectorT<Scalar> centered = propagated[static_cast<std::size_t>(particle)] -
+      components.predicted_mean;
+    components.predicted_covariance += predictive_weight[static_cast<std::size_t>(particle)] *
+      centered * centered.transpose();
+  }
+  std::vector<Scalar> log_weight(static_cast<std::size_t>(particles));
+  std::vector<Scalar> observation_value(static_cast<std::size_t>(particles));
+  double maximum = -std::numeric_limits<double>::infinity();
+  const Scalar baseline = engine.kalman_prediction_baseline ? prediction : Scalar(0.0);
+  const Scalar observed = Scalar(row_optional(data, "DV", row, NA_REAL));
+  Scalar predicted_observation = Scalar(0.0);
+  for (int particle = 0; particle < particles; ++particle) {
+    const NonlinearStateOutputs<Scalar> point = engine.switching_enabled ?
+      switching_state_raw_outputs_t(
+        engine, data, row, subject, theta, eta, eta_columns, sigma,
+        mixture_number, prediction, first, previous_dv, previous_time,
+        propagated[static_cast<std::size_t>(particle)]).regime[
+          static_cast<std::size_t>(propagated_regime[static_cast<std::size_t>(particle)])] :
+      nonlinear_state_outputs_t(
+        engine, data, row, subject, theta, eta, eta_columns, sigma,
+        mixture_number, prediction, first, previous_dv, previous_time,
+        propagated[static_cast<std::size_t>(particle)]);
+    if (!(scalar_value(point.observation_variance) > 1e-14)) {
+      throw std::domain_error("Particle observation variance must be positive.");
+    }
+    observation_value[static_cast<std::size_t>(particle)] = baseline + point.observation;
+    predicted_observation += predictive_weight[static_cast<std::size_t>(particle)] *
+      observation_value[static_cast<std::size_t>(particle)];
+    const Scalar residual = observed - observation_value[static_cast<std::size_t>(particle)];
+    log_weight[static_cast<std::size_t>(particle)] =
+      libertad::scalar_log(scalar_floor_t(
+        prior_weight[static_cast<std::size_t>(particle)] *
+          regime_importance[static_cast<std::size_t>(particle)], 1e-300)) -
+      Scalar(0.5) * (libertad::scalar_log(point.observation_variance) +
+                     residual * residual / point.observation_variance);
+    maximum = std::max(maximum, scalar_value(log_weight[static_cast<std::size_t>(particle)]));
+  }
+  Scalar normalizer = Scalar(0.0);
+  for (const Scalar& value : log_weight) normalizer += libertad::scalar_exp(value - Scalar(maximum));
+  const Scalar log_likelihood = Scalar(maximum) + libertad::scalar_log(normalizer);
+  filter.weights.resize(static_cast<std::size_t>(particles));
+  for (int particle = 0; particle < particles; ++particle) {
+    filter.weights[static_cast<std::size_t>(particle)] =
+      libertad::scalar_exp(log_weight[static_cast<std::size_t>(particle)] - log_likelihood);
+  }
+  components.innovation = observed - predicted_observation;
+  components.innovation_variance = Scalar(0.0);
+  for (int particle = 0; particle < particles; ++particle) {
+    const Scalar centered = observation_value[static_cast<std::size_t>(particle)] -
+      predicted_observation;
+    components.innovation_variance += predictive_weight[static_cast<std::size_t>(particle)] *
+      centered * centered;
+  }
+  components.transition = MatrixT<Scalar>::Identity(states, states);
+  components.smoother_cross_covariance = MatrixT<Scalar>::Zero(states, states);
+  VectorT<Scalar> filtered_mean = VectorT<Scalar>::Zero(states);
+  for (int particle = 0; particle < particles; ++particle) {
+    filtered_mean += filter.weights[static_cast<std::size_t>(particle)] *
+      propagated[static_cast<std::size_t>(particle)];
+  }
+  MatrixT<Scalar> filtered_covariance = MatrixT<Scalar>::Zero(states, states);
+  for (int particle = 0; particle < particles; ++particle) {
+    const VectorT<Scalar> centered = propagated[static_cast<std::size_t>(particle)] - filtered_mean;
+    filtered_covariance += filter.weights[static_cast<std::size_t>(particle)] *
+      centered * centered.transpose();
+  }
+  Scalar squared_weight = Scalar(0.0);
+  for (const Scalar& weight : filter.weights) squared_weight += weight * weight;
+  std::vector<int> ancestors(static_cast<std::size_t>(particles));
+  std::iota(ancestors.begin(), ancestors.end(), 0);
+  // Keep both the resampling decision and systematic ancestry comparisons on
+  // the CppAD comparison tape. A changed ancestry then raises TapePathChange
+  // on replay and the population engine records the correct particle graph at
+  // the new parameter point instead of silently reusing stale indices.
+  const Scalar resampling_boundary = Scalar(
+    1.0 / (engine.kalman_ess_threshold * static_cast<double>(particles)));
+  if (squared_weight > resampling_boundary) {
+    const double offset = state_space_uniform(
+      engine.kalman_seed + 104729 * subject, row, 0, 0, 9) /
+      static_cast<double>(particles);
+    std::vector<VectorT<Scalar>> resampled(static_cast<std::size_t>(particles));
+    std::vector<int> resampled_regime(static_cast<std::size_t>(particles));
+    int selected = 0;
+    Scalar cumulative = filter.weights[0];
+    for (int particle = 0; particle < particles; ++particle) {
+      const double target = offset + static_cast<double>(particle) /
+        static_cast<double>(particles);
+      while (selected + 1 < particles && cumulative < Scalar(target)) {
+        ++selected;
+        cumulative += filter.weights[static_cast<std::size_t>(selected)];
+      }
+      resampled[static_cast<std::size_t>(particle)] =
+        propagated[static_cast<std::size_t>(selected)];
+      ancestors[static_cast<std::size_t>(particle)] = selected;
+      resampled_regime[static_cast<std::size_t>(particle)] =
+        propagated_regime[static_cast<std::size_t>(selected)];
+    }
+    filter.particles = std::move(resampled);
+    if (engine.switching_enabled) filter.regimes = std::move(resampled_regime);
+    std::fill(filter.weights.begin(), filter.weights.end(),
+              Scalar(1.0 / static_cast<double>(particles)));
+  } else {
+    filter.particles = std::move(propagated);
+    if (engine.switching_enabled) filter.regimes = std::move(propagated_regime);
+  }
+  if (components_output != nullptr) {
+    components.observation = VectorT<Scalar>::Zero(states);
+    components.filtered_mean = filtered_mean;
+    components.filtered_covariance = filtered_covariance;
+    components.particle_states = filter.particles;
+    components.particle_weights = filter.weights;
+    components.particle_ancestors = ancestors;
+    components.particle_regimes = filter.regimes;
+    *components_output = components;
+  }
+  return Scalar(-2.0) * log_likelihood;
+}
+
+template <class Scalar>
+Scalar nonlinear_kalman_row_nll_t(
+    const ModelEngine& engine, const Rcpp::DataFrame& data, int row, int subject,
+    const std::vector<Scalar>& theta, const std::vector<Scalar>& eta,
+    int eta_columns, const std::vector<Scalar>& sigma, int mixture_number,
+    const Scalar& prediction, bool first, double previous_dv,
+    double previous_time, KalmanFilterState<Scalar>& filtered,
+    KalmanRowComponents<Scalar>* components_output) {
+  const int states = engine.kalman_states;
+  const VectorT<Scalar> zero = VectorT<Scalar>::Zero(states);
+  NonlinearStateOutputs<Scalar> base = nonlinear_state_outputs_t(
+    engine, data, row, subject, theta, eta, eta_columns, sigma,
+    mixture_number, prediction, first, previous_dv, previous_time,
+    first ? zero : filtered.mean);
+  KalmanRowComponents<Scalar> components;
+  components.transition = MatrixT<Scalar>::Identity(states, states);
+  components.smoother_cross_covariance = MatrixT<Scalar>::Zero(states, states);
+  if (first) {
+    components.predicted_mean = base.initial_mean;
+    components.predicted_covariance = Scalar(0.5) *
+      (base.initial_covariance + base.initial_covariance.transpose());
+  } else if (engine.kalman_filter_type == "ekf") {
+    const VectorT<Scalar> previous_mean = filtered.mean;
+    const MatrixT<Scalar> previous_covariance = filtered.covariance;
+    components.predicted_mean = base.transition;
+    MatrixT<Scalar> jacobian(states, states);
+    for (int column = 0; column < states; ++column) {
+      const double step = engine.kalman_jacobian_step *
+        std::max(1.0, std::abs(scalar_value(previous_mean[column])));
+      VectorT<Scalar> plus = previous_mean;
+      VectorT<Scalar> minus = previous_mean;
+      plus[column] += Scalar(step);
+      minus[column] -= Scalar(step);
+      const VectorT<Scalar> upper = nonlinear_state_outputs_t(
+        engine, data, row, subject, theta, eta, eta_columns, sigma,
+        mixture_number, prediction, first, previous_dv, previous_time, plus).transition;
+      const VectorT<Scalar> lower = nonlinear_state_outputs_t(
+        engine, data, row, subject, theta, eta, eta_columns, sigma,
+        mixture_number, prediction, first, previous_dv, previous_time, minus).transition;
+      jacobian.col(column) = (upper - lower) / Scalar(2.0 * step);
+    }
+    components.transition = jacobian;
+    components.smoother_cross_covariance = previous_covariance * jacobian.transpose();
+    components.predicted_covariance = jacobian * previous_covariance *
+      jacobian.transpose() + base.process_covariance;
+  } else if (engine.kalman_filter_type == "ukf") {
+    const VectorT<Scalar> previous_mean = filtered.mean;
+    const MatrixT<Scalar> previous_covariance = filtered.covariance;
+    const double lambda = engine.kalman_ukf_alpha * engine.kalman_ukf_alpha *
+      (static_cast<double>(states) + engine.kalman_ukf_kappa) -
+      static_cast<double>(states);
+    const double scale = static_cast<double>(states) + lambda;
+    const int points = 2 * states + 1;
+    std::vector<double> mean_weight(static_cast<std::size_t>(points),
+                                    1.0 / (2.0 * scale));
+    std::vector<double> covariance_weight = mean_weight;
+    mean_weight[0] = lambda / scale;
+    covariance_weight[0] = mean_weight[0] +
+      (1.0 - engine.kalman_ukf_alpha * engine.kalman_ukf_alpha +
+       engine.kalman_ukf_beta);
+    const MatrixT<Scalar> root = state_space_cholesky_t(
+      previous_covariance, "UKF filtered covariance") * Scalar(std::sqrt(scale));
+    std::vector<VectorT<Scalar>> sigma_points(static_cast<std::size_t>(points));
+    std::vector<VectorT<Scalar>> propagated(static_cast<std::size_t>(points));
+    sigma_points[0] = previous_mean;
+    for (int column = 0; column < states; ++column) {
+      sigma_points[static_cast<std::size_t>(1 + column)] = previous_mean + root.col(column);
+      sigma_points[static_cast<std::size_t>(1 + states + column)] = previous_mean - root.col(column);
+    }
+    components.predicted_mean = VectorT<Scalar>::Zero(states);
+    for (int point = 0; point < points; ++point) {
+      propagated[static_cast<std::size_t>(point)] = nonlinear_state_outputs_t(
+        engine, data, row, subject, theta, eta, eta_columns, sigma,
+        mixture_number, prediction, first, previous_dv, previous_time,
+        sigma_points[static_cast<std::size_t>(point)]).transition;
+      components.predicted_mean += Scalar(mean_weight[static_cast<std::size_t>(point)]) *
+        propagated[static_cast<std::size_t>(point)];
+    }
+    components.predicted_covariance = base.process_covariance;
+    for (int point = 0; point < points; ++point) {
+      const VectorT<Scalar> before = sigma_points[static_cast<std::size_t>(point)] - previous_mean;
+      const VectorT<Scalar> after = propagated[static_cast<std::size_t>(point)] -
+        components.predicted_mean;
+      components.predicted_covariance +=
+        Scalar(covariance_weight[static_cast<std::size_t>(point)]) *
+        after * after.transpose();
+      components.smoother_cross_covariance +=
+        Scalar(covariance_weight[static_cast<std::size_t>(point)]) *
+        before * after.transpose();
+    }
+  } else {
+    throw std::logic_error("Particle filtering uses the dedicated particle state path.");
+  }
+  components.predicted_covariance = Scalar(0.5) *
+    (components.predicted_covariance + components.predicted_covariance.transpose());
+
+  VectorT<Scalar> observation_gradient(states);
+  Scalar observation_mean = Scalar(0.0);
+  if (engine.kalman_filter_type == "ukf") {
+    const double lambda = engine.kalman_ukf_alpha * engine.kalman_ukf_alpha *
+      (static_cast<double>(states) + engine.kalman_ukf_kappa) -
+      static_cast<double>(states);
+    const double scale = static_cast<double>(states) + lambda;
+    const int points = 2 * states + 1;
+    std::vector<double> mean_weight(static_cast<std::size_t>(points),
+                                    1.0 / (2.0 * scale));
+    std::vector<double> covariance_weight = mean_weight;
+    mean_weight[0] = lambda / scale;
+    covariance_weight[0] = mean_weight[0] +
+      (1.0 - engine.kalman_ukf_alpha * engine.kalman_ukf_alpha +
+       engine.kalman_ukf_beta);
+    const MatrixT<Scalar> root = state_space_cholesky_t(
+      components.predicted_covariance, "UKF predicted covariance") *
+      Scalar(std::sqrt(scale));
+    std::vector<VectorT<Scalar>> points_state(static_cast<std::size_t>(points));
+    std::vector<Scalar> values(static_cast<std::size_t>(points));
+    points_state[0] = components.predicted_mean;
+    for (int column = 0; column < states; ++column) {
+      points_state[static_cast<std::size_t>(1 + column)] =
+        components.predicted_mean + root.col(column);
+      points_state[static_cast<std::size_t>(1 + states + column)] =
+        components.predicted_mean - root.col(column);
+    }
+    for (int point = 0; point < points; ++point) {
+      values[static_cast<std::size_t>(point)] = nonlinear_state_outputs_t(
+        engine, data, row, subject, theta, eta, eta_columns, sigma,
+        mixture_number, prediction, first, previous_dv, previous_time,
+        points_state[static_cast<std::size_t>(point)]).observation;
+      observation_mean += Scalar(mean_weight[static_cast<std::size_t>(point)]) *
+        values[static_cast<std::size_t>(point)];
+    }
+    components.innovation_variance = base.observation_variance;
+    VectorT<Scalar> cross = VectorT<Scalar>::Zero(states);
+    for (int point = 0; point < points; ++point) {
+      const Scalar centered = values[static_cast<std::size_t>(point)] - observation_mean;
+      components.innovation_variance +=
+        Scalar(covariance_weight[static_cast<std::size_t>(point)]) * centered * centered;
+      cross += Scalar(covariance_weight[static_cast<std::size_t>(point)]) *
+        (points_state[static_cast<std::size_t>(point)] - components.predicted_mean) * centered;
+    }
+    observation_gradient = cross / components.innovation_variance;
+  } else {
+    const NonlinearStateOutputs<Scalar> at_mean = nonlinear_state_outputs_t(
+      engine, data, row, subject, theta, eta, eta_columns, sigma,
+      mixture_number, prediction, first, previous_dv, previous_time,
+      components.predicted_mean);
+    observation_mean = at_mean.observation;
+    for (int column = 0; column < states; ++column) {
+      const double step = engine.kalman_jacobian_step *
+        std::max(1.0, std::abs(scalar_value(components.predicted_mean[column])));
+      VectorT<Scalar> plus = components.predicted_mean;
+      VectorT<Scalar> minus = components.predicted_mean;
+      plus[column] += Scalar(step);
+      minus[column] -= Scalar(step);
+      const Scalar upper = nonlinear_state_outputs_t(
+        engine, data, row, subject, theta, eta, eta_columns, sigma,
+        mixture_number, prediction, first, previous_dv, previous_time, plus).observation;
+      const Scalar lower = nonlinear_state_outputs_t(
+        engine, data, row, subject, theta, eta, eta_columns, sigma,
+        mixture_number, prediction, first, previous_dv, previous_time, minus).observation;
+      observation_gradient[column] = (upper - lower) / Scalar(2.0 * step);
+    }
+    components.innovation_variance =
+      (observation_gradient.transpose() * components.predicted_covariance *
+       observation_gradient)[0] + at_mean.observation_variance;
+    observation_gradient = components.predicted_covariance *
+      observation_gradient / components.innovation_variance;
+  }
+  const Scalar baseline = engine.kalman_prediction_baseline ? prediction : Scalar(0.0);
+  components.innovation = Scalar(row_optional(data, "DV", row, NA_REAL)) -
+    baseline - observation_mean;
+  if (!(scalar_value(components.innovation_variance) > 1e-14)) {
+    throw std::domain_error("Nonlinear state-space innovation variance must be positive.");
+  }
+  const VectorT<Scalar> gain = observation_gradient;
+  filtered.mean = components.predicted_mean + gain * components.innovation;
+  filtered.covariance = components.predicted_covariance -
+    gain * components.innovation_variance * gain.transpose();
+  filtered.covariance = Scalar(0.5) *
+    (filtered.covariance + filtered.covariance.transpose());
+  components.filtered_mean = filtered.mean;
+  components.filtered_covariance = filtered.covariance;
+  if (components_output != nullptr) *components_output = components;
+  return libertad::scalar_log(components.innovation_variance) +
+    components.innovation * components.innovation /
+      components.innovation_variance;
+}
+
+template <class Scalar>
+Scalar kalman_row_nll_t(
+    const ModelEngine& engine, const Rcpp::DataFrame& data, int row, int subject,
+    const std::vector<Scalar>& theta, const std::vector<Scalar>& eta,
+    int eta_columns, const std::vector<Scalar>& sigma, int mixture_number,
+    const Scalar& prediction, bool first, double previous_dv,
+    double previous_time, KalmanFilterState<Scalar>& filtered,
+    KalmanRowComponents<Scalar>* components_output = nullptr) {
+  if (engine.kalman_filter_type != "linear") {
+    return nonlinear_kalman_row_nll_t(
+      engine, data, row, subject, theta, eta, eta_columns, sigma,
+      mixture_number, prediction, first, previous_dv, previous_time,
+      filtered, components_output);
+  }
+  const int states = engine.kalman_states;
+  const std::size_t state_count = static_cast<std::size_t>(states);
+  const std::size_t matrix_count = state_count * state_count;
+  const std::size_t expected = 2U * state_count + 3U * matrix_count + 1U;
+  if (!engine.kalman_enabled || states < 1 || engine.kalman_outputs.size() != expected) {
+    throw std::logic_error("Compiled Kalman state-space likelihood is inconsistent.");
+  }
+  const std::vector<Scalar> output = evaluate_error_outputs_t(
+    engine, data, row, subject, theta, eta, eta_columns, sigma,
+    mixture_number, prediction, first, previous_dv, previous_time,
+    engine.kalman_outputs, "Kalman state-space likelihood");
+  std::size_t cursor = 0U;
+  VectorT<Scalar> initial_mean(states);
+  for (int state = 0; state < states; ++state) initial_mean[state] = output[cursor++];
+  auto read_matrix = [&]() {
+    MatrixT<Scalar> matrix(states, states);
+    for (int matrix_row = 0; matrix_row < states; ++matrix_row) {
+      for (int matrix_column = 0; matrix_column < states; ++matrix_column) {
+        matrix(matrix_row, matrix_column) = output[cursor++];
+      }
+    }
+    return matrix;
+  };
+  const MatrixT<Scalar> initial_covariance = read_matrix();
+  const MatrixT<Scalar> transition = read_matrix();
+  const MatrixT<Scalar> process_covariance = read_matrix();
+  VectorT<Scalar> observation(states);
+  for (int state = 0; state < states; ++state) observation[state] = output[cursor++];
+  const Scalar observation_variance = output[cursor++];
+  if (!(scalar_value(observation_variance) >= 0.0)) {
+    throw std::domain_error(
+      "Kalman observation variance must be non-negative at row " +
+      std::to_string(row + 1) + ".");
+  }
+  KalmanRowComponents<Scalar> components;
+  components.transition = transition;
+  components.smoother_cross_covariance = MatrixT<Scalar>::Zero(states, states);
+  components.observation = observation;
+  components.observation_variance = observation_variance;
+  if (first) {
+    components.predicted_mean = initial_mean;
+    components.predicted_covariance = Scalar(0.5) *
+      (initial_covariance + initial_covariance.transpose());
+  } else {
+    if (filtered.mean.size() != states || filtered.covariance.rows() != states ||
+        filtered.covariance.cols() != states) {
+      throw std::logic_error("Kalman filter state has the wrong dimension.");
+    }
+    components.smoother_cross_covariance = filtered.covariance * transition.transpose();
+    components.predicted_mean = transition * filtered.mean;
+    components.predicted_covariance = transition * filtered.covariance *
+      transition.transpose() + process_covariance;
+    components.predicted_covariance = Scalar(0.5) *
+      (components.predicted_covariance + components.predicted_covariance.transpose());
+  }
+  const Scalar baseline = engine.kalman_prediction_baseline ? prediction : Scalar(0.0);
+  const Scalar observation_mean = baseline +
+    (observation.transpose() * components.predicted_mean)[0];
+  components.innovation = Scalar(row_optional(data, "DV", row, NA_REAL)) -
+    observation_mean;
+  components.innovation_variance =
+    (observation.transpose() * components.predicted_covariance * observation)[0] +
+    observation_variance;
+  if (!(scalar_value(components.innovation_variance) > 1e-14)) {
+    throw std::domain_error(
+      "Kalman innovation variance is not positive at row " +
+      std::to_string(row + 1) + ".");
+  }
+  const VectorT<Scalar> gain =
+    components.predicted_covariance * observation / components.innovation_variance;
+  filtered.mean = components.predicted_mean + gain * components.innovation;
+  const MatrixT<Scalar> identity = MatrixT<Scalar>::Identity(states, states);
+  const MatrixT<Scalar> update = identity - gain * observation.transpose();
+  filtered.covariance = update * components.predicted_covariance * update.transpose() +
+    gain * observation_variance * gain.transpose();
+  filtered.covariance = Scalar(0.5) *
+    (filtered.covariance + filtered.covariance.transpose());
+  components.filtered_mean = filtered.mean;
+  components.filtered_covariance = filtered.covariance;
+  if (components_output != nullptr) *components_output = components;
+  return libertad::scalar_log(components.innovation_variance) +
+    components.innovation * components.innovation /
+      components.innovation_variance;
+}
+
+template <class Scalar>
+Scalar ar1_rho_t(const ModelEngine& engine,
+                 const std::vector<Scalar>& theta,
+                 const std::vector<Scalar>& sigma) {
+  if (engine.ar1_parameter_source == "fixed") return Scalar(engine.ar1_rho);
+  const std::vector<Scalar>& parameters =
+    engine.ar1_parameter_source == "theta" ? theta : sigma;
+  if (engine.ar1_parameter_index < 0 ||
+      engine.ar1_parameter_index >= static_cast<int>(parameters.size())) {
+    throw std::out_of_range("Estimated AR(1) parameter index is outside the parameter vector.");
+  }
+  Scalar rho = parameters[static_cast<std::size_t>(engine.ar1_parameter_index)];
+  if (engine.ar1_transform == "tanh") rho = libertad::scalar_tanh(rho);
+  if (!(std::abs(scalar_value(rho)) < 1.0)) {
+    throw std::domain_error("Estimated AR(1) correlation must be strictly between -1 and 1.");
+  }
+  return rho;
+}
+
+template <class Scalar>
 std::vector<Scalar> residual_subject_nll_t(
     const ModelEngine& engine, const Rcpp::DataFrame& data,
-    const std::vector<Scalar>& prediction, const std::vector<Scalar>& sigma,
+    const std::vector<Scalar>& prediction, const std::vector<Scalar>& theta,
+    const std::vector<Scalar>& eta, const std::vector<Scalar>& sigma,
+    const std::vector<int>& mixture_assignment = std::vector<int>(),
     const std::vector<Scalar>* variance_prediction = nullptr) {
+  if (!engine.residual_groups.empty()) {
+    if (engine.error_type == "likelihood" || engine.sigma_correlation != "independent" ||
+        engine.blq_method != "none") {
+      throw std::logic_error("Correlated residual groups were combined with an incompatible likelihood option.");
+    }
+    return residual_grouped_subject_nll_t(
+      engine, data, prediction, theta, sigma, variance_prediction);
+  }
   Rcpp::NumericVector dv = data["DV"];
   Rcpp::IntegerVector evid = data["EVID"];
   Rcpp::IntegerVector mdv = data["MDV"];
@@ -2885,19 +5218,66 @@ std::vector<Scalar> residual_subject_nll_t(
   const bool has_blq = data.containsElementNamed("BLQ");
   const bool has_cens = data.containsElementNamed("CENS");
   int previous_subject = -1;
-  int previous_dvid = -1;
-  bool have_previous_residual = false;
-  Scalar previous_standardized_residual = Scalar(0.0);
+  std::unordered_map<int, Scalar> previous_standardized_residual;
+  std::unordered_map<int, double> previous_outcome;
+  std::unordered_map<int, double> previous_outcome_time;
+  std::unordered_map<int, std::vector<Scalar>> hmm_filtered;
+  std::unordered_map<int, KalmanFilterState<Scalar>> kalman_filtered;
+  std::unordered_map<int, ParticleFilterState<Scalar>> particle_filtered;
+  const int eta_columns = n_subjects > 0 ?
+    static_cast<int>(eta.size() / static_cast<std::size_t>(n_subjects)) : 0;
+  const Scalar ar1_rho = ar1_rho_t(engine, theta, sigma);
 
   for (int row = 0; row < data.nrows(); ++row) {
     const int subject = subjects[row] - 1;
     const int dvid = has_dvid ?
       static_cast<int>(row_optional(data, "DVID", row, 1.0)) : 1;
-    if (subject != previous_subject || dvid != previous_dvid) {
-      have_previous_residual = false;
+    if (subject != previous_subject) {
+      previous_outcome.clear();
+      previous_outcome_time.clear();
+      hmm_filtered.clear();
+      kalman_filtered.clear();
+      particle_filtered.clear();
+      previous_standardized_residual.clear();
     }
     if (evid[row] == 0 && mdv[row] == 0 && std::isfinite(dv[row])) {
       const Scalar f = prediction[static_cast<std::size_t>(row)];
+      if (engine.error_type == "likelihood") {
+        const int sequence =
+          (engine.hmm_enabled && !engine.hmm_by_dvid) ||
+          (engine.kalman_enabled && !engine.kalman_by_dvid) ? 1 : dvid;
+        const auto previous = previous_outcome.find(sequence);
+        const bool first = previous == previous_outcome.end();
+        const double previous_value = first ? dv[row] : previous->second;
+        const double previous_time = first ? row_optional(data, "TIME", row, 0.0) :
+          previous_outcome_time.at(sequence);
+        const int mixture_number = mixture_assignment.empty() ?
+          static_cast<int>(row_optional(data, "MIXNUM", row, 1.0)) :
+          mixture_assignment.at(static_cast<std::size_t>(subject));
+        if (engine.hmm_enabled) {
+          result[static_cast<std::size_t>(subject)] += hmm_row_nll_t(
+            engine, data, row, subject, theta, eta, eta_columns, sigma,
+            mixture_number, f, first, previous_value, previous_time,
+            hmm_filtered[sequence]);
+        } else if (engine.kalman_enabled) {
+          if (engine.kalman_filter_type == "particle") {
+            result[static_cast<std::size_t>(subject)] += particle_row_nll_t(
+              engine, data, row, subject, theta, eta, eta_columns, sigma,
+              mixture_number, f, first, previous_value, previous_time,
+              particle_filtered[sequence]);
+          } else {
+            result[static_cast<std::size_t>(subject)] += kalman_row_nll_t(
+              engine, data, row, subject, theta, eta, eta_columns, sigma,
+              mixture_number, f, first, previous_value, previous_time,
+              kalman_filtered[sequence]);
+          }
+        } else {
+          result[static_cast<std::size_t>(subject)] += user_likelihood_nll_t(
+            engine, data, row, subject, theta, eta, eta_columns, sigma,
+            mixture_number, f, first, previous_value, previous_time);
+        }
+        previous_standardized_residual.erase(dvid);
+      } else {
       const Scalar scale_prediction = variance_prediction == nullptr ? f :
         variance_prediction->at(static_cast<std::size_t>(row));
       const Scalar variance = residual_variance_t(
@@ -2928,7 +5308,7 @@ std::vector<Scalar> residual_subject_nll_t(
         }
         result[static_cast<std::size_t>(subject)] -=
           Scalar(2.0) * libertad::scalar_log(probability);
-        have_previous_residual = false;
+        previous_standardized_residual.erase(dvid);
       } else {
         Scalar residual = Scalar(dv[row]) - f;
         if (engine.error_type == "exponential") {
@@ -2938,12 +5318,14 @@ std::vector<Scalar> residual_subject_nll_t(
           residual = Scalar(std::log(dv[row])) -
             libertad::scalar_log(scalar_floor_t(f, 1e-300));
         }
-        if (engine.sigma_correlation == "ar1" && have_previous_residual) {
+        const auto previous_residual = previous_standardized_residual.find(dvid);
+        if (engine.sigma_correlation == "ar1" &&
+            previous_residual != previous_standardized_residual.end()) {
           const Scalar standardized = residual / sd;
           const Scalar innovation = standardized -
-            Scalar(engine.ar1_rho) * previous_standardized_residual;
+            ar1_rho * previous_residual->second;
           const Scalar innovation_variance =
-            Scalar(1.0 - engine.ar1_rho * engine.ar1_rho);
+            Scalar(1.0) - ar1_rho * ar1_rho;
           result[static_cast<std::size_t>(subject)] +=
             libertad::scalar_log(variance) +
             libertad::scalar_log(innovation_variance) +
@@ -2952,12 +5334,19 @@ std::vector<Scalar> residual_subject_nll_t(
           result[static_cast<std::size_t>(subject)] +=
             libertad::scalar_log(variance) + residual * residual / variance;
         }
-        previous_standardized_residual = residual / sd;
-        have_previous_residual = true;
+        previous_standardized_residual[dvid] = residual / sd;
+      }
       }
     }
+    if (evid[row] == 0 && std::isfinite(dv[row]) &&
+        ((!engine.hmm_enabled && !engine.kalman_enabled) || mdv[row] == 0)) {
+      const int sequence =
+        (engine.hmm_enabled && !engine.hmm_by_dvid) ||
+        (engine.kalman_enabled && !engine.kalman_by_dvid) ? 1 : dvid;
+      previous_outcome[sequence] = dv[row];
+      previous_outcome_time[sequence] = row_optional(data, "TIME", row, 0.0);
+    }
     previous_subject = subject;
-    previous_dvid = dvid;
   }
   return result;
 }
@@ -2978,14 +5367,14 @@ Scalar population_joint_nll_t(const ModelEngine& engine,
     const std::vector<Scalar> prediction = simulate_analytical_t(
       engine, data, theta, eta, sigma);
     std::vector<Scalar> variance_prediction;
-    if (!interaction) {
+    if (!interaction && engine.error_type != "likelihood") {
       const std::vector<Scalar> zero_eta(eta.size(), Scalar(0.0));
       variance_prediction = simulate_analytical_t(
         engine, data, theta, zero_eta, sigma);
     }
     const std::vector<Scalar> residual = residual_subject_nll_t(
-      engine, data, prediction, sigma,
-      interaction ? nullptr : &variance_prediction);
+      engine, data, prediction, theta, eta, sigma, std::vector<int>(),
+      interaction || engine.error_type == "likelihood" ? nullptr : &variance_prediction);
     for (const Scalar& value : residual) total += value;
   } else {
     std::vector<std::vector<Scalar>> component_nll;
@@ -2996,14 +5385,14 @@ Scalar population_joint_nll_t(const ModelEngine& engine,
       const std::vector<Scalar> prediction = simulate_analytical_t(
         engine, data, theta, eta, sigma, assignment);
       std::vector<Scalar> variance_prediction;
-      if (!interaction) {
+      if (!interaction && engine.error_type != "likelihood") {
         const std::vector<Scalar> zero_eta(eta.size(), Scalar(0.0));
         variance_prediction = simulate_analytical_t(
           engine, data, theta, zero_eta, sigma, assignment);
       }
       component_nll.push_back(residual_subject_nll_t(
-        engine, data, prediction, sigma,
-        interaction ? nullptr : &variance_prediction));
+        engine, data, prediction, theta, eta, sigma, assignment,
+        interaction || engine.error_type == "likelihood" ? nullptr : &variance_prediction));
     }
     for (int subject = 0; subject < n_subjects; ++subject) {
       std::vector<Scalar> log_component(engine.mixture_probabilities.size());
@@ -3033,6 +5422,42 @@ Scalar population_joint_nll_t(const ModelEngine& engine,
     }
     const int eta_columns = static_cast<int>(eta.size() / static_cast<std::size_t>(n_subjects));
     for (int subject = 0; subject < n_subjects; ++subject) {
+      if (engine.re_enabled) {
+        int offset = 0;
+        for (std::size_t block_index = 0; block_index < engine.re_blocks.size(); ++block_index) {
+          const std::vector<int>& indices = engine.re_blocks[block_index];
+          const std::string total_name = ".RE_TOTAL_" + std::to_string(block_index + 1U);
+          if (!data.containsElementNamed(total_name.c_str())) {
+            throw std::invalid_argument("Random-effect unit totals are missing from compiled data.");
+          }
+          const int units = static_cast<int>(data_value(data, total_name, 0));
+          MatrixT<Scalar> block_covariance(indices.size(), indices.size());
+          for (std::size_t row = 0; row < indices.size(); ++row) {
+            for (std::size_t column = 0; column < indices.size(); ++column) {
+              block_covariance(static_cast<Eigen::Index>(row), static_cast<Eigen::Index>(column)) =
+                covariance(indices[row], indices[column]);
+            }
+          }
+          for (int unit = 0; unit < units; ++unit) {
+            VectorT<Scalar> effect(static_cast<Eigen::Index>(indices.size()));
+            for (std::size_t index = 0; index < indices.size(); ++index) {
+              const int column = offset + unit * static_cast<int>(indices.size()) +
+                static_cast<int>(index);
+              if (column >= eta_columns) {
+                throw std::invalid_argument("Expanded random-effect columns exceed the ETA matrix.");
+              }
+              effect[static_cast<Eigen::Index>(index)] =
+                eta[static_cast<std::size_t>(subject * eta_columns + column)];
+            }
+            total += omega_subject_prior_t(block_covariance, effect);
+          }
+          offset += units * static_cast<int>(indices.size());
+        }
+        if (offset != eta_columns) {
+          throw std::invalid_argument("Expanded random-effect columns do not match the design.");
+        }
+        continue;
+      }
       if (engine.iov <= 0) {
         if (eta_columns != engine.n_eta) {
           throw std::invalid_argument("ETA matrix columns do not match OMEGA dimension.");
@@ -3254,26 +5679,8 @@ std::unique_ptr<ObjectiveTape> record_fo_tape(
     base_omega(row, column) = omega_ad[static_cast<std::size_t>(index)];
     base_omega(column, row) = omega_ad[static_cast<std::size_t>(index)];
   }
-  MatrixT<CppAD::AD<double>> effect_omega;
-  if (engine.iov == 0) {
-    effect_omega = base_omega;
-  } else {
-    const int between = engine.n_eta - engine.iov;
-    if (n_eta < between || (n_eta - between) % engine.iov != 0) {
-      throw std::invalid_argument("FO tape has an invalid expanded IOV layout.");
-    }
-    const int occasions = (n_eta - between) / engine.iov;
-    effect_omega = MatrixT<CppAD::AD<double>>::Zero(n_eta, n_eta);
-    if (between) {
-      effect_omega.topLeftCorner(between, between) =
-        base_omega.topLeftCorner(between, between);
-    }
-    for (int occasion = 0; occasion < occasions; ++occasion) {
-      const int target = between + occasion * engine.iov;
-      effect_omega.block(target, target, engine.iov, engine.iov) =
-        base_omega.bottomRightCorner(engine.iov, engine.iov);
-    }
-  }
+  MatrixT<CppAD::AD<double>> effect_omega = expanded_omega_t(
+    engine, data, base_omega, n_eta);
   if (effect_omega.rows() != n_eta) {
     throw std::invalid_argument("FO random-effect covariance has the wrong dimension.");
   }
@@ -3281,10 +5688,32 @@ std::unique_ptr<ObjectiveTape> record_fo_tape(
   MatrixT<CppAD::AD<double>> residual_covariance(n_observed, n_observed);
   for (Eigen::Index row = 0; row < n_observed; ++row) {
     for (Eigen::Index column = 0; column < n_observed; ++column) {
-      const double correlation = engine.sigma_correlation == "ar1" ?
-        std::pow(engine.ar1_rho, std::abs(static_cast<int>(row - column))) :
-        (row == column ? 1.0 : 0.0);
-      residual_covariance(row, column) = CppAD::AD<double>(correlation) *
+      CppAD::AD<double> correlation = row == column ?
+        CppAD::AD<double>(1.0) : CppAD::AD<double>(0.0);
+      if (engine.sigma_correlation == "ar1" && dvid[observed[row]] == dvid[observed[column]]) {
+        const CppAD::AD<double> rho = ar1_rho_t(engine, theta_ad, sigma_ad);
+        const Eigen::Index first = std::min(row, column);
+        const Eigen::Index last = std::max(row, column);
+        int lag = 0;
+        for (Eigen::Index position = first + 1; position <= last; ++position) {
+          if (dvid[observed[position]] == dvid[observed[row]]) ++lag;
+        }
+        correlation = CppAD::pow(rho, lag);
+      }
+      if (!engine.residual_groups.empty() && row != column &&
+          row_optional(data, "TIME", observed[row], 0.0) ==
+            row_optional(data, "TIME", observed[column], 0.0)) {
+        const int group_index = residual_group_for_dvid(engine, dvid[observed[row]]);
+        if (group_index >= 0 && residual_group_for_dvid(engine, dvid[observed[column]]) == group_index) {
+          const ResidualGroupSpec& group =
+            engine.residual_groups[static_cast<std::size_t>(group_index)];
+          correlation = residual_group_correlation_t(
+            group, residual_group_endpoint(group, dvid[observed[row]]),
+            residual_group_endpoint(group, dvid[observed[column]]),
+            theta_ad, sigma_ad);
+        }
+      }
+      residual_covariance(row, column) = correlation *
         CppAD::sqrt(variance[row] * variance[column]);
     }
   }
@@ -3423,26 +5852,8 @@ std::unique_ptr<ObjectiveTape> record_curvature_tape(
       base_omega(row, column) = value;
       base_omega(column, row) = value;
     }
-    MatrixT<CppAD::AD<double>> effect_omega;
-    if (engine.iov == 0) {
-      effect_omega = base_omega;
-    } else {
-      const int between = engine.n_eta - engine.iov;
-      if (n_eta < between || (n_eta - between) % engine.iov != 0) {
-        throw std::invalid_argument("Curvature tape has an invalid expanded IOV layout.");
-      }
-      const int occasions = (n_eta - between) / engine.iov;
-      effect_omega = MatrixT<CppAD::AD<double>>::Zero(n_eta, n_eta);
-      if (between) {
-        effect_omega.topLeftCorner(between, between) =
-          base_omega.topLeftCorner(between, between);
-      }
-      for (int occasion = 0; occasion < occasions; ++occasion) {
-        const int target = between + occasion * engine.iov;
-        effect_omega.block(target, target, engine.iov, engine.iov) =
-          base_omega.bottomRightCorner(engine.iov, engine.iov);
-      }
-    }
+    MatrixT<CppAD::AD<double>> effect_omega = expanded_omega_t(
+      engine, data, base_omega, n_eta);
     MatrixT<CppAD::AD<double>> identity =
       MatrixT<CppAD::AD<double>>::Identity(n_eta, n_eta);
     const MatrixT<CppAD::AD<double>> omega_inverse = solve_linear(
@@ -4767,6 +7178,835 @@ class PopulationObjective {
   }
 };
 
+struct HmmDecodeObservation {
+  int row = -1;
+  std::vector<double> initial;
+  std::vector<std::vector<double>> transition;
+  std::vector<double> log_emission;
+  std::vector<double> filtered;
+  double log_scale = 0.0;
+};
+
+struct HmmDecodeSequence {
+  int subject = 0;
+  int sequence = 1;
+  std::vector<HmmDecodeObservation> observations;
+};
+
+double hmm_log_probability(double value) {
+  return value > 0.0 ? std::log(value) :
+    -std::numeric_limits<double>::infinity();
+}
+
+double hmm_log_sum_exp(const std::vector<double>& values) {
+  if (values.empty()) {
+    throw std::invalid_argument("HMM log-sum-exp requires values.");
+  }
+  const double maximum = *std::max_element(values.begin(), values.end());
+  if (!std::isfinite(maximum)) return maximum;
+  double total = 0.0;
+  for (double value : values) total += std::exp(value - maximum);
+  return maximum + std::log(total);
+}
+
+Rcpp::List hmm_filter(
+    const ModelEngine& engine, const Rcpp::DataFrame& data,
+    const Rcpp::NumericVector& theta, const Rcpp::NumericMatrix& eta,
+    const Rcpp::NumericVector& sigma) {
+  if (!engine.hmm_enabled) {
+    throw std::invalid_argument("The model does not define a hidden Markov likelihood.");
+  }
+  if (!engine.mixture_probabilities.empty()) {
+    throw std::invalid_argument(
+      "Hidden-state filtering for an additional finite-mixture layer is not yet available.");
+  }
+  Rcpp::IntegerVector subjects = data[".ID_INDEX"];
+  Rcpp::IntegerVector evid = data["EVID"];
+  Rcpp::IntegerVector mdv = data["MDV"];
+  Rcpp::NumericVector dv = data["DV"];
+  int n_subjects = 0;
+  for (int value : subjects) n_subjects = std::max(n_subjects, value);
+  if (eta.nrow() != n_subjects) {
+    throw std::invalid_argument("The ETA matrix does not match the HMM dataset subjects.");
+  }
+  const std::vector<double> theta_values = Rcpp::as<std::vector<double>>(theta);
+  std::vector<double> eta_values;
+  eta_values.reserve(static_cast<std::size_t>(eta.size()));
+  for (int row = 0; row < eta.nrow(); ++row) {
+    for (int column = 0; column < eta.ncol(); ++column) {
+      eta_values.push_back(eta(row, column));
+    }
+  }
+  const std::vector<double> sigma_values = Rcpp::as<std::vector<double>>(sigma);
+  const std::vector<double> prediction = simulate_analytical_t(
+    engine, data, theta_values, eta_values, sigma_values);
+  const int rows = data.nrows();
+  const int states = engine.hmm_states;
+  Rcpp::NumericMatrix probability(rows, states);
+  Rcpp::NumericMatrix smoothed(rows, states);
+  std::fill(probability.begin(), probability.end(), NA_REAL);
+  std::fill(smoothed.begin(), smoothed.end(), NA_REAL);
+  Rcpp::IntegerVector filtered_state(rows, NA_INTEGER);
+  Rcpp::IntegerVector smoothed_state(rows, NA_INTEGER);
+  Rcpp::IntegerVector viterbi_state(rows, NA_INTEGER);
+  Rcpp::NumericVector row_nll(rows, NA_REAL);
+  const bool has_dvid = data.containsElementNamed("DVID");
+  int previous_subject = -1;
+  std::unordered_map<int, double> previous_outcome;
+  std::unordered_map<int, double> previous_outcome_time;
+  std::unordered_map<int, std::vector<double>> filtered;
+  std::unordered_map<int, std::size_t> sequence_lookup;
+  std::vector<HmmDecodeSequence> sequences;
+  double total_nll = 0.0;
+  for (int row = 0; row < rows; ++row) {
+    const int subject = subjects[row] - 1;
+    if (subject != previous_subject) {
+      previous_outcome.clear();
+      previous_outcome_time.clear();
+      filtered.clear();
+      sequence_lookup.clear();
+    }
+    const int dvid = has_dvid ?
+      static_cast<int>(row_optional(data, "DVID", row, 1.0)) : 1;
+    const int sequence = engine.hmm_by_dvid ? dvid : 1;
+    if (evid[row] == 0 && mdv[row] == 0 && std::isfinite(dv[row])) {
+      const auto previous = previous_outcome.find(sequence);
+      const bool first = previous == previous_outcome.end();
+      const double previous_value = first ? dv[row] : previous->second;
+      const double previous_time = first ? row_optional(data, "TIME", row, 0.0) :
+        previous_outcome_time.at(sequence);
+      const int mixture_number = static_cast<int>(
+        row_optional(data, "MIXNUM", row, 1.0));
+      HmmRowComponents<double> components;
+      const double contribution = hmm_row_nll_t(
+        engine, data, row, subject, theta_values, eta_values, eta.ncol(),
+        sigma_values, mixture_number, prediction[static_cast<std::size_t>(row)],
+        first, previous_value, previous_time, filtered[sequence], &components);
+      row_nll[row] = contribution;
+      total_nll += contribution;
+      int most_likely = 0;
+      for (int hidden = 0; hidden < states; ++hidden) {
+        const double value = filtered[sequence][static_cast<std::size_t>(hidden)];
+        probability(row, hidden) = value;
+        if (value > filtered[sequence][static_cast<std::size_t>(most_likely)]) {
+          most_likely = hidden;
+        }
+      }
+      filtered_state[row] = most_likely + 1;
+      if (first) {
+        sequence_lookup[sequence] = sequences.size();
+        HmmDecodeSequence track;
+        track.subject = subject + 1;
+        track.sequence = sequence;
+        sequences.push_back(std::move(track));
+      }
+      const auto track = sequence_lookup.find(sequence);
+      if (track == sequence_lookup.end()) {
+        throw std::logic_error("Hidden Markov decoding sequence was not initialized.");
+      }
+      HmmDecodeObservation observation;
+      observation.row = row;
+      observation.initial = std::move(components.initial);
+      observation.transition = std::move(components.transition);
+      observation.log_emission = std::move(components.log_emission);
+      if (engine.hmm_emission_scale != "log") {
+        for (int hidden = 0; hidden < states; ++hidden) {
+          if (!(components.emission[static_cast<std::size_t>(hidden)] > 0.0)) {
+            observation.log_emission[static_cast<std::size_t>(hidden)] =
+              -std::numeric_limits<double>::infinity();
+          }
+        }
+      }
+      observation.filtered = filtered[sequence];
+      observation.log_scale = -0.5 * contribution;
+      sequences[track->second].observations.push_back(std::move(observation));
+      previous_outcome[sequence] = dv[row];
+      previous_outcome_time[sequence] = row_optional(data, "TIME", row, 0.0);
+    }
+    previous_subject = subject;
+  }
+
+  Rcpp::IntegerVector summary_subject(static_cast<R_xlen_t>(sequences.size()));
+  Rcpp::IntegerVector summary_sequence(static_cast<R_xlen_t>(sequences.size()));
+  Rcpp::IntegerVector summary_observations(static_cast<R_xlen_t>(sequences.size()));
+  Rcpp::NumericVector summary_log_likelihood(static_cast<R_xlen_t>(sequences.size()));
+  Rcpp::NumericVector summary_viterbi_joint(static_cast<R_xlen_t>(sequences.size()));
+  Rcpp::NumericVector summary_viterbi_posterior(static_cast<R_xlen_t>(sequences.size()));
+
+  for (std::size_t sequence_index = 0; sequence_index < sequences.size();
+       ++sequence_index) {
+    const HmmDecodeSequence& sequence = sequences[sequence_index];
+    const std::size_t length = sequence.observations.size();
+    if (length == 0U) continue;
+    const std::size_t state_count = static_cast<std::size_t>(states);
+
+    std::vector<std::vector<double>> log_beta(
+      length, std::vector<double>(state_count, 0.0));
+    for (std::size_t current = length - 1U; current > 0U; --current) {
+      const HmmDecodeObservation& next = sequence.observations[current];
+      for (std::size_t from = 0; from < state_count; ++from) {
+        std::vector<double> terms(state_count);
+        for (std::size_t to = 0; to < state_count; ++to) {
+          terms[to] = hmm_log_probability(next.transition[from][to]) +
+            next.log_emission[to] + log_beta[current][to];
+        }
+        log_beta[current - 1U][from] =
+          hmm_log_sum_exp(terms) - next.log_scale;
+      }
+    }
+    for (std::size_t current = 0; current < length; ++current) {
+      const HmmDecodeObservation& observation = sequence.observations[current];
+      std::vector<double> log_probability(state_count);
+      for (std::size_t hidden = 0; hidden < state_count; ++hidden) {
+        log_probability[hidden] = hmm_log_probability(observation.filtered[hidden]) +
+          log_beta[current][hidden];
+      }
+      const double normalizer = hmm_log_sum_exp(log_probability);
+      int most_likely = 0;
+      for (std::size_t hidden = 0; hidden < state_count; ++hidden) {
+        const double value = std::exp(log_probability[hidden] - normalizer);
+        smoothed(observation.row, static_cast<int>(hidden)) = value;
+        if (value > smoothed(observation.row, most_likely)) {
+          most_likely = static_cast<int>(hidden);
+        }
+      }
+      smoothed_state[observation.row] = most_likely + 1;
+    }
+
+    std::vector<std::vector<double>> delta(
+      length, std::vector<double>(state_count,
+        -std::numeric_limits<double>::infinity()));
+    std::vector<std::vector<int>> back_pointer(
+      length, std::vector<int>(state_count, -1));
+    const HmmDecodeObservation& first = sequence.observations.front();
+    for (std::size_t hidden = 0; hidden < state_count; ++hidden) {
+      delta[0][hidden] = hmm_log_probability(first.initial[hidden]) +
+        first.log_emission[hidden];
+    }
+    for (std::size_t current = 1; current < length; ++current) {
+      const HmmDecodeObservation& observation = sequence.observations[current];
+      for (std::size_t to = 0; to < state_count; ++to) {
+        int best_from = 0;
+        double best = delta[current - 1U][0] +
+          hmm_log_probability(observation.transition[0][to]);
+        for (std::size_t from = 1; from < state_count; ++from) {
+          const double candidate = delta[current - 1U][from] +
+            hmm_log_probability(observation.transition[from][to]);
+          if (candidate > best) {
+            best = candidate;
+            best_from = static_cast<int>(from);
+          }
+        }
+        delta[current][to] = best + observation.log_emission[to];
+        back_pointer[current][to] = best_from;
+      }
+    }
+    int final_state = 0;
+    for (int hidden = 1; hidden < states; ++hidden) {
+      if (delta[length - 1U][static_cast<std::size_t>(hidden)] >
+          delta[length - 1U][static_cast<std::size_t>(final_state)]) {
+        final_state = hidden;
+      }
+    }
+    std::vector<int> path(length, final_state);
+    for (std::size_t current = length - 1U; current > 0U; --current) {
+      path[current - 1U] = back_pointer[current]
+        [static_cast<std::size_t>(path[current])];
+    }
+    for (std::size_t current = 0; current < length; ++current) {
+      viterbi_state[sequence.observations[current].row] = path[current] + 1;
+    }
+
+    double sequence_log_likelihood = 0.0;
+    for (const HmmDecodeObservation& observation : sequence.observations) {
+      sequence_log_likelihood += observation.log_scale;
+    }
+    const double viterbi_log_joint =
+      delta[length - 1U][static_cast<std::size_t>(final_state)];
+    summary_subject[static_cast<R_xlen_t>(sequence_index)] = sequence.subject;
+    summary_sequence[static_cast<R_xlen_t>(sequence_index)] = sequence.sequence;
+    summary_observations[static_cast<R_xlen_t>(sequence_index)] =
+      static_cast<int>(length);
+    summary_log_likelihood[static_cast<R_xlen_t>(sequence_index)] =
+      sequence_log_likelihood;
+    summary_viterbi_joint[static_cast<R_xlen_t>(sequence_index)] =
+      viterbi_log_joint;
+    summary_viterbi_posterior[static_cast<R_xlen_t>(sequence_index)] =
+      viterbi_log_joint - sequence_log_likelihood;
+  }
+
+  probability.attr("dimnames") = Rcpp::List::create(
+    R_NilValue, Rcpp::wrap(engine.hmm_state_names));
+  smoothed.attr("dimnames") = Rcpp::List::create(
+    R_NilValue, Rcpp::wrap(engine.hmm_state_names));
+  auto state_labels = [&](const Rcpp::IntegerVector& state) {
+    Rcpp::CharacterVector labels(rows, NA_STRING);
+    for (int row = 0; row < rows; ++row) {
+      if (state[row] != NA_INTEGER) {
+        labels[row] = engine.hmm_state_names[
+          static_cast<std::size_t>(state[row] - 1)];
+      }
+    }
+    return labels;
+  };
+  const Rcpp::CharacterVector filtered_label = state_labels(filtered_state);
+  const Rcpp::CharacterVector smoothed_label = state_labels(smoothed_state);
+  const Rcpp::CharacterVector viterbi_label = state_labels(viterbi_state);
+  const Rcpp::DataFrame sequence_summary = Rcpp::DataFrame::create(
+    Rcpp::Named(".ID_INDEX") = summary_subject,
+    Rcpp::Named("HMM_SEQUENCE") = summary_sequence,
+    Rcpp::Named("OBSERVATIONS") = summary_observations,
+    Rcpp::Named("LOG_LIKELIHOOD") = summary_log_likelihood,
+    Rcpp::Named("VITERBI_LOG_JOINT") = summary_viterbi_joint,
+    Rcpp::Named("VITERBI_LOG_POSTERIOR") = summary_viterbi_posterior);
+  return Rcpp::List::create(
+    Rcpp::Named("filtered") = probability,
+    Rcpp::Named("smoothed") = smoothed,
+    Rcpp::Named("state") = filtered_state,
+    Rcpp::Named("state_label") = filtered_label,
+    Rcpp::Named("filtered_state") = filtered_state,
+    Rcpp::Named("filtered_state_label") = filtered_label,
+    Rcpp::Named("smoothed_state") = smoothed_state,
+    Rcpp::Named("smoothed_state_label") = smoothed_label,
+    Rcpp::Named("viterbi_state") = viterbi_state,
+    Rcpp::Named("viterbi_state_label") = viterbi_label,
+    Rcpp::Named("row_nll") = row_nll,
+    Rcpp::Named("nll") = total_nll,
+    Rcpp::Named("log_likelihood") = -0.5 * total_nll,
+    Rcpp::Named("sequence_summary") = sequence_summary,
+    Rcpp::Named("states") = engine.hmm_state_names);
+}
+
+struct KalmanDecodeObservation {
+  int row = -1;
+  Vector predicted_mean;
+  Matrix predicted_covariance;
+  Vector filtered_mean;
+  Matrix filtered_covariance;
+  Matrix transition;
+  Matrix smoother_cross_covariance;
+  std::vector<Vector> particle_states;
+  std::vector<double> particle_weights;
+  std::vector<int> particle_ancestors;
+  std::vector<int> particle_regimes;
+  double innovation = NA_REAL;
+  double innovation_variance = NA_REAL;
+  double row_nll = NA_REAL;
+};
+
+struct KalmanDecodeSequence {
+  std::vector<KalmanDecodeObservation> observations;
+};
+
+Rcpp::List kalman_filter(
+    const ModelEngine& engine, const Rcpp::DataFrame& data,
+    const Rcpp::NumericVector& theta, const Rcpp::NumericMatrix& eta,
+    const Rcpp::NumericVector& sigma) {
+  if (!engine.kalman_enabled) {
+    throw std::invalid_argument("The model does not define a Kalman state-space likelihood.");
+  }
+  if (!engine.mixture_probabilities.empty()) {
+    throw std::invalid_argument(
+      "Kalman decoding for an additional finite-mixture layer is not yet available.");
+  }
+  Rcpp::IntegerVector subjects = data[".ID_INDEX"];
+  Rcpp::IntegerVector evid = data["EVID"];
+  Rcpp::IntegerVector mdv = data["MDV"];
+  Rcpp::NumericVector dv = data["DV"];
+  int n_subjects = 0;
+  for (int value : subjects) n_subjects = std::max(n_subjects, value);
+  if (eta.nrow() != n_subjects) {
+    throw std::invalid_argument("The ETA matrix does not match the Kalman dataset subjects.");
+  }
+  const std::vector<double> theta_values = Rcpp::as<std::vector<double>>(theta);
+  std::vector<double> eta_values;
+  eta_values.reserve(static_cast<std::size_t>(eta.size()));
+  for (int row = 0; row < eta.nrow(); ++row) {
+    for (int column = 0; column < eta.ncol(); ++column) {
+      eta_values.push_back(eta(row, column));
+    }
+  }
+  const std::vector<double> sigma_values = Rcpp::as<std::vector<double>>(sigma);
+  const std::vector<double> prediction = simulate_analytical_t(
+    engine, data, theta_values, eta_values, sigma_values);
+  const int rows = data.nrows();
+  const int states = engine.kalman_states;
+  Rcpp::NumericMatrix predicted_mean(rows, states);
+  Rcpp::NumericMatrix filtered_mean(rows, states);
+  Rcpp::NumericMatrix smoothed_mean(rows, states);
+  Rcpp::NumericMatrix filtered_variance(rows, states);
+  Rcpp::NumericMatrix smoothed_variance(rows, states);
+  std::fill(predicted_mean.begin(), predicted_mean.end(), NA_REAL);
+  std::fill(filtered_mean.begin(), filtered_mean.end(), NA_REAL);
+  std::fill(smoothed_mean.begin(), smoothed_mean.end(), NA_REAL);
+  std::fill(filtered_variance.begin(), filtered_variance.end(), NA_REAL);
+  std::fill(smoothed_variance.begin(), smoothed_variance.end(), NA_REAL);
+  Rcpp::NumericVector innovation(rows, NA_REAL);
+  Rcpp::NumericVector innovation_variance(rows, NA_REAL);
+  Rcpp::NumericVector row_nll(rows, NA_REAL);
+  Rcpp::NumericMatrix filtered_regime(
+    rows, engine.switching_enabled ? engine.switching_regimes : 0);
+  Rcpp::NumericMatrix smoothed_regime(
+    rows, engine.switching_enabled ? engine.switching_regimes : 0);
+  std::fill(filtered_regime.begin(), filtered_regime.end(), NA_REAL);
+  std::fill(smoothed_regime.begin(), smoothed_regime.end(), NA_REAL);
+  const bool has_dvid = data.containsElementNamed("DVID");
+  int previous_subject = -1;
+  std::unordered_map<int, double> previous_outcome;
+  std::unordered_map<int, double> previous_outcome_time;
+  std::unordered_map<int, KalmanFilterState<double>> filtered;
+  std::unordered_map<int, ParticleFilterState<double>> particle_filter;
+  std::unordered_map<int, std::size_t> sequence_lookup;
+  std::vector<KalmanDecodeSequence> sequences;
+  double total_nll = 0.0;
+  for (int row = 0; row < rows; ++row) {
+    const int subject = subjects[row] - 1;
+    if (subject != previous_subject) {
+      previous_outcome.clear();
+      previous_outcome_time.clear();
+      filtered.clear();
+      particle_filter.clear();
+      sequence_lookup.clear();
+    }
+    const int dvid = has_dvid ?
+      static_cast<int>(row_optional(data, "DVID", row, 1.0)) : 1;
+    const int sequence = engine.kalman_by_dvid ? dvid : 1;
+    if (evid[row] == 0 && mdv[row] == 0 && std::isfinite(dv[row])) {
+      const auto previous = previous_outcome.find(sequence);
+      const bool first = previous == previous_outcome.end();
+      const double previous_value = first ? dv[row] : previous->second;
+      const double previous_time = first ? row_optional(data, "TIME", row, 0.0) :
+        previous_outcome_time.at(sequence);
+      const int mixture_number = static_cast<int>(
+        row_optional(data, "MIXNUM", row, 1.0));
+      KalmanRowComponents<double> components;
+      const double contribution = engine.kalman_filter_type == "particle" ?
+        particle_row_nll_t(
+          engine, data, row, subject, theta_values, eta_values, eta.ncol(),
+          sigma_values, mixture_number, prediction[static_cast<std::size_t>(row)],
+          first, previous_value, previous_time, particle_filter[sequence], &components) :
+        kalman_row_nll_t(
+          engine, data, row, subject, theta_values, eta_values, eta.ncol(),
+          sigma_values, mixture_number, prediction[static_cast<std::size_t>(row)],
+          first, previous_value, previous_time, filtered[sequence], &components);
+      if (first) {
+        sequence_lookup[sequence] = sequences.size();
+        sequences.emplace_back();
+      }
+      const auto track = sequence_lookup.find(sequence);
+      if (track == sequence_lookup.end()) {
+        throw std::logic_error("Kalman decoding sequence was not initialized.");
+      }
+      KalmanDecodeObservation observation;
+      observation.row = row;
+      observation.predicted_mean = components.predicted_mean;
+      observation.predicted_covariance = components.predicted_covariance;
+      observation.filtered_mean = components.filtered_mean;
+      observation.filtered_covariance = components.filtered_covariance;
+      observation.transition = components.transition;
+      observation.smoother_cross_covariance = components.smoother_cross_covariance;
+      observation.particle_states = components.particle_states;
+      observation.particle_weights = components.particle_weights;
+      observation.particle_ancestors = components.particle_ancestors;
+      observation.particle_regimes = components.particle_regimes;
+      observation.innovation = components.innovation;
+      observation.innovation_variance = components.innovation_variance;
+      observation.row_nll = contribution;
+      sequences[track->second].observations.push_back(std::move(observation));
+      for (int state = 0; state < states; ++state) {
+        predicted_mean(row, state) = components.predicted_mean[state];
+        filtered_mean(row, state) = components.filtered_mean[state];
+        filtered_variance(row, state) = components.filtered_covariance(state, state);
+      }
+      if (engine.switching_enabled) {
+        for (int regime = 0; regime < engine.switching_regimes; ++regime) {
+          double probability = 0.0;
+          for (std::size_t particle = 0;
+               particle < components.particle_regimes.size(); ++particle) {
+            if (components.particle_regimes[particle] == regime &&
+                particle < components.particle_weights.size()) {
+              probability += components.particle_weights[particle];
+            }
+          }
+          filtered_regime(row, regime) = probability;
+        }
+      }
+      innovation[row] = components.innovation;
+      innovation_variance[row] = components.innovation_variance;
+      row_nll[row] = contribution;
+      total_nll += contribution;
+      previous_outcome[sequence] = dv[row];
+      previous_outcome_time[sequence] = row_optional(data, "TIME", row, 0.0);
+    }
+    previous_subject = subject;
+  }
+  for (const KalmanDecodeSequence& sequence : sequences) {
+    const std::size_t length = sequence.observations.size();
+    if (!length) continue;
+    std::vector<Vector> smooth_mean(length);
+    std::vector<Matrix> smooth_covariance(length);
+    if (engine.kalman_filter_type == "particle") {
+      std::vector<std::vector<double>> smooth_weight(length);
+      smooth_weight[length - 1U] = sequence.observations[length - 1U].particle_weights;
+      for (std::size_t offset = 1U; offset < length; ++offset) {
+        const std::size_t current = length - offset - 1U;
+        const KalmanDecodeObservation& next = sequence.observations[current + 1U];
+        const std::size_t particles = sequence.observations[current].particle_states.size();
+        smooth_weight[current].assign(particles, 0.0);
+        for (std::size_t particle = 0; particle < next.particle_ancestors.size(); ++particle) {
+          const int ancestor = next.particle_ancestors[particle];
+          if (ancestor >= 0 && static_cast<std::size_t>(ancestor) < particles &&
+              particle < smooth_weight[current + 1U].size()) {
+            smooth_weight[current][static_cast<std::size_t>(ancestor)] +=
+              smooth_weight[current + 1U][particle];
+          }
+        }
+        const double total = std::accumulate(
+          smooth_weight[current].begin(), smooth_weight[current].end(), 0.0);
+        if (total > 0.0) for (double& weight : smooth_weight[current]) weight /= total;
+      }
+      for (std::size_t current = 0; current < length; ++current) {
+        const auto& cloud = sequence.observations[current].particle_states;
+        const auto& weights = smooth_weight[current];
+        smooth_mean[current] = Vector::Zero(states);
+        for (std::size_t particle = 0; particle < cloud.size(); ++particle) {
+          smooth_mean[current] += weights[particle] * cloud[particle];
+        }
+        smooth_covariance[current] = Matrix::Zero(states, states);
+        for (std::size_t particle = 0; particle < cloud.size(); ++particle) {
+          const Vector centered = cloud[particle] - smooth_mean[current];
+          smooth_covariance[current] += weights[particle] * centered * centered.transpose();
+        }
+        if (engine.switching_enabled) {
+          const int row = sequence.observations[current].row;
+          const auto& regimes = sequence.observations[current].particle_regimes;
+          for (int regime = 0; regime < engine.switching_regimes; ++regime) {
+            double probability = 0.0;
+            for (std::size_t particle = 0; particle < regimes.size() &&
+                 particle < weights.size(); ++particle) {
+              if (regimes[particle] == regime) probability += weights[particle];
+            }
+            smoothed_regime(row, regime) = probability;
+          }
+        }
+      }
+    } else {
+      smooth_mean[length - 1U] = sequence.observations[length - 1U].filtered_mean;
+      smooth_covariance[length - 1U] =
+        sequence.observations[length - 1U].filtered_covariance;
+      for (std::size_t offset = 1U; offset < length; ++offset) {
+        const std::size_t current = length - offset - 1U;
+        const KalmanDecodeObservation& observation = sequence.observations[current];
+        const KalmanDecodeObservation& next = sequence.observations[current + 1U];
+        Eigen::LDLT<Matrix> decomposition(next.predicted_covariance);
+        if (decomposition.info() != Eigen::Success) {
+          throw std::runtime_error("RTS smoother predicted covariance factorization failed.");
+        }
+        const Matrix smoother_gain = next.smoother_cross_covariance *
+          decomposition.solve(Matrix::Identity(states, states));
+        smooth_mean[current] = observation.filtered_mean + smoother_gain *
+          (smooth_mean[current + 1U] - next.predicted_mean);
+        smooth_covariance[current] = observation.filtered_covariance + smoother_gain *
+          (smooth_covariance[current + 1U] - next.predicted_covariance) *
+            smoother_gain.transpose();
+        smooth_covariance[current] = 0.5 *
+          (smooth_covariance[current] + smooth_covariance[current].transpose()).eval();
+      }
+    }
+    for (std::size_t current = 0; current < length; ++current) {
+      const int row = sequence.observations[current].row;
+      for (int state = 0; state < states; ++state) {
+        smoothed_mean(row, state) = smooth_mean[current][state];
+        smoothed_variance(row, state) = smooth_covariance[current](state, state);
+      }
+    }
+  }
+  const Rcpp::List dimnames = Rcpp::List::create(
+    R_NilValue, Rcpp::wrap(engine.kalman_state_names));
+  predicted_mean.attr("dimnames") = dimnames;
+  filtered_mean.attr("dimnames") = dimnames;
+  smoothed_mean.attr("dimnames") = dimnames;
+  filtered_variance.attr("dimnames") = dimnames;
+  smoothed_variance.attr("dimnames") = dimnames;
+  if (engine.switching_enabled) {
+    const Rcpp::List regime_dimnames = Rcpp::List::create(
+      R_NilValue, Rcpp::wrap(engine.switching_regime_names));
+    filtered_regime.attr("dimnames") = regime_dimnames;
+    smoothed_regime.attr("dimnames") = regime_dimnames;
+  }
+  return Rcpp::List::create(
+    Rcpp::Named("predicted_mean") = predicted_mean,
+    Rcpp::Named("filtered_mean") = filtered_mean,
+    Rcpp::Named("smoothed_mean") = smoothed_mean,
+    Rcpp::Named("filtered_variance") = filtered_variance,
+    Rcpp::Named("smoothed_variance") = smoothed_variance,
+    Rcpp::Named("innovation") = innovation,
+    Rcpp::Named("innovation_variance") = innovation_variance,
+    Rcpp::Named("row_nll") = row_nll,
+    Rcpp::Named("filtered_regime") = filtered_regime,
+    Rcpp::Named("smoothed_regime") = smoothed_regime,
+    Rcpp::Named("regimes") = engine.switching_regime_names,
+    Rcpp::Named("nll") = total_nll,
+    Rcpp::Named("log_likelihood") = -0.5 * total_nll,
+    Rcpp::Named("states") = engine.kalman_state_names,
+    Rcpp::Named("filter") = engine.kalman_filter_type,
+    Rcpp::Named("smoother") = engine.kalman_filter_type == "particle" ?
+      "genealogical" : "RTS");
+}
+
+Matrix covariance_sampling_root(const Matrix& covariance,
+                                const std::string& context) {
+  const Matrix symmetric = 0.5 * (covariance + covariance.transpose()).eval();
+  auto eigen = liberation::detail::self_adjoint_eigen(symmetric, true);
+  if (eigen.info != Eigen::Success) {
+    throw std::runtime_error(context + " eigen decomposition failed.");
+  }
+  const double scale = std::max(eigen.values.cwiseAbs().maxCoeff(), 1.0);
+  if (eigen.values.minCoeff() < -1e-10 * scale) {
+    throw std::domain_error(context + " is not positive semidefinite.");
+  }
+  return eigen.vectors * eigen.values.cwiseMax(0.0).cwiseSqrt().asDiagonal();
+}
+
+Rcpp::NumericVector kalman_simulate(
+    const ModelEngine& engine, const Rcpp::DataFrame& data,
+    const Rcpp::NumericVector& theta, const Rcpp::NumericMatrix& eta,
+    const Rcpp::NumericVector& sigma,
+    const Rcpp::NumericMatrix& process_normals,
+    const Rcpp::NumericVector& observation_normals) {
+  if (!engine.kalman_enabled) {
+    throw std::invalid_argument("The model does not define a Kalman state-space likelihood.");
+  }
+  const int rows = data.nrows();
+  const int states = engine.kalman_states;
+  const int process_columns = states *
+    (engine.kalman_dynamics == "sde" ? engine.kalman_sde_substeps : 1);
+  if (process_normals.nrow() != rows || process_normals.ncol() != process_columns ||
+      observation_normals.size() != rows) {
+    throw std::invalid_argument("Kalman simulation normal draws have inconsistent dimensions.");
+  }
+  Rcpp::IntegerVector subjects = data[".ID_INDEX"];
+  Rcpp::IntegerVector evid = data["EVID"];
+  Rcpp::IntegerVector mdv = data["MDV"];
+  Rcpp::NumericVector input_dv = data["DV"];
+  Rcpp::NumericVector simulated = Rcpp::clone(input_dv);
+  int n_subjects = 0;
+  for (int value : subjects) n_subjects = std::max(n_subjects, value);
+  if (eta.nrow() != n_subjects) {
+    throw std::invalid_argument("The ETA matrix does not match the Kalman simulation subjects.");
+  }
+  const std::vector<double> theta_values = Rcpp::as<std::vector<double>>(theta);
+  std::vector<double> eta_values;
+  eta_values.reserve(static_cast<std::size_t>(eta.size()));
+  for (int row = 0; row < eta.nrow(); ++row) {
+    for (int column = 0; column < eta.ncol(); ++column) eta_values.push_back(eta(row, column));
+  }
+  const std::vector<double> sigma_values = Rcpp::as<std::vector<double>>(sigma);
+  const std::vector<double> prediction = simulate_analytical_t(
+    engine, data, theta_values, eta_values, sigma_values);
+  const bool has_dvid = data.containsElementNamed("DVID");
+  int previous_subject = -1;
+  std::unordered_map<int, Vector> latent;
+  std::unordered_map<int, int> latent_regime;
+  std::unordered_map<int, double> previous_time;
+  std::unordered_map<int, double> previous_dv;
+  for (int row = 0; row < rows; ++row) {
+    const int subject = subjects[row] - 1;
+    if (subject != previous_subject) {
+      latent.clear();
+      latent_regime.clear();
+      previous_time.clear();
+      previous_dv.clear();
+    }
+    if (evid[row] != 0 || mdv[row] != 0) {
+      previous_subject = subject;
+      continue;
+    }
+    const int dvid = has_dvid ?
+      static_cast<int>(row_optional(data, "DVID", row, 1.0)) : 1;
+    const int sequence = engine.kalman_by_dvid ? dvid : 1;
+    const bool first = latent.find(sequence) == latent.end();
+    const double previous_value = first ? 0.0 : previous_dv.at(sequence);
+    const double previous_observation_time = first ?
+      row_optional(data, "TIME", row, 0.0) : previous_time.at(sequence);
+    const int mixture_number = static_cast<int>(row_optional(data, "MIXNUM", row, 1.0));
+    Vector normal(states);
+    for (int state = 0; state < states; ++state) normal[state] = process_normals(row, state);
+    if (engine.kalman_filter_type != "linear") {
+      const Vector evaluation_state = first ? Vector::Zero(states) : latent[sequence];
+      NonlinearStateOutputs<double> output = nonlinear_state_outputs_t(
+        engine, data, row, subject, theta_values, eta_values, eta.ncol(),
+        sigma_values, mixture_number, prediction[static_cast<std::size_t>(row)],
+        first, previous_value, previous_observation_time, evaluation_state);
+      if (engine.switching_enabled) {
+        const SwitchingStateOutputs<double> switching = switching_state_raw_outputs_t(
+          engine, data, row, subject, theta_values, eta_values, eta.ncol(),
+          sigma_values, mixture_number, prediction[static_cast<std::size_t>(row)],
+          first, previous_value, previous_observation_time, evaluation_state);
+        std::vector<double> probability;
+        if (first) {
+          probability = switching.initial;
+        } else {
+          probability.resize(static_cast<std::size_t>(engine.switching_regimes));
+          const int from = latent_regime.at(sequence);
+          for (int to = 0; to < engine.switching_regimes; ++to) {
+            probability[static_cast<std::size_t>(to)] = switching.regime_transition(from, to);
+          }
+        }
+        latent_regime[sequence] = sample_switching_regime(
+          probability, state_space_uniform(
+            engine.kalman_seed + 65537 * subject, row, sequence, 0, first ? 31 : 32));
+        const NonlinearStateOutputs<double>& local =
+          switching.regime[static_cast<std::size_t>(latent_regime[sequence])];
+        output.transition = local.transition;
+        output.process_covariance = local.process_covariance;
+        output.observation = local.observation;
+        output.observation_variance = local.observation_variance;
+      }
+      if (!(output.observation_variance >= 0.0)) {
+        throw std::domain_error("Nonlinear state-space simulation observation variance must be non-negative.");
+      }
+      if (first) {
+        latent[sequence] = output.initial_mean + covariance_sampling_root(
+          output.initial_covariance, "State-space initial covariance") * normal;
+      } else if (engine.kalman_dynamics == "sde") {
+        Vector current = latent[sequence];
+        const double current_time = row_optional(data, "TIME", row, previous_observation_time);
+        const double interval = std::max(0.0, current_time - previous_observation_time);
+        const double step = interval / static_cast<double>(engine.kalman_sde_substeps);
+        for (int substep = 0; substep < engine.kalman_sde_substeps; ++substep) {
+          const NonlinearStateOutputs<double> local = engine.switching_enabled ?
+            switching_state_raw_outputs_t(
+              engine, data, row, subject, theta_values, eta_values, eta.ncol(),
+              sigma_values, mixture_number, prediction[static_cast<std::size_t>(row)],
+              false, previous_value, previous_observation_time + substep * step,
+              current).regime[static_cast<std::size_t>(latent_regime[sequence])] :
+            nonlinear_state_raw_outputs_t(
+              engine, data, row, subject, theta_values, eta_values, eta.ncol(),
+              sigma_values, mixture_number, prediction[static_cast<std::size_t>(row)],
+              false, previous_value, previous_observation_time + substep * step, current);
+          Vector increment(states);
+          for (int state = 0; state < states; ++state) {
+            increment[state] = std::sqrt(step) *
+              process_normals(row, substep * states + state);
+          }
+          Vector next = current + step * local.transition +
+            local.process_covariance * increment;
+          if (engine.kalman_sde_method == "milstein") {
+            for (int first_state = 0; first_state < states; ++first_state) {
+              for (int second_state = 0; second_state < states; ++second_state) {
+                if (first_state != second_state &&
+                    std::abs(local.process_covariance(first_state, second_state)) > 1e-12) {
+                  throw std::domain_error(
+                    "Milstein simulation currently requires diagonal diffusion.");
+                }
+              }
+              const double derivative_step = engine.kalman_jacobian_step *
+                std::max(1.0, std::abs(current[first_state]));
+              Vector plus = current;
+              Vector minus = current;
+              plus[first_state] += derivative_step;
+              minus[first_state] -= derivative_step;
+              const double upper = engine.switching_enabled ?
+                switching_state_raw_outputs_t(
+                  engine, data, row, subject, theta_values, eta_values, eta.ncol(),
+                  sigma_values, mixture_number, prediction[static_cast<std::size_t>(row)],
+                  false, previous_value, previous_observation_time + substep * step,
+                  plus).regime[static_cast<std::size_t>(latent_regime[sequence])].
+                    process_covariance(first_state, first_state) :
+                nonlinear_state_raw_outputs_t(
+                  engine, data, row, subject, theta_values, eta_values, eta.ncol(),
+                  sigma_values, mixture_number, prediction[static_cast<std::size_t>(row)],
+                  false, previous_value, previous_observation_time + substep * step,
+                  plus).process_covariance(first_state, first_state);
+              const double lower = engine.switching_enabled ?
+                switching_state_raw_outputs_t(
+                  engine, data, row, subject, theta_values, eta_values, eta.ncol(),
+                  sigma_values, mixture_number, prediction[static_cast<std::size_t>(row)],
+                  false, previous_value, previous_observation_time + substep * step,
+                  minus).regime[static_cast<std::size_t>(latent_regime[sequence])].
+                    process_covariance(first_state, first_state) :
+                nonlinear_state_raw_outputs_t(
+                  engine, data, row, subject, theta_values, eta_values, eta.ncol(),
+                  sigma_values, mixture_number, prediction[static_cast<std::size_t>(row)],
+                  false, previous_value, previous_observation_time + substep * step,
+                  minus).process_covariance(first_state, first_state);
+              const double derivative = (upper - lower) / (2.0 * derivative_step);
+              const double diffusion = local.process_covariance(first_state, first_state);
+              next[first_state] += 0.5 * diffusion * derivative *
+                (increment[first_state] * increment[first_state] - step);
+            }
+          }
+          current = next;
+        }
+        latent[sequence] = current;
+      } else {
+        latent[sequence] = output.transition + covariance_sampling_root(
+          output.process_covariance, "State-space process covariance") * normal;
+      }
+      const NonlinearStateOutputs<double> observed = engine.switching_enabled ?
+        switching_state_raw_outputs_t(
+          engine, data, row, subject, theta_values, eta_values, eta.ncol(),
+          sigma_values, mixture_number, prediction[static_cast<std::size_t>(row)],
+          first, previous_value, previous_observation_time,
+          latent[sequence]).regime[static_cast<std::size_t>(latent_regime[sequence])] :
+        nonlinear_state_outputs_t(
+          engine, data, row, subject, theta_values, eta_values, eta.ncol(),
+          sigma_values, mixture_number, prediction[static_cast<std::size_t>(row)],
+          first, previous_value, previous_observation_time, latent[sequence]);
+      const double baseline = engine.kalman_prediction_baseline ?
+        prediction[static_cast<std::size_t>(row)] : 0.0;
+      simulated[row] = baseline + observed.observation +
+        std::sqrt(observed.observation_variance) * observation_normals[row];
+      previous_time[sequence] = row_optional(data, "TIME", row, 0.0);
+      previous_dv[sequence] = simulated[row];
+      previous_subject = subject;
+      continue;
+    }
+    const std::vector<double> output = evaluate_error_outputs_t(
+      engine, data, row, subject, theta_values, eta_values, eta.ncol(),
+      sigma_values, mixture_number, prediction[static_cast<std::size_t>(row)],
+      first, previous_value, previous_observation_time, engine.kalman_outputs,
+      "Kalman state-space simulation");
+    std::size_t cursor = 0U;
+    Vector initial_mean(states);
+    for (int state = 0; state < states; ++state) initial_mean[state] = output[cursor++];
+    auto read_matrix = [&]() {
+      Matrix matrix(states, states);
+      for (int matrix_row = 0; matrix_row < states; ++matrix_row) {
+        for (int matrix_column = 0; matrix_column < states; ++matrix_column) {
+          matrix(matrix_row, matrix_column) = output[cursor++];
+        }
+      }
+      return matrix;
+    };
+    const Matrix initial_covariance = read_matrix();
+    const Matrix transition = read_matrix();
+    const Matrix process_covariance = read_matrix();
+    Vector observation(states);
+    for (int state = 0; state < states; ++state) observation[state] = output[cursor++];
+    const double observation_variance = output[cursor++];
+    if (!(observation_variance >= 0.0)) {
+      throw std::domain_error("Kalman simulation observation variance must be non-negative.");
+    }
+    if (first) {
+      latent[sequence] = initial_mean + covariance_sampling_root(
+        initial_covariance, "Kalman initial covariance") * normal;
+    } else {
+      latent[sequence] = transition * latent[sequence] + covariance_sampling_root(
+        process_covariance, "Kalman process covariance") * normal;
+    }
+    const double baseline = engine.kalman_prediction_baseline ?
+      prediction[static_cast<std::size_t>(row)] : 0.0;
+    simulated[row] = baseline + observation.dot(latent[sequence]) +
+      std::sqrt(observation_variance) * observation_normals[row];
+    previous_time[sequence] = row_optional(data, "TIME", row, 0.0);
+    previous_dv[sequence] = simulated[row];
+    previous_subject = subject;
+  }
+  return simulated;
+}
+
 }  // namespace liberation
 
 // [[Rcpp::export(name = ".liberation_population_objective_create")]]
@@ -4836,6 +8076,40 @@ Rcpp::List liberation_engine_simulate(
     const Rcpp::NumericVector& sigma) {
   Rcpp::XPtr<liberation::ModelEngine> engine(engine_pointer);
   return liberation::simulate(*engine, data, theta, eta, sigma);
+}
+
+// [[Rcpp::export(name = ".liberation_engine_hmm_filter")]]
+Rcpp::List liberation_engine_hmm_filter(
+    SEXP engine_pointer,
+    const Rcpp::DataFrame& data,
+    const Rcpp::NumericVector& theta,
+    const Rcpp::NumericMatrix& eta,
+    const Rcpp::NumericVector& sigma) {
+  Rcpp::XPtr<liberation::ModelEngine> engine(engine_pointer);
+  return liberation::hmm_filter(*engine, data, theta, eta, sigma);
+}
+
+// [[Rcpp::export(name = ".liberation_engine_kalman_filter")]]
+Rcpp::List liberation_engine_kalman_filter(
+    SEXP engine_pointer,
+    const Rcpp::DataFrame& data,
+    const Rcpp::NumericVector& theta,
+    const Rcpp::NumericMatrix& eta,
+    const Rcpp::NumericVector& sigma) {
+  Rcpp::XPtr<liberation::ModelEngine> engine(engine_pointer);
+  return liberation::kalman_filter(*engine, data, theta, eta, sigma);
+}
+
+// [[Rcpp::export(name = ".liberation_engine_kalman_simulate")]]
+Rcpp::NumericVector liberation_engine_kalman_simulate(
+    SEXP engine_pointer, const Rcpp::DataFrame& data,
+    const Rcpp::NumericVector& theta, const Rcpp::NumericMatrix& eta,
+    const Rcpp::NumericVector& sigma,
+    const Rcpp::NumericMatrix& process_normals,
+    const Rcpp::NumericVector& observation_normals) {
+  Rcpp::XPtr<liberation::ModelEngine> engine(engine_pointer);
+  return liberation::kalman_simulate(
+    *engine, data, theta, eta, sigma, process_normals, observation_normals);
 }
 
 // [[Rcpp::export(name = ".liberation_engine_derivative")]]
@@ -5805,7 +9079,8 @@ Rcpp::NumericMatrix liberation_mixture_component_nll(
     std::vector<double> prediction = liberation::simulate_analytical_t(
       *engine, data, theta_values, eta_values, sigma_values, assignment);
     std::vector<double> nll = liberation::residual_subject_nll_t(
-      *engine, data, prediction, sigma_values);
+      *engine, data, prediction, theta_values, eta_values, sigma_values,
+      assignment);
     for (int subject = 0; subject < n_subjects; ++subject) {
       result(subject, static_cast<int>(component)) = nll[static_cast<std::size_t>(subject)];
     }

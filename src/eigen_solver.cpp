@@ -1,5 +1,5 @@
 // GCC 14 reports false-positive uninitialized-pointer diagnostics inside
-// Eigen 3.4.0's optimized self-adjoint matrix/vector kernels. Keep the
+// Eigen's optimized self-adjoint matrix/vector kernels. Keep the
 // suppression confined to this third-party adapter translation unit.
 #if defined(__GNUC__) && !defined(__clang__)
 #pragma GCC diagnostic ignored "-Wmaybe-uninitialized"

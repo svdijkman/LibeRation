@@ -72,6 +72,29 @@ test_that("unknown NONMEM records are preserved and reported", {
   expect_match(nm_control_write(imported), "$MSFI", fixed = TRUE)
 })
 
+test_that("NONMEM likelihood records round-trip through the compiled path", {
+  control <- paste(
+    "$PROBLEM Binary likelihood",
+    "$INPUT ID TIME DV MDV",
+    "$DATA binary.csv",
+    "$SUBROUTINES ADVAN1 TRANS2",
+    "$PRED",
+    "P=1/(1+EXP(-THETA(1)))",
+    "CL=1; V=1; S1=V; F=P",
+    "$ERROR",
+    "Y=ifelse(DV.EQ.1,F,1-F)",
+    "$THETA (-10,0,10)",
+    "$ESTIMATION METHOD=COND LAPLACE LIKELIHOOD",
+    sep = "\n"
+  )
+  imported <- nm_control_read(control)
+  expect_identical(imported$model$LIK_CONFIG$error, "likelihood")
+  expect_identical(imported$model$likelihood_output, "Y")
+  written <- nm_control_write(imported$model)
+  expect_match(written, "LIKELIHOOD")
+  expect_identical(nm_control_read(written)$model$LIK_CONFIG$error, "likelihood")
+})
+
 test_that("CWRES are generated and remain aligned with fitted records", {
   fixture <- estimation_fixture()
   fit <- nm_est(fixture$model, fixture$data, method = "FOCEI", maxit = 2, eta_maxit = 5)

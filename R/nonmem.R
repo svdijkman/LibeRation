@@ -177,6 +177,17 @@
   unique(tokens[keep])
 }
 
+.nm_control_math_functions <- function(code) {
+  for (name in c("EXP", "LOG", "SQRT", "SIN", "COS", "TAN", "TANH",
+                 "ABS", "EXPM1", "LOG1P", "IFELSE", "MIN", "MAX")) {
+    code <- gsub(
+      paste0("\\b", name, "(?=\\s*\\()"), tolower(name), code,
+      ignore.case = TRUE, perl = TRUE
+    )
+  }
+  code
+}
+
 #' Read and translate a NONMEM control stream
 #'
 #' The importer preserves unsupported records and reports them rather than
@@ -223,16 +234,25 @@ nm_control_read <- function(x, strict = TRUE) {
   omega_result <- .nm_control_omega(sections)
   sigma <- .nm_control_parameter_table(.nm_control_parameter_records(sections, "SIGMA"), "SIGMA")
   pred <- c(.nm_control_first(sections, "PK"), .nm_control_first(sections, "PRED"))
-  pred <- paste(pred, collapse = "\n")
-  des <- paste(.nm_control_first(sections, "DES"), collapse = "\n")
-  error <- paste(.nm_control_first(sections, "ERROR"), collapse = "\n")
+  pred <- .nm_control_math_functions(paste(pred, collapse = "\n"))
+  des <- .nm_control_math_functions(paste(.nm_control_first(sections, "DES"), collapse = "\n"))
+  error <- .nm_control_math_functions(paste(.nm_control_first(sections, "ERROR"), collapse = "\n"))
   error <- gsub("\\bEPS\\s*\\(", "ERR(", error, ignore.case = TRUE, perl = TRUE)
+  error <- gsub("\\.EQ\\.", "==", error, ignore.case = TRUE, perl = TRUE)
+  error <- gsub("\\.NE\\.", "!=", error, ignore.case = TRUE, perl = TRUE)
+  error <- gsub("\\.GE\\.", ">=", error, ignore.case = TRUE, perl = TRUE)
+  error <- gsub("\\.GT\\.", ">", error, ignore.case = TRUE, perl = TRUE)
+  error <- gsub("\\.LE\\.", "<=", error, ignore.case = TRUE, perl = TRUE)
+  error <- gsub("\\.LT\\.", "<", error, ignore.case = TRUE, perl = TRUE)
   if (!nzchar(trimws(error))) error <- "Y = F"
   if (!nzchar(trimws(pred))) .nm_stop("The control stream requires a $PK or $PRED block.")
   covariates <- setdiff(input, c("ID", "TIME", "EVID", "AMT", "RATE", "II", "SS",
                                   "CMT", "DV", "MDV", "CENS", "LLOQ", "DVID"))
   obs_cmp <- if (advan %in% c(2L, 4L, 12L)) 2L else 1L
   warnings <- omega_result$warnings
+  estimation <- paste(.nm_control_first(sections, "ESTIMATION"), collapse = " ")
+  user_likelihood <- grepl("\\b(?:LIKE|LIKELIHOOD)\\b", estimation,
+                           ignore.case = TRUE, perl = TRUE)
   if (grepl("\\bIF\\s*\\(", paste(pred, des, error), ignore.case = TRUE)) {
     warnings <- c(warnings, "Runtime IF statements require manual conversion to tape-safe ifelse().")
   }
@@ -240,7 +260,8 @@ nm_control_read <- function(x, strict = TRUE) {
     INPUT = unique(c(input, "ID", "TIME", "EVID", "AMT", "RATE", "II", "SS", "CMT", "DV", "MDV")),
     ADVAN = advan, TRANS = trans, OBSCMP = obs_cmp, PRED = pred, ERROR = error,
     DES = des, THETAS = theta, OMEGAS = omega_result$table, SIGMAS = sigma,
-    COVARIATES = covariates
+    COVARIATES = covariates,
+    LIK_CONFIG = if (user_likelihood) nm_lik_config(error = "likelihood") else NULL
   )
   model_error <- NULL
   model <- tryCatch({
@@ -276,7 +297,6 @@ nm_control_read <- function(x, strict = TRUE) {
   data_record <- paste(.nm_control_first(sections, "DATA"), collapse = " ")
   data_path <- if (nzchar(data_record)) strsplit(data_record, "\\s+", perl = TRUE)[[1L]][[1L]] else NULL
   problem <- paste(.nm_control_first(sections, "PROBLEM"), collapse = " ")
-  estimation <- paste(.nm_control_first(sections, "ESTIMATION"), collapse = " ")
   covariance <- paste(.nm_control_first(sections, "COVARIANCE"), collapse = " ")
   extra <- Filter(function(section) section$name %in% unknown, sections)
   compatibility <- list(
@@ -337,6 +357,20 @@ nm_control_write <- function(x, file = NULL, data = NULL,
   control <- if (inherits(x, "nm_control_stream")) x else NULL
   model <- if (!is.null(control)) control$model else if (inherits(x, "NMEngine")) x$model else x
   if (!inherits(model, "nm_model")) .nm_stop("`x` must contain an nm_model.")
+  if (!is.null(model$HMM_CONFIG)) {
+    .nm_stop(
+      "Automatic NONMEM control-stream export of HMM_CONFIG is not available; ",
+      "the scaled forward recursion is a LibeRation engine feature. Export the ",
+      "component expressions manually only if the target NONMEM implementation ",
+      "provides an equivalent recursive likelihood."
+    )
+  }
+  if (!is.null(model$KALMAN_CONFIG)) {
+    .nm_stop(
+      "Automatic NONMEM control-stream export of KALMAN_CONFIG is not available; ",
+      "the compiled filter/smoother is a LibeRation engine feature."
+    )
+  }
   metadata <- if (!is.null(control)) control else attr(model, "nonmem_control", exact = TRUE) %||% list()
   problem <- metadata$problem %||% attr(model, "name", exact = TRUE) %||% "LibeRation model"
   input_record <- metadata$input_record %||% paste(model$INPUT, collapse = " ")
@@ -352,8 +386,16 @@ nm_control_write <- function(x, file = NULL, data = NULL,
   }
   lines <- c(lines, "$PK", paste0("  ", strsplit(model$PRED, "\n", fixed = TRUE)[[1L]]))
   if (nzchar(trimws(model$DES))) lines <- c(lines, "$DES", paste0("  ", strsplit(model$DES, "\n", fixed = TRUE)[[1L]]))
-  lines <- c(lines, "$ERROR", paste0("  ", strsplit(gsub("\\bERR\\s*\\(", "EPS(", model$ERROR,
-                                                            ignore.case = TRUE, perl = TRUE), "\n", fixed = TRUE)[[1L]]),
+  nonmem_error <- gsub("\\bERR\\s*\\(", "EPS(", model$ERROR,
+                       ignore.case = TRUE, perl = TRUE)
+  if (identical(model$LIK_CONFIG$error, "likelihood")) {
+    if (identical(model$likelihood_output, "LIK")) {
+      nonmem_error <- paste(nonmem_error, "Y = LIK", sep = "\n")
+    } else if (identical(model$likelihood_output, "LOGLIK")) {
+      nonmem_error <- paste(nonmem_error, "Y = exp(LOGLIK)", sep = "\n")
+    }
+  }
+  lines <- c(lines, "$ERROR", paste0("  ", strsplit(nonmem_error, "\n", fixed = TRUE)[[1L]]),
              "$THETA", paste0("  ", .nm_control_write_parameter(model$THETAS, "THETA")))
   omega <- model$OMEGAS
   if (nrow(omega)) {
@@ -368,6 +410,14 @@ nm_control_write <- function(x, file = NULL, data = NULL,
   }
   if (nrow(model$SIGMAS)) lines <- c(lines, "$SIGMA", paste0("  ", .nm_control_write_parameter(model$SIGMAS, "SIGMA")))
   estimation <- estimation %||% metadata$estimation
+  if (identical(model$LIK_CONFIG$error, "likelihood")) {
+    if (is.null(estimation) || !nzchar(trimws(estimation))) {
+      estimation <- "METHOD=COND LAPLACE LIKELIHOOD"
+    } else if (!grepl("\\b(?:LIKE|LIKELIHOOD)\\b", estimation,
+                      ignore.case = TRUE, perl = TRUE)) {
+      estimation <- paste(estimation, "LIKELIHOOD")
+    }
+  }
   if ((!is.null(estimation) && nzchar(trimws(estimation))) || isTRUE(metadata$estimation_present)) {
     lines <- c(lines, trimws(paste("$ESTIMATION", estimation %||% "")))
   }

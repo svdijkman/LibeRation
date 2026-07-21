@@ -39,6 +39,14 @@ nm_simulate <- function(model, data, theta = NULL, eta = NULL, sigma = NULL,
                         residual = FALSE, sample_mixture = FALSE,
                         censor = FALSE, seed = NULL, n_cores = 1L) {
   engine <- if (inherits(model, "NMEngine")) model else nm_compile(model)
+  if (isTRUE(residual) && identical(engine$model$LIK_CONFIG$error, "likelihood")) {
+    if (is.null(engine$model$OUTCOMES) && is.null(engine$model$KALMAN_CONFIG)) {
+      .nm_stop(
+        "A free-form user likelihood does not define a generic outcome generator. ",
+        "Declare OUTCOMES with `nm_outcome()` or use `residual = FALSE`."
+      )
+    }
+  }
   theta <- theta %||% engine$model$THETAS$Value
   sigma <- sigma %||% engine$model$SIGMAS$Value
   omega <- omega %||% engine$model$OMEGAS$Value
@@ -136,15 +144,32 @@ nm_simulate <- function(model, data, theta = NULL, eta = NULL, sigma = NULL,
       }
     }
     if (n_eta) {
-      for (column in seq_len(n_eta)) {
-        result[[paste0("ETA", column)]] <- eta_value[result$.ID_INDEX, column]
+      if (!is.null(engine$model$RE_CONFIG)) {
+        for (effect in seq_len(engine$model$n_eta)) {
+          mapped <- as.integer(result[[paste0(".ETA_COLUMN_", effect)]])
+          result[[paste0("ETA", effect)]] <- eta_value[
+            cbind(result$.ID_INDEX, mapped)
+          ]
+        }
+      } else {
+        for (column in seq_len(n_eta)) {
+          result[[paste0("ETA", column)]] <- eta_value[result$.ID_INDEX, column]
+        }
       }
     }
     if (!is.null(mixture)) {
       result$MIXNUM <- result$MIXNUM %||% rep(1L, nrow(result))
     }
     if (isTRUE(residual)) {
-      result <- .nm_simulate_residual(engine$model, result, sigma, censor)
+      result <- if (!is.null(engine$model$KALMAN_CONFIG)) {
+        .nm_simulate_kalman(
+          engine, result, theta = theta, eta = eta_value, sigma = sigma
+        )
+      } else if (identical(engine$model$LIK_CONFIG$error, "likelihood")) {
+        .nm_simulate_first_class_outcomes(engine$model, result, theta, sigma)
+      } else {
+        .nm_simulate_residual(engine$model, result, sigma, censor)
+      }
     }
     if (nsim > 1L) result$SIM <- index
     result
@@ -167,7 +192,7 @@ nm_simulate <- function(model, data, theta = NULL, eta = NULL, sigma = NULL,
   variance <- .nm_residual_variance(model, result$IPRED, sigma, dvid)
   standardized <- numeric(nrow(result))
   groups <- interaction(result$.ID_INDEX, dvid, drop = TRUE, lex.order = TRUE)
-  rho <- model$LIK_CONFIG$ar1_rho
+  rho <- .nm_ar1_rho(model, sigma = sigma)
   for (group in levels(groups)) {
     rows <- which(observed & groups == group)
     if (!length(rows)) next
@@ -180,6 +205,25 @@ nm_simulate <- function(model, data, theta = NULL, eta = NULL, sigma = NULL,
       }
     } else if (length(rows) > 1L) {
       standardized[rows[-1L]] <- innovation[-1L]
+    }
+  }
+  if (length(model$LIK_CONFIG$residual_groups)) {
+    time_groups <- interaction(
+      result$.ID_INDEX, result$TIME, drop = TRUE, lex.order = TRUE
+    )
+    for (definition in model$LIK_CONFIG$residual_groups) {
+      correlation <- .nm_residual_group_value(definition, model$THETAS$Value, sigma)
+      eligible <- observed & dvid %in% definition$dvid
+      for (time_group in levels(time_groups[eligible])) {
+        rows <- which(eligible & time_groups == time_group)
+        if (length(rows) < 2L) next
+        endpoint <- match(dvid[rows], definition$dvid)
+        if (anyDuplicated(endpoint)) {
+          .nm_stop("A correlated residual group has duplicate DVID observations at one subject/time.")
+        }
+        submatrix <- correlation[endpoint, endpoint, drop = FALSE]
+        standardized[rows] <- drop(stats::rnorm(length(rows)) %*% chol(submatrix))
+      }
     }
   }
   error <- sqrt(variance) * standardized

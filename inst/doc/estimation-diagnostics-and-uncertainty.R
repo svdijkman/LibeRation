@@ -1,14 +1,12 @@
 ## ----setup, include=FALSE-----------------------------------------------------
 knitr::opts_chunk$set(collapse = TRUE, comment = "#>")
 
-
 ## ----gq-template, eval=FALSE--------------------------------------------------
 # gq_fit <- nm_est(
 #   model, data, method = "GQ",
 #   gq_grid = "auto", gq_order = 5, gq_level = 3,
 #   covariance = TRUE
 # )
-
 
 ## ----estimation-template, eval=FALSE------------------------------------------
 # fit <- nm_est(
@@ -25,7 +23,6 @@ knitr::opts_chunk$set(collapse = TRUE, comment = "#>")
 #   covariance_type = "auto"
 # )
 
-
 ## ----estimation-sequence, eval=FALSE------------------------------------------
 # fit <- nm_est_sequence(
 #   model, data,
@@ -38,7 +35,6 @@ knitr::opts_chunk$set(collapse = TRUE, comment = "#>")
 # fit$method_sequence
 # fit$stages
 
-
 ## ----covariance-template, eval=FALSE------------------------------------------
 # covariance <- nm_cov_step(
 #   fit,
@@ -48,11 +44,9 @@ knitr::opts_chunk$set(collapse = TRUE, comment = "#>")
 #   seed = 20260715
 # )
 
-
 ## ----gof-template, eval=FALSE-------------------------------------------------
 # gof <- nm_gof(fit)
 # subset(gof, EVID == 0, c(ID, TIME, DV, PRED, IPRED, CWRES))
-
 
 ## ----predictive-template, eval=FALSE------------------------------------------
 # vpc <- nm_vpc(
@@ -67,7 +61,6 @@ knitr::opts_chunk$set(collapse = TRUE, comment = "#>")
 # npde <- nm_npde(fit, nsim = 500, seed = 20260715)
 # npc <- nm_npc(fit, nsim = 500, seed = 20260715)
 
-
 ## ----special-vpc-template, eval=FALSE-----------------------------------------
 # categorical_vpc <- nm_vpc_categorical(
 #   categorical_fit, outcome = "DV", nsim = 500
@@ -76,7 +69,6 @@ knitr::opts_chunk$set(collapse = TRUE, comment = "#>")
 # tte_vpc <- nm_vpc_tte(
 #   tte_fit, event = "EVENT", nsim = 500
 # )
-
 
 ## ----uncertainty-template, eval=FALSE-----------------------------------------
 # bootstrap <- nm_bootstrap(
@@ -93,7 +85,6 @@ knitr::opts_chunk$set(collapse = TRUE, comment = "#>")
 #   span = 3,
 #   level = 0.95
 # )
-
 
 ## ----scm-template, eval=FALSE-------------------------------------------------
 # candidates <- data.frame(

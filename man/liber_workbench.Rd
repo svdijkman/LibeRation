@@ -13,12 +13,17 @@ liber_workbench(
   report = NULL,
   report_design = NULL,
   diagnostics = NULL,
+  hmm = NULL,
+  kalman = NULL,
   log = NULL,
   job_log = NULL,
   server = NULL,
   workspace = NULL,
   library = NULL,
   ai = NULL,
+  ai_context = NULL,
+  report_ai_context = NULL,
+  report_directory = "",
   output_catalog = NULL,
   run_output = if (inherits(fit, "nm_fit")) fit$output else NULL,
   data_payload = TRUE,
@@ -49,6 +54,13 @@ visual report designer.}
 \item{diagnostics}{Optional saved VPC, NPC, and NPDE results for the selected
 estimation run.}
 
+\item{hmm}{Optional decoded HMM GUI payload. When omitted, availability is
+inferred from the selected model and fit and rows remain lazy.}
+
+\item{kalman}{Optional decoded linear state-space GUI payload. When omitted,
+availability is inferred from the selected model and fit and rows remain
+lazy.}
+
 \item{log}{Optional application-log payload.}
 
 \item{job_log}{Optional stdout/stderr lines for the selected queued job.}
@@ -59,7 +71,18 @@ estimation run.}
 
 \item{library}{Optional LibeRary catalogue payload.}
 
-\item{ai}{Optional browser-local WebGPU AI settings and model catalogue.}
+\item{ai}{Optional browser-local WebGPU AI settings, independent Help and
+Report context-window choices, and model catalogue.}
+
+\item{ai_context}{Optional compact, on-demand summaries of saved project
+runs supplied to the browser-local Help model. Full result datasets are
+never included in this payload.}
+
+\item{report_ai_context}{Optional detailed, on-demand summaries of the runs
+selected in the visual report workflow.}
+
+\item{report_directory}{Default report output directory displayed by the
+visual report builder.}
 
 \item{output_catalog}{Optional draft output catalogue used by the GUI after
 validation but before editor changes are applied.}

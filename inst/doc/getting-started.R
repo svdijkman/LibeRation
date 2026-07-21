@@ -1,7 +1,6 @@
 ## ----setup, include=FALSE-----------------------------------------------------
 knitr::opts_chunk$set(collapse = TRUE, comment = "#>")
 
-
 ## ----model--------------------------------------------------------------------
 library(LibeRation)
 
@@ -28,7 +27,6 @@ model <- nm_model(
 )
 model
 
-
 ## ----data---------------------------------------------------------------------
 event_data <- data.frame(
   ID = 1L,
@@ -43,7 +41,6 @@ event_data <- data.frame(
 validated <- nm_dataset(event_data)
 validated
 
-
 ## ----simulate-----------------------------------------------------------------
 simulated <- nm_simulate(
   model,
@@ -54,7 +51,6 @@ simulated <- nm_simulate(
   seed = 20260715
 )
 simulated[c("ID", "TIME", "EVID", "DV", "IPRED")]
-
 
 ## ----estimate, eval=FALSE-----------------------------------------------------
 # fit <- nm_est(
@@ -71,7 +67,6 @@ simulated[c("ID", "TIME", "EVID", "DV", "IPRED")]
 # 
 # summary(fit)
 # fit$covariance
-
 
 ## ----next, eval=FALSE---------------------------------------------------------
 # gof <- nm_gof(fit)

@@ -15,6 +15,7 @@ nm_model(
   PRED = "",
   ERROR = "Y = F",
   DES = "",
+  ALG = "",
   THETAS,
   OMEGAS = NULL,
   SIGMAS = NULL,
@@ -23,8 +24,17 @@ nm_model(
   ODE_CONTROL = NULL,
   IOV = 0L,
   LIK_CONFIG = NULL,
-  SOLVER = c("auto", "advan", "matrix", "ode"),
-  ERROR_TYPE = c("auto", "none", "additive", "proportional", "combined", "exponential"),
+  HMM_CONFIG = NULL,
+  KALMAN_CONFIG = NULL,
+  DDE_CONFIG = NULL,
+  DAE_CONFIG = NULL,
+  RE_CONFIG = NULL,
+  COMPONENTS = NULL,
+  EXPERIMENTAL = NULL,
+  OUTCOMES = NULL,
+  SOLVER = c("auto", "advan", "matrix", "ode", "dde", "dae"),
+  ERROR_TYPE = c("auto", "none", "additive", "proportional", "combined", "exponential",
+    "power", "likelihood"),
   GRAPH = NULL,
   LAYOUT = NULL,
   LANGUAGE = c("R", "C++")
@@ -49,9 +59,16 @@ from `$PK/$PRED` assignments and combined with standard engine outputs; see
 
 \item{PRED}{Parameter/model assignment code.}
 
-\item{ERROR}{Residual-error assignment code.}
+\item{ERROR}{Residual-error or user-likelihood assignment code. With
+`LIK_CONFIG = nm_lik_config(error = "likelihood")`, assign either `LIK`
+(a positive row probability/density) or `LOGLIK` (its logarithm). The
+compiled block may use `DV`, `F`/`PRED`/`IPRED`, model assignments,
+parameters, numeric input columns, and the Markov helpers `PREV_DV`,
+`PREV_TIME`, `DT`, and `FIRST`.}
 
 \item{DES}{ODE derivative code for ADVAN6/13.}
+
+\item{ALG}{Algebraic residual equations for an experimental index-1 DAE.}
 
 \item{THETAS, OMEGAS, SIGMAS}{Parameter tables.}
 
@@ -67,7 +84,39 @@ A-stable adaptive implicit trapezoidal method.}
 
 \item{LIK_CONFIG}{Reserved likelihood configuration.}
 
-\item{SOLVER}{`auto`, `advan`, `matrix`, or `ode`.}
+\item{HMM_CONFIG}{Optional finite-state hidden Markov configuration created
+by [nm_hmm_config()] or [nm_cthmm_config()]. Its initial,
+transition/rate, and emission names refer to assignments in `ERROR`; the
+complete scaled forward likelihood runs in C++ and remains differentiable
+by CppAD.}
+
+\item{KALMAN_CONFIG}{Optional linear Gaussian state-space configuration
+created by [nm_kalman_config()]. Filtering is part of the compiled exact
+likelihood; retrospective smoothing is available through
+[nm_kalman_decode()].}
+
+\item{DDE_CONFIG}{Optional method-of-steps declaration created by
+[nm_dde_config()]. Delayed states use `LAG(A(i), delay_name)` in `DES`.}
+
+\item{DAE_CONFIG}{Optional semi-explicit index-1 declaration created by
+[nm_dae_config()]. Algebraic residuals are supplied through `ALG`.}
+
+\item{RE_CONFIG}{Optional nested/crossed random-effect design created by
+[nm_re_config()]. Every ETA is assigned to a grouping block; connected
+components are evaluated as independent conditional-likelihood units.}
+
+\item{COMPONENTS}{Optional list of immutable offline [nm_component()]
+declarations expanded into compiled `$PK/$PRED` or `$DES` IR according
+to each component's scope.}
+
+\item{EXPERIMENTAL}{Explicit experimental-engine acknowledgement and policy.}
+
+\item{OUTCOMES}{Optional first-class observation declaration created by
+[nm_outcome()] or [nm_outcomes()]. When `ERROR` is omitted, LibeRation
+generates an editable normalized likelihood block. The declaration is
+also used for stochastic outcome simulation and family diagnostics.}
+
+\item{SOLVER}{`auto`, `advan`, `matrix`, `ode`, `dde`, or `dae`.}
 
 \item{ERROR_TYPE}{Standard residual-error form, or `auto`.}
 

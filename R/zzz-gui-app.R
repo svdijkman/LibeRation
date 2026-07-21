@@ -1,3 +1,30 @@
+.liber_report_default_directory <- function(workspace, project = NULL) {
+  root <- file.path(.nm_workspace_path(workspace), "reports")
+  if (!is.null(project) && length(project) && nzchar(as.character(project)[[1L]])) {
+    root <- file.path(root, as.character(project)[[1L]])
+  }
+  normalizePath(root, winslash = "/", mustWork = FALSE)
+}
+
+.liber_report_choose_directory <- function(initial = getwd()) {
+  initial <- path.expand(as.character(initial %||% getwd())[[1L]])
+  candidate <- initial
+  while (!dir.exists(candidate) && !identical(dirname(candidate), candidate)) {
+    candidate <- dirname(candidate)
+  }
+  if (!dir.exists(candidate)) candidate <- getwd()
+  selected <- if (.Platform$OS.type == "windows") {
+    utils::choose.dir(default = candidate, caption = "Choose report output folder")
+  } else if (capabilities("tcltk") && requireNamespace("tcltk", quietly = TRUE)) {
+    as.character(tcltk::tk_choose.dir(default = candidate,
+                                      caption = "Choose report output folder"))
+  } else {
+    .nm_stop("A native folder chooser is unavailable; enter the report directory manually.")
+  }
+  if (!length(selected) || is.na(selected) || !nzchar(selected)) return(NULL)
+  normalizePath(selected, winslash = "/", mustWork = TRUE)
+}
+
 #' Launch the LibeR React modelling application
 #'
 #' This is the interactive workbench used to manage model versions, datasets,
@@ -11,6 +38,9 @@
 #' @param workspace Workspace object or directory. By default the GUI uses
 #'   `C:/Users/<username>/Documents/LibeR/workspace` on Windows and
 #'   `~/LibeR/workspace` on Linux and macOS.
+#' @param session_workspace Create a separate ephemeral workspace beneath
+#'   `workspace` for every browser session. This is intended for hosted
+#'   demonstrations where application users must not share project files.
 #' @param project Optional project id to open when the application starts.
 #' @param launch.browser Passed to [shiny::runApp()]. Use `NULL` to return the
 #'   Shiny app object without launching it.
@@ -19,64 +49,14 @@
 #' if (interactive()) liber_gui()
 #' @export
 liber_gui <- function(model = NULL, data = NULL, queue = NULL,
-                      workspace = NULL, project = NULL,
+                      workspace = NULL, project = NULL, session_workspace = FALSE,
                       launch.browser = getOption("shiny.launch.browser", interactive()), ...) {
   dots <- list(...)
-  workspace <- if (inherits(workspace, "nm_workspace")) workspace else {
-    nm_workspace(workspace %||% .liber_default_workspace())
-  }
-  if (identical(queue, FALSE)) {
-    queue <- NULL
-  } else if (is.null(queue) && requireNamespace("LibeRties", quietly = TRUE)) {
-    queue <- LibeRties::ls_local_queue(
-      root = file.path(workspace$path, ".jobs"), user = "local", max_workers = 1L
-    )
-  }
-  client_settings <- .liber_client_settings_read(workspace)
-  saved_remote_config <- client_settings$remotes
-  saved_remote_queues <- list()
-  saved_remote_meta <- list()
-  if (length(saved_remote_config) && requireNamespace("LibeRties", quietly = TRUE)) {
-    for (id in names(saved_remote_config)) {
-      config <- saved_remote_config[[id]]
-      remote <- tryCatch(
-        LibeRties::ls_remote(config$url, config$token, timeout = config$timeout %||% 30),
-        error = function(error) NULL
-      )
-      if (is.null(remote)) next
-      saved_remote_queues[[id]] <- remote
-      saved_remote_meta[[id]] <- list(
-        name = config$name %||% "Remote server", url = remote$url,
-        user = config$user %||% ""
-      )
-    }
-  }
-  selected_queue <- as.character(client_settings$selected_queue %||% "local")[[1L]]
-  if (!identical(selected_queue, "local") && is.null(saved_remote_queues[[selected_queue]])) {
-    selected_queue <- "local"
-  }
-  initial_jobs <- if (identical(selected_queue, "local") && !is.null(queue)) {
-    tryCatch(
-      as.data.frame(queue$list(), stringsAsFactors = FALSE),
-      error = function(error) data.frame()
-    )
-  } else data.frame()
-  initial_result <- NULL
-  initial_snapshot <- NULL
-  initial_run <- NULL
-  initial_diagnostics <- list()
-  if (!is.null(project)) {
-    records <- nm_project_list(workspace, project)
-    versions <- records[records$entry_type == "version", , drop = FALSE]
-    if (nrow(versions)) {
-      opened <- nm_project_load(workspace, project, versions$id[[1L]])
-      model <- model %||% opened$model
-      data <- data %||% opened$data
-      initial_result <- opened$result
-      initial_snapshot <- opened$id
-    }
-  }
-  initial_fit <- if (inherits(initial_result, "nm_fit")) initial_result else NULL
+  model_input <- model
+  data_input <- data
+  queue_input <- queue
+  workspace_input <- workspace
+  project_input <- project
   favicon <- system.file("assets", "favicon.svg", package = "LibeRation")
   favicon_href <- if (nzchar(favicon) && file.exists(favicon)) {
     prefix <- paste0(
@@ -102,48 +82,6 @@ liber_gui <- function(model = NULL, data = NULL, queue = NULL,
   }
   ai_models <- .liber_ai_models()
   allowed_ai_models <- vapply(ai_models, `[[`, character(1), "id")
-  if (!client_settings$ai$help_model %in% allowed_ai_models) {
-    client_settings$ai$help_model <- .liber_ai_default_help_model()
-  }
-  if (!client_settings$ai$report_model %in%
-      c("same_as_help", allowed_ai_models)) {
-    client_settings$ai$report_model <- .liber_ai_default_report_model()
-  }
-  client_settings$ai$model <- client_settings$ai$help_model
-  saved_report_design <- function(project_id) {
-    if (is.null(project_id) || !length(project_id) || !nzchar(project_id)) return(NULL)
-    metadata <- tryCatch(
-      nm_report_design_load(workspace, project_id),
-      error = function(error) NULL
-    )
-    if (is.null(metadata) || !nrow(metadata)) return(NULL)
-    tryCatch(
-      nm_report_design_load(workspace, project_id, metadata$id[[1L]]),
-      error = function(error) NULL
-    )
-  }
-  state <- shiny::reactiveValues(
-    model = if (inherits(model, "NMEngine")) model$model else model,
-    data = data, result = initial_result, fit = initial_fit,
-    fit_payload = .liber_gui_fit(initial_fit, include_gof = FALSE),
-    diagnostics = initial_diagnostics,
-    report = NULL,
-    report_design = saved_report_design(project),
-    ai_config = client_settings$ai,
-    diagram_candidate = NULL,
-    jobs = initial_jobs, job_log = character(), project = project,
-    snapshot = initial_snapshot, run = initial_run,
-    queue_id = selected_queue, remote_queues = saved_remote_queues,
-    remote_meta = saved_remote_meta, remote_config = saved_remote_config,
-    job_context = client_settings$pending_jobs %||% list(),
-    hidden_jobs = character(), selected_job = NULL,
-    active_page = "home", comparison_open = FALSE,
-    draft_outputs = NULL,
-    data_payload = FALSE, gof_payload = FALSE,
-    diagnostic_payload = character(),
-    refreshed = "Queue ready", log_level = "info",
-    log_current = "Workbench ready", log_history = "Workbench ready"
-  )
   ui <- shiny::fluidPage(
     htmltools::tags$head(
       htmltools::tags$title("LibeRation"),
@@ -159,6 +97,128 @@ liber_gui <- function(model = NULL, data = NULL, queue = NULL,
   )
 
   server <- function(input, output, session) {
+    workspace_path <- if (isTRUE(session_workspace)) {
+      base <- if (inherits(workspace_input, "nm_workspace")) {
+        workspace_input$path
+      } else {
+        workspace_input %||% file.path(tempdir(), "LibeRation-cloud")
+      }
+      file.path(base, "sessions", gsub("[^A-Za-z0-9_-]", "-", session$token))
+    } else if (inherits(workspace_input, "nm_workspace")) {
+      workspace_input$path
+    } else {
+      workspace_input %||% .liber_default_workspace()
+    }
+    workspace <- nm_workspace(workspace_path)
+    queue <- queue_input
+    if (identical(queue, FALSE)) {
+      queue <- NULL
+    } else if (is.null(queue) && requireNamespace("LibeRties", quietly = TRUE)) {
+      queue <- LibeRties::ls_local_queue(
+        root = file.path(workspace$path, ".jobs"), user = "local", max_workers = 1L
+      )
+    }
+    client_settings <- .liber_client_settings_read(workspace)
+    saved_remote_config <- client_settings$remotes
+    saved_remote_queues <- list()
+    saved_remote_meta <- list()
+    if (length(saved_remote_config) && requireNamespace("LibeRties", quietly = TRUE)) {
+      for (id in names(saved_remote_config)) {
+        config <- saved_remote_config[[id]]
+        remote <- tryCatch(
+          LibeRties::ls_remote(config$url, config$token,
+                               timeout = config$timeout %||% 30),
+          error = function(error) NULL
+        )
+        if (is.null(remote)) next
+        saved_remote_queues[[id]] <- remote
+        saved_remote_meta[[id]] <- list(
+          name = config$name %||% "Remote server", url = remote$url,
+          user = config$user %||% ""
+        )
+      }
+    }
+    selected_queue <- as.character(client_settings$selected_queue %||% "local")[[1L]]
+    if (!identical(selected_queue, "local") &&
+        is.null(saved_remote_queues[[selected_queue]])) {
+      selected_queue <- "local"
+    }
+    initial_jobs <- if (identical(selected_queue, "local") && !is.null(queue)) {
+      tryCatch(
+        as.data.frame(queue$list(), stringsAsFactors = FALSE),
+        error = function(error) data.frame()
+      )
+    } else data.frame()
+    initial_result <- NULL
+    initial_snapshot <- NULL
+    initial_run <- NULL
+    initial_diagnostics <- list()
+    session_model <- model_input
+    session_data <- data_input
+    if (!is.null(project_input)) {
+      records <- nm_project_list(workspace, project_input)
+      versions <- records[records$entry_type == "version", , drop = FALSE]
+      if (nrow(versions)) {
+        opened <- nm_project_load(workspace, project_input, versions$id[[1L]])
+        session_model <- session_model %||% opened$model
+        session_data <- session_data %||% opened$data
+        initial_result <- opened$result
+        initial_snapshot <- opened$id
+      }
+    }
+    initial_fit <- if (inherits(initial_result, "nm_fit")) initial_result else NULL
+    if (!client_settings$ai$help_model %in% allowed_ai_models) {
+      client_settings$ai$help_model <- .liber_ai_default_help_model()
+    }
+    if (!client_settings$ai$report_model %in%
+        c("same_as_help", allowed_ai_models)) {
+      client_settings$ai$report_model <- .liber_ai_default_report_model()
+    }
+    client_settings$ai$model <- client_settings$ai$help_model
+    saved_report_design <- function(project_id) {
+      if (is.null(project_id) || !length(project_id) ||
+          !nzchar(as.character(project_id)[[1L]])) return(NULL)
+      metadata <- tryCatch(
+        nm_report_design_load(workspace, project_id),
+        error = function(error) NULL
+      )
+      if (is.null(metadata) || !nrow(metadata)) return(NULL)
+      tryCatch(
+        nm_report_design_load(workspace, project_id, metadata$id[[1L]]),
+        error = function(error) NULL
+      )
+    }
+    state <- shiny::reactiveValues(
+      model = if (inherits(session_model, "NMEngine")) session_model$model else session_model,
+      data = session_data, result = initial_result, fit = initial_fit,
+      fit_payload = .liber_gui_fit(initial_fit, include_gof = FALSE),
+      hmm_payload = NULL, kalman_payload = NULL,
+      diagnostics = initial_diagnostics, report = NULL,
+      report_design = saved_report_design(project_input),
+      report_ai_context = list(
+        available = FALSE, project = "", project_name = "", request_id = "",
+        run_ids = character(), message = "Report evidence has not been requested.",
+        runs = list()
+      ),
+      ai_config = client_settings$ai,
+      ai_context = list(
+        available = FALSE, project = "", project_name = "", request_id = "",
+        scope = "index", message = "Project result summaries have not been requested.",
+        runs = list()
+      ),
+      diagram_candidate = NULL,
+      jobs = initial_jobs, job_log = character(), project = project_input,
+      snapshot = initial_snapshot, run = initial_run,
+      queue_id = selected_queue, remote_queues = saved_remote_queues,
+      remote_meta = saved_remote_meta, remote_config = saved_remote_config,
+      job_context = client_settings$pending_jobs %||% list(),
+      hidden_jobs = character(), selected_job = NULL,
+      active_page = "home", comparison_open = FALSE,
+      draft_outputs = NULL, data_payload = FALSE, gof_payload = FALSE,
+      diagnostic_payload = character(), refreshed = "Queue ready",
+      log_level = "info", log_current = "Workbench ready",
+      log_history = "Workbench ready"
+    )
     poll_backoff <- new.env(parent = emptyenv())
     poll_backoff$until <- 0
     poll_backoff$ready <- FALSE
@@ -199,6 +259,8 @@ liber_gui <- function(model = NULL, data = NULL, queue = NULL,
     update_fit <- function(fit) {
       state$fit <- if (inherits(fit, "nm_fit")) fit else NULL
       state$gof_payload <- FALSE
+      state$hmm_payload <- NULL
+      state$kalman_payload <- NULL
       state$fit_payload <- .liber_gui_fit(state$fit, include_gof = FALSE)
       invisible(state$fit)
     }
@@ -232,7 +294,10 @@ liber_gui <- function(model = NULL, data = NULL, queue = NULL,
         blocks = blocks,
         title = as.character(event$title %||% "LibeRation modelling report"),
         formats = as.character(unlist(event$formats %||% c("docx", "pdf"))),
-        style = list(filename = as.character(event$name %||% "liberation-report")),
+        style = list(
+          filename = as.character(event$name %||% "liberation-report"),
+          output_directory = as.character(event$directory %||% "")
+        ),
         id = if (nzchar(as.character(event$id %||% ""))) as.character(event$id) else NULL
       )
     }
@@ -256,7 +321,17 @@ liber_gui <- function(model = NULL, data = NULL, queue = NULL,
     reset_lazy_payloads <- function(data = TRUE, diagnostics = TRUE) {
       if (isTRUE(data)) state$data_payload <- FALSE
       state$gof_payload <- FALSE
+      state$hmm_payload <- NULL
+      state$kalman_payload <- NULL
       if (isTRUE(diagnostics)) state$diagnostic_payload <- character()
+      invisible(NULL)
+    }
+    invalidate_ai_context <- function() {
+      state$ai_context <- list(
+        available = FALSE, project = "", project_name = "", request_id = "",
+        scope = "index", message = "Project result summaries have not been requested.",
+        runs = list()
+      )
       invisible(NULL)
     }
     record <- function(success, value, update_result = TRUE) {
@@ -310,6 +385,9 @@ liber_gui <- function(model = NULL, data = NULL, queue = NULL,
         label = context$label, model = run_model, data = run_data,
         queue_id = context$queue_id, queue_job_id = context$job_id
       )
+      if (identical(as.character(context$project), as.character(state$project))) {
+        invalidate_ai_context()
+      }
       context$materialize_error <- NULL
       context$materialize_attempted_at <- NULL
       context
@@ -415,6 +493,7 @@ liber_gui <- function(model = NULL, data = NULL, queue = NULL,
       state$diagnostics <- list()
       state$result <- structure(list(), class = "liber_gui_validation")
       reset_lazy_payloads()
+      invalidate_ai_context()
       update_fit(NULL)
       opened
     }
@@ -454,6 +533,7 @@ liber_gui <- function(model = NULL, data = NULL, queue = NULL,
         workspace, project_id, parent_version, result, label = label,
         model = run_model, data = run_data
       )
+      invalidate_ai_context()
       if (identical(project_id, state$project)) {
         state$snapshot <- parent_version
         state$run <- id
@@ -554,7 +634,8 @@ liber_gui <- function(model = NULL, data = NULL, queue = NULL,
         model = state$model, data = state$data, jobs = state$jobs,
         result = state$result, fit = state$fit_payload, report = state$report,
         report_design = state$report_design,
-        diagnostics = state$diagnostics,
+        diagnostics = state$diagnostics, hmm = state$hmm_payload,
+        kalman = state$kalman_payload,
         log = list(level = state$log_level, current = state$log_current,
                    history = state$log_history),
         job_log = state$job_log, server = server_info,
@@ -569,6 +650,10 @@ liber_gui <- function(model = NULL, data = NULL, queue = NULL,
           secure_context = TRUE,
           privacy = "Inference runs in a dedicated browser worker with no tools. Network APIs are disabled after the selected model has loaded."
         )),
+        ai_context = state$ai_context,
+        report_ai_context = state$report_ai_context,
+        report_directory = state$report_design$style$output_directory %||%
+          .liber_report_default_directory(workspace, state$project),
         output_catalog = state$draft_outputs,
         run_output = run_output,
         data_payload = state$data_payload,
@@ -588,6 +673,12 @@ liber_gui <- function(model = NULL, data = NULL, queue = NULL,
           state$ai_config$help_model %||% state$ai_config$model)[[1L]]
         requested_report <- as.character(event$report_model %||%
           state$ai_config$report_model)[[1L]]
+        requested_help_context <- .liber_ai_context_setting(
+          event$help_context %||% state$ai_config$help_context
+        )
+        requested_report_context <- .liber_ai_context_setting(
+          event$report_context %||% state$ai_config$report_context
+        )
         if (!requested_help %in% allowed_models) {
           requested_help <- .liber_ai_default_help_model()
         }
@@ -599,6 +690,8 @@ liber_gui <- function(model = NULL, data = NULL, queue = NULL,
           consented = isTRUE(event$consented),
           help_model = requested_help,
           report_model = requested_report,
+          help_context = requested_help_context,
+          report_context = requested_report_context,
           model = requested_help
         )
         save_client_settings()
@@ -610,6 +703,35 @@ liber_gui <- function(model = NULL, data = NULL, queue = NULL,
         } else {
           "Browser-local AI settings saved; AI remains disabled"
         }, "info")
+        return(invisible(NULL))
+      }
+      if (identical(action, "ai_context_request")) {
+        requested_project <- as.character(event$project %||% "")[[1L]]
+        request_id <- as.character(event$requestId %||% "")[[1L]]
+        requested_scope <- as.character(event$scope %||% "index")[[1L]]
+        if (!requested_scope %in% c("index", "results")) requested_scope <- "index"
+        context <- tryCatch({
+          if (!nzchar(requested_project) ||
+              !identical(requested_project, as.character(state$project %||% ""))) {
+            .nm_stop("The requested Help context is no longer the selected project.")
+          }
+          .liber_gui_ai_context(
+            workspace, requested_project, selected_run = state$run,
+            max_runs = if (identical(requested_scope, "results")) 12L else 30L,
+            detail = requested_scope
+          )
+        }, error = function(error) list(
+          available = FALSE, project = requested_project, project_name = "",
+          scope = requested_scope, message = conditionMessage(error), run_count = 0L,
+          included_runs = 0L, omitted_runs = 0L, runs = list()
+        ))
+        context$request_id <- request_id
+        state$ai_context <- context
+        append_log(if (isTRUE(context$available)) {
+          paste("Loaded", context$included_runs, "saved run summaries for local Help AI")
+        } else {
+          paste("Help AI project summaries unavailable:", context$message)
+        }, if (isTRUE(context$available)) "info" else "error")
         return(invisible(NULL))
       }
       if (identical(action, "diagram_preview")) {
@@ -669,6 +791,45 @@ liber_gui <- function(model = NULL, data = NULL, queue = NULL,
         }
         return(invisible(NULL))
       }
+      if (identical(action, "report_directory_choose")) {
+        selected <- tryCatch(
+          .liber_report_choose_directory(
+            as.character(event$directory %||%
+              .liber_report_default_directory(workspace, state$project))
+          ),
+          error = identity
+        )
+        if (inherits(selected, "error")) {
+          append_log(conditionMessage(selected), "error")
+        } else if (!is.null(selected)) {
+          session$sendCustomMessage("liber-report-directory", list(path = selected))
+          append_log(paste("Report output folder selected:", selected), "info")
+        }
+        return(invisible(NULL))
+      }
+      if (identical(action, "report_ai_context_request")) {
+        requested_project <- as.character(event$project %||% state$project %||% "")[[1L]]
+        request_id <- as.character(event$requestId %||% "")[[1L]]
+        run_ids <- unique(as.character(unlist(event$runs %||% character())))
+        context <- tryCatch({
+          if (!nzchar(requested_project) ||
+              !identical(requested_project, as.character(state$project %||% ""))) {
+            .nm_stop("The report evidence request is no longer for the selected project.")
+          }
+          .liber_gui_report_ai_context(workspace, requested_project, run_ids)
+        }, error = function(error) list(
+          available = FALSE, project = requested_project, project_name = "",
+          run_ids = run_ids, message = conditionMessage(error), runs = list()
+        ))
+        context$request_id <- request_id
+        state$report_ai_context <- context
+        append_log(if (isTRUE(context$available)) {
+          paste("Loaded", length(context$runs), "selected run(s) for local Report AI")
+        } else {
+          paste("Report AI evidence unavailable:", context$message)
+        }, if (isTRUE(context$available)) "info" else "error")
+        return(invisible(NULL))
+      }
       if (identical(action, "report_design_save")) {
         return(record("Report workflow saved", {
           if (is.null(state$project)) .nm_stop("Open a project before saving a report workflow.")
@@ -685,7 +846,11 @@ liber_gui <- function(model = NULL, data = NULL, queue = NULL,
           nm_report_design_save(workspace, state$project, design)
           state$report_design <- design
           name <- as.character(event$name %||% "liberation-report")
-          directory <- file.path(workspace$path, "reports", state$project)
+          directory <- trimws(as.character(event$directory %||% "")[[1L]])
+          if (!nzchar(directory)) {
+            directory <- .liber_report_default_directory(workspace, state$project)
+          }
+          directory <- path.expand(directory)
           nm_report_design_render(
             design, workspace, state$project, directory = directory,
             name = name, formats = design$formats
@@ -704,11 +869,41 @@ liber_gui <- function(model = NULL, data = NULL, queue = NULL,
               state$diagnostics <- nm_project_save_diagnostics(
                 workspace, state$project, state$run, list(gof = gof)
               )
+              invalidate_ai_context()
             }
             state$gof_payload <- TRUE
             state$fit_payload <- .liber_gui_fit(state$fit, include_gof = TRUE, gof = gof)
           }
-        } else if (kind %in% c("vpc", "npc", "npde", "vpc_categorical", "vpc_tte",
+        } else if (identical(kind, "hmm")) {
+          if (!inherits(state$fit, "nm_fit") || is.null(state$model$HMM_CONFIG)) {
+            append_log("Open a fitted hidden Markov model before loading HMM results.", "error")
+            return(invisible(NULL))
+          }
+          decoded <- tryCatch(
+            nm_hmm_decode(state$fit, method = "all"),
+            error = function(error) {
+              append_log(paste("HMM decoding failed:", conditionMessage(error)), "error")
+              NULL
+            }
+          )
+          if (is.null(decoded)) return(invisible(NULL))
+          state$hmm_payload <- .liber_gui_hmm(decoded, available = TRUE)
+        } else if (identical(kind, "kalman")) {
+          if (!inherits(state$fit, "nm_fit") || is.null(state$model$KALMAN_CONFIG)) {
+            append_log("Open a fitted linear state-space model before loading state estimates.", "error")
+            return(invisible(NULL))
+          }
+          decoded <- tryCatch(
+            nm_kalman_decode(state$fit, type = "individual"),
+            error = function(error) {
+              append_log(paste("State-space decoding failed:", conditionMessage(error)), "error")
+              NULL
+            }
+          )
+          if (is.null(decoded)) return(invisible(NULL))
+          state$kalman_payload <- .liber_gui_kalman(decoded, available = TRUE)
+        } else if (kind %in% c("vpc", "npc", "npde", "vpc_categorical", "vpc_count",
+                              "vpc_tte", "vpc_competing", "vpc_recurrent",
                               "bootstrap", "profile", "scm") &&
                    !is.null(state$diagnostics[[kind]])) {
           state$diagnostic_payload <- unique(c(state$diagnostic_payload, kind))
@@ -853,11 +1048,20 @@ liber_gui <- function(model = NULL, data = NULL, queue = NULL,
       }
       if (identical(action, "model_template")) {
         return(record("Model template created", {
-          state$model <- .liber_model_template(
-            as.integer(event$advan %||% 1L), trans = event$trans,
-            n_state = event$nState,
-            problem = as.character(event$problem %||% "Template model")
-          )
+          structural <- as.character(event$structuralTemplate %||% "standard")
+          state$model <- if (!identical(structural, "standard")) {
+            nm_model_template(structural)
+          } else {
+            .liber_model_template(
+              as.integer(event$advan %||% 1L), trans = event$trans,
+              n_state = event$nState,
+              problem = as.character(event$problem %||% "Template model")
+            )
+          }
+          if (!identical(structural, "standard")) {
+            requested_name <- trimws(as.character(event$problem %||% ""))
+            if (nzchar(requested_name)) attr(state$model, "name") <- requested_name
+          }
           state$draft_outputs <- NULL
           state$snapshot <- if (!is.null(workspace) && !is.null(state$project)) {
             nm_project_save(
@@ -990,7 +1194,10 @@ liber_gui <- function(model = NULL, data = NULL, queue = NULL,
             .nm_stop("Open a saved estimation run before running diagnostics.")
           }
           selected <- unique(tolower(as.character(unlist(event$types %||% character()))))
-          selected <- intersect(selected, c("vpc", "npc", "npde", "vpc_categorical", "vpc_tte"))
+          selected <- intersect(selected, c(
+            "vpc", "npc", "npde", "vpc_categorical", "vpc_count",
+            "vpc_tte", "vpc_competing", "vpc_recurrent"
+          ))
           if (!length(selected)) .nm_stop("Select at least one diagnostic.")
           nsim <- max(20L, as.integer(event$nsim %||% 200L))
           seed <- as.integer(event$seed %||% 20260713L)
@@ -1010,15 +1217,37 @@ liber_gui <- function(model = NULL, data = NULL, queue = NULL,
               nsim = nsim, seed = seed
             )
           }
+          if ("vpc_count" %in% selected) {
+            created$vpc_count <- nm_vpc_count(
+              state$fit, outcome = as.character(event$countOutcome %||% "DV"),
+              dvid = suppressWarnings(as.numeric(event$countDvid %||% NA_real_)),
+              nsim = nsim, seed = seed
+            )
+          }
           if ("vpc_tte" %in% selected) {
             created$vpc_tte <- nm_vpc_tte(
               state$fit, event = as.character(event$tteEvent %||% "DV"),
               nsim = nsim, seed = seed
             )
           }
+          if ("vpc_competing" %in% selected) {
+            created$vpc_competing <- nm_vpc_competing(
+              state$fit, event = as.character(event$tteEvent %||% "DV"),
+              dvid = suppressWarnings(as.numeric(event$competingDvid %||% NA_real_)),
+              nsim = nsim, seed = seed
+            )
+          }
+          if ("vpc_recurrent" %in% selected) {
+            created$vpc_recurrent <- nm_vpc_recurrent(
+              state$fit, event = as.character(event$tteEvent %||% "DV"),
+              dvid = suppressWarnings(as.numeric(event$recurrentDvid %||% NA_real_)),
+              nsim = nsim, seed = seed
+            )
+          }
           state$diagnostics <- nm_project_save_diagnostics(
             workspace, state$project, state$run, created
           )
+          invalidate_ai_context()
           state$diagnostic_payload <- character()
           state$diagnostics
         }, update_result = FALSE))
@@ -1054,6 +1283,7 @@ liber_gui <- function(model = NULL, data = NULL, queue = NULL,
           state$diagnostics <- nm_project_save_diagnostics(
             workspace, state$project, state$run, created
           )
+          invalidate_ai_context()
           state$diagnostic_payload <- character()
           state$diagnostics
         }, update_result = FALSE))
@@ -1096,6 +1326,7 @@ liber_gui <- function(model = NULL, data = NULL, queue = NULL,
           state$diagnostics <- nm_project_save_diagnostics(
             workspace, state$project, run, list(scm = scm)
           )
+          invalidate_ai_context()
           state$model <- scm$final_model
           state$draft_outputs <- NULL
           state$snapshot <- version
@@ -1169,6 +1400,7 @@ liber_gui <- function(model = NULL, data = NULL, queue = NULL,
             stop(error)
           })
           state$project <- created$id
+          invalidate_ai_context()
           state$report_design <- NULL
           state$snapshot <- initial$snapshot %||% NULL
           state$run <- NULL
@@ -1213,6 +1445,7 @@ liber_gui <- function(model = NULL, data = NULL, queue = NULL,
             state$data <- NULL
             state$diagnostics <- list()
             reset_lazy_payloads()
+            invalidate_ai_context()
             update_fit(NULL)
             structure(list(), class = "liber_gui_validation")
           } else {
@@ -1338,7 +1571,9 @@ liber_gui <- function(model = NULL, data = NULL, queue = NULL,
           run_diagnostics <- lapply(ids, function(id) {
             nm_project_load_diagnostics(workspace, state$project, id)
           })
-          for (kind in c("vpc", "vpc_categorical", "vpc_tte", "npde", "npc")) {
+          for (kind in c("vpc", "vpc_categorical", "vpc_count", "vpc_tte",
+                         "vpc_competing",
+                         "vpc_recurrent", "npde", "npc")) {
             if (all(vapply(run_diagnostics, function(item) !is.null(item[[kind]]), logical(1)))) {
               plots[[kind]] <- unname(Map(function(label, item) {
                 list(label = label, result = .liber_gui_result(item[[kind]]))
@@ -1396,6 +1631,7 @@ liber_gui <- function(model = NULL, data = NULL, queue = NULL,
             .nm_stop('Type "YES" in the confirmation field before deleting a project.')
           }
           nm_project_delete(workspace, as.character(event$id %||% state$project))
+          invalidate_ai_context()
           state$project <- NULL
           state$report_design <- NULL
           state$snapshot <- NULL

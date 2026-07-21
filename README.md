@@ -8,25 +8,43 @@ LibeRation R syntax or the restricted C++ expression form.
 
 Implemented model paths include ADVAN1-4/11/12, ADVAN6, ADVAN13, arbitrary
 linear matrix propagation, infusions, analytical and nonlinear periodic
-steady state, correlated OMEGA, IOV, priors, mixtures, BLQ likelihoods, and
-time-varying covariates. Estimation methods include FO, FOCE, FOCEI, Laplace,
+steady state, correlated OMEGA, IOV, priors, mixtures, BLQ likelihoods,
+compiled user-defined likelihoods plus declarative continuous, categorical,
+ordinal/IRT, count, event-time, recurrent-event, competing-risk, observed
+Markov, two-state continuous-time Markov, and joint DVID outcomes,
+finite-state hidden Markov likelihoods with filtering, retrospective
+smoothing, Viterbi decoding, hidden semi-Markov dwell distributions,
+continuous-time HMMs, exact linear and nonlinear EKF/UKF/particle state-space
+models, ARMA residual processes, continuous-discrete SDEs, generalized
+nested/crossed random effects, and time-varying covariates. Estimation methods
+include FO, FOCE, FOCEI, Laplace,
 ITS, adaptive Gaussian quadrature (GQ) with automatic tensor/Smolyak sparse
 grids, IMP, SAEM, and Bayesian estimation.
 Bayesian workflows include random-walk BAYES, static HMC, and adaptive NUTS;
 discrete nonparametric population distributions are available through
 fixed-support NPML and adaptive-grid NPAG.
 Diagnostics and uncertainty workflows
-include covariance, GOF/CWRES, VPC/NPDE/NPC, categorical and time-to-event
-VPCs, bootstrap, profile likelihood, and SCM.
+include covariance, GOF/CWRES, family-specific outcome residuals/scores,
+VPC/NPDE/NPC, multicategory, count, time-to-event, recurrent-event, and
+competing-risk VPCs, bootstrap, profile likelihood, and SCM.
 
 The React workbench includes an explicit visual ADVAN6/13 model builder for
 linear and nonlinear compartment systems. It generates previewable
 `$PK/$PRED` and `$DES` code with log-normal ETA scaffolding while retaining the
 normal editable code windows. A separate drag-and-drop report workflow renders
 DOCX/PDF from user text, selected immutable model runs, comparisons, and saved
-diagnostics. Optional modelling help and report drafting use a consented,
+diagnostics. Fitted hidden Markov models gain a lazy HMM results tab with
+filtered, retrospectively smoothed, Viterbi, and combined probability/path
+views by subject, sequence, and hidden state. State-space models gain a lazy
+States tab with filter/smoother trajectories, uncertainty bands, innovations,
+and likelihood contributions. Optional modelling help and report drafting use a consented,
 lazy-loaded WebGPU language model in a dedicated browser worker; inference is
 local and the worker's network APIs are disabled after its weights load.
+
+Advanced nonlinear model starts are available with `nm_model_template()` for
+nonlinear elimination, transit/dual absorption, parent-metabolite,
+effect-compartment, indirect-response, tumour-growth, and TMDD systems. They
+are regular editable ADVAN13 models, not a separate execution path.
 
 ## Quick start
 
@@ -72,3 +90,5 @@ remote job queues.
 
 LibeRation is MIT licensed. The remaining engineering work is tracked in
 [TODO.md](TODO.md).
+Substantial new engine families are planned in
+[ENGINE_MODEL_ROADMAP.md](ENGINE_MODEL_ROADMAP.md).

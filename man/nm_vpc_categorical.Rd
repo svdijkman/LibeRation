@@ -30,8 +30,8 @@ nm_vpc_categorical(
 An `nm_vpc_categorical`.
 }
 \description{
-The current engine supports binary categorical VPCs for models whose `F`
-is the conditional probability of the non-reference outcome. Random effects
-are simulated by the C++ engine and Bernoulli outcomes are then drawn from
-those probabilities.
+First-class Bernoulli, categorical, ordinal, and Markov outcomes use their
+declared probability vectors and can contain any number of categories. A
+legacy binary user likelihood remains supported when `F` is the probability
+of the non-reference category.
 }

@@ -25,10 +25,17 @@
     }
     data$.OCC_TOTAL <- total
   }
+  data <- .nm_re_engine_data(model, data)
+  .nm_validate_outcome_data(model, data)
   data
 }
 
 .nm_eta_columns <- function(model, data) {
+  if (!is.null(model$RE_CONFIG)) {
+    columns <- grep("^[.]ETA_COLUMN_[0-9]+$", names(data), value = TRUE)
+    if (!length(columns)) .nm_stop("Compiled random-effect mapping is missing from the dataset.")
+    return(max(unlist(data[columns], use.names = FALSE)))
+  }
   iov <- model$LIK_CONFIG$iov
   if (iov == 0L) return(model$n_eta)
   occasions <- if (".OCC_TOTAL" %in% names(data)) {
@@ -39,6 +46,22 @@
 
 .nm_effect_covariance <- function(model, data, values = model$OMEGAS$Value) {
   base <- .nm_omega_matrix(model, values)
+  if (!is.null(model$RE_CONFIG)) {
+    dimension <- .nm_eta_columns(model, data)
+    output <- matrix(0, dimension, dimension)
+    offset <- 0L
+    for (block_index in seq_along(model$RE_CONFIG$blocks)) {
+      block <- model$RE_CONFIG$blocks[[block_index]]
+      total <- max(data[[paste0(".RE_TOTAL_", block_index)]])
+      block_covariance <- base[block$etas, block$etas, drop = FALSE]
+      for (unit in seq_len(total)) {
+        index <- offset + (unit - 1L) * length(block$etas) + seq_along(block$etas)
+        output[index, index] <- block_covariance
+      }
+      offset <- offset + total * length(block$etas)
+    }
+    return(output)
+  }
   iov <- model$LIK_CONFIG$iov
   if (iov == 0L) return(base)
   between <- model$n_eta - iov
@@ -69,10 +92,20 @@
     omega_row = model$OMEGAS$ROW,
     omega_col = model$OMEGAS$COL,
     pred_ir = model$pred_ir,
+    error_ir = model$error_ir %||% NULL,
+    likelihood_output = model$likelihood_output %||% NULL,
+    likelihood_scale = model$likelihood_scale %||% NULL,
+    hmm_config = model$HMM_CONFIG %||% NULL,
+    kalman_config = model$KALMAN_CONFIG %||% NULL,
+    dde_config = model$DDE_CONFIG %||% NULL,
+    dae_config = model$DAE_CONFIG %||% NULL,
+    experimental = model$EXPERIMENTAL %||% NULL,
+    re_config = model$RE_CONFIG %||% NULL,
     output_names = intersect(
       model$OUTPUT %||% character(), model$pred_ir$output_names %||% character()
     ),
     des_ir = model$des_ir,
+    alg_ir = model$alg_ir %||% NULL,
     n_state = model$n_state,
     ode_control = model$ODE_CONTROL,
     specialized_advan = isTRUE(getOption("LibeRation.specialized_advan", TRUE)),
@@ -139,6 +172,56 @@ NMEngine <- R6::R6Class(
       attr(result, "solver") <- raw$solver
       attr(result, "state_names") <- raw$state_names
       result
+    },
+
+    #' @description
+    #' Run the scaled hidden Markov forward filter.
+    #' @param data NONMEM-style observation data.
+    #' @param theta Population fixed effects.
+    #' @param eta Subject-by-effect random-effect matrix.
+    #' @param sigma Residual parameters used by emission expressions.
+    #' @returns Filtered hidden-state probabilities and likelihood details.
+    hmm_filter = function(data, theta = self$model$THETAS$Value,
+                          eta = NULL, sigma = self$model$SIGMAS$Value) {
+      if (is.null(self$model$HMM_CONFIG)) {
+        .nm_stop("The compiled model does not define HMM_CONFIG.")
+      }
+      data <- .nm_engine_data(self$model, data)
+      n_subjects <- length(unique(data$.ID_INDEX))
+      n_eta <- .nm_eta_columns(self$model, data)
+      if (is.null(eta)) eta <- matrix(0, n_subjects, n_eta)
+      eta <- as.matrix(eta)
+      if (!identical(dim(eta), c(n_subjects, n_eta))) {
+        .nm_stop("`eta` must have dimensions ", n_subjects, " x ", n_eta, ".")
+      }
+      .liberation_engine_hmm_filter(
+        self$pointer, data, as.numeric(theta), eta, as.numeric(sigma)
+      )
+    },
+
+    #' @description
+    #' Run the linear Gaussian Kalman filter and RTS smoother.
+    #' @param data NONMEM-style observation data.
+    #' @param theta Population fixed effects.
+    #' @param eta Subject-by-effect random-effect matrix.
+    #' @param sigma Parameters used by state-space component expressions.
+    #' @returns Filtered and smoothed state summaries and likelihood details.
+    kalman_filter = function(data, theta = self$model$THETAS$Value,
+                             eta = NULL, sigma = self$model$SIGMAS$Value) {
+      if (is.null(self$model$KALMAN_CONFIG)) {
+        .nm_stop("The compiled model does not define KALMAN_CONFIG.")
+      }
+      data <- .nm_engine_data(self$model, data)
+      n_subjects <- length(unique(data$.ID_INDEX))
+      n_eta <- .nm_eta_columns(self$model, data)
+      if (is.null(eta)) eta <- matrix(0, n_subjects, n_eta)
+      eta <- as.matrix(eta)
+      if (!identical(dim(eta), c(n_subjects, n_eta))) {
+        .nm_stop("`eta` must have dimensions ", n_subjects, " x ", n_eta, ".")
+      }
+      .liberation_engine_kalman_filter(
+        self$pointer, data, as.numeric(theta), eta, as.numeric(sigma)
+      )
     },
 
     #' @description

@@ -6,21 +6,26 @@
 \usage{
 nm_lik_config(
   error = c("auto", "none", "combined", "additive", "proportional", "exponential",
-    "power"),
+    "power", "likelihood"),
   omega = c("diagonal", "full"),
   sigma_corr = c("independent", "ar1"),
   sigma_parameterization = c("sd", "variance"),
   ar1_rho = 0,
+  ar1_parameter = NULL,
+  ar1_transform = c("tanh", "identity"),
   blq_method = c("none", "m3", "m4"),
   lloq = NA_real_,
   iov = 0L,
   occasion_col = "OCC",
+  residual_groups = NULL,
   priors = NULL,
   mixtures = NULL
 )
 }
 \arguments{
-\item{error}{Residual model. `auto` uses the model's `ERROR` block.}
+\item{error}{Residual model. `auto` uses the model's `ERROR` block.
+`likelihood` compiles a user-defined row contribution from `LIK` (a
+probability or density) or `LOGLIK` (a log likelihood) in `$ERROR`.}
 
 \item{omega}{Random-effect covariance structure.}
 
@@ -30,7 +35,16 @@ nm_lik_config(
 deviations (the historical LibeRation convention) or variances (the
 native NONMEM `$SIGMA` convention).}
 
-\item{ar1_rho}{Fixed AR(1) correlation in (-1, 1).}
+\item{ar1_rho}{Fixed AR(1) correlation in (-1, 1). Ignored when
+`ar1_parameter` is supplied.}
+
+\item{ar1_parameter}{Optional estimated AR(1) parameter written as
+`"THETA(i)"` or `"SIGMA(i)"`.}
+
+\item{ar1_transform}{Transform applied to `ar1_parameter`. The default
+hyperbolic tangent maps an unconstrained parameter exactly into `(-1, 1)`;
+`"identity"` expects the parameter itself to remain strictly inside that
+interval.}
 
 \item{blq_method}{No censoring, Beal M3, or Beal M4.}
 
@@ -40,6 +54,9 @@ absent.}
 \item{iov}{Number of trailing ETA definitions that are occasion-specific.}
 
 \item{occasion_col}{Dataset column identifying occasions.}
+
+\item{residual_groups}{Optional correlated endpoint declarations created by
+[nm_residual_group()].}
 
 \item{priors}{Optional fixed-effect prior definitions.}
 

@@ -153,6 +153,375 @@ likelihood <- nm_lik_config(
 )
 ```
 
+## First-class continuous, categorical, count, and event outcomes
+
+`nm_outcome()` turns common non-Gaussian and robust observation models into a
+declarative part of the model. LibeRation generates an ordinary, editable
+`$ERROR` block, compiles it to the C++/CppAD population objective, and retains
+the distribution metadata needed for stochastic simulation and diagnostics.
+
+```{r first-class-outcomes, eval=FALSE}
+count_model <- nm_model(
+  INPUT = c("ID", "TIME", "DV", "MDV"),
+  ADVAN = 1,
+  PRED = "MU=exp(THETA(1)+ETA(1)); CL=1; V=1; S1=V; F=MU",
+  THETAS = data.frame(THETA=1:2, Value=log(c(2, 3)), LOWER=-10, UPPER=10),
+  OMEGAS = data.frame(OMEGA=1, Value=0.2),
+  OUTCOMES = nm_outcome(
+    "negative_binomial", prediction="MU", dispersion="THETA(2)",
+    max_count=200
+  )
+)
+
+simulated <- nm_simulate(count_model, count_design, residual=TRUE, seed=1)
+fit <- nm_est(count_model, count_data, method="LAPLACE")
+nm_outcome_diagnostics(fit)
+nm_vpc_count(fit)
+```
+
+Available families are normal, log-normal, fixed-df Student t, Bernoulli,
+categorical, ordinal, Poisson, negative binomial, binomial, zero-inflated and
+hurdle Poisson, first/recurrent event, competing risks, observed Markov, and an
+exact two-state continuous-time Markov model. `nm_irt_outcomes()` creates one
+ordinal outcome per item.
+
+Several endpoints can share structural parameters and ETAs in one compiled
+likelihood. Give every declaration a unique `dvid` and combine them:
+
+```{r joint-outcomes, eval=FALSE}
+joint <- nm_outcomes(
+  nm_outcome("normal", name="concentration", dvid=1,
+             prediction="CP", scale="SIGMA(1)"),
+  nm_outcome("bernoulli", name="response", dvid=2,
+             prediction="PRESPONSE")
+)
+```
+
+The count `max_count` determines how far exact factorial/rising-factorial terms
+are unrolled on the AD tape. Data validation rejects a larger observed count.
+For event families, each observation row represents an at-risk interval and
+`DT` supplies its duration. Use `nm_vpc_tte()`, `nm_vpc_recurrent()`, or
+`nm_vpc_competing()` as appropriate.
+
+## Advanced editable structural templates
+
+`nm_model_template()` creates complete ADVAN13 `$PK/$PRED` and `$DES` starts
+for nonlinear elimination, transit or dual absorption, parent-metabolite,
+effect-compartment, indirect-response, tumour-growth, and TMDD systems. Every
+line remains editable and uses the normal ODE/AD engine. Templates that need a
+non-zero physiological baseline identify the required initial-state event in
+`attr(model, "template_notes")`.
+
+```{r advanced-templates, eval=FALSE}
+tmdd <- nm_model_template("tmdd")
+transit <- nm_model_template("transit_absorption", n_transit=5)
+
+hazard <- nm_piecewise("TIME", c(24, 72), c("H1", "H2", "H3"))
+trend <- nm_spline("TIME", c(0, 12, 48, 96),
+                   c("B1", "B2", "B3"), intercept="B0")
+```
+
+## User-defined and Markov likelihoods
+
+For categorical, count, survival, Markov, or other non-Gaussian outcomes,
+`$ERROR` can provide the observation likelihood directly. Assign either
+`LIK`, containing a positive probability or density, or `LOGLIK`, containing
+its logarithm. LibeRation compiles the block to C++ expression IR and records
+it on the same CppAD tape as prediction, ADVAN/ODE propagation, random effects,
+and the population objective.
+
+The following first-order binary Markov model estimates an initial probability
+and the 0-to-1 and 1-to-1 transition probabilities. The probabilities are
+defined in `$PK/$PRED`, while `$ERROR` selects the contribution associated with
+the observed transition.
+
+```{r markov-likelihood, eval=FALSE}
+markov <- nm_model(
+  INPUT = c("ID", "TIME", "DV", "MDV"),
+  ADVAN = 1,
+  PRED = "
+    PBASE = 1 / (1 + exp(-THETA(1)))
+    P01 = 1 / (1 + exp(-(THETA(2) + ETA(1))))
+    P11 = 1 / (1 + exp(-(THETA(3) + ETA(1))))
+    CL = 1; V = 1; S1 = V; F = PBASE
+  ",
+  ERROR = "
+    PCURRENT = ifelse(
+      FIRST == 1,
+      ifelse(DV == 1, PBASE, 1 - PBASE),
+      ifelse(
+        PREV_DV == 0,
+        ifelse(DV == 1, P01, 1 - P01),
+        ifelse(DV == 1, P11, 1 - P11)
+      )
+    )
+    LOGLIK = log(pmax(PCURRENT, 1e-12))
+  ",
+  THETAS = data.frame(
+    THETA = 1:3, Value = qlogis(c(0.3, 0.2, 0.8)),
+    LOWER = -10, UPPER = 10
+  ),
+  OMEGAS = data.frame(OMEGA = 1, Value = 0.2),
+  OUTPUT = c("PBASE", "P01", "P11")
+)
+
+fit <- nm_est(markov, transitions, method = "LAPLACE")
+```
+
+`PREV_DV`, `PREV_TIME`, `DT`, and `FIRST` are maintained independently for
+each subject and `DVID`. A finite outcome on an `MDV = 1` record contributes no
+likelihood but still seeds the previous state; this is useful for conditioning
+on a known baseline state. `FIRST` is one only when no previous finite outcome
+exists in that subject/response sequence.
+
+`LIK`/`LOGLIK` can also use `DV`, `F`/`PRED`/`IPRED`, any assignment created in
+`$PK/$PRED`, `THETA()`, `ETA()`, `SIGMA()`, and numeric input columns. Do not
+include constants that do not affect estimation unless an absolute normalized
+likelihood is required for model comparison. Protect probabilities before
+taking logarithms, for example with `pmax(probability, 1e-12)`.
+
+Use `LAPLACE` for the closest NONMEM-style conditional likelihood analysis.
+FO, FOCE, and FOCEI are deliberately unavailable because their current
+implementations assume a Gaussian residual linearization. ITS, GQ, IMP, SAEM,
+Bayesian, HMC/NUTS, and nonparametric methods use the compiled joint likelihood
+path. Gaussian WRES/IWRES/CWRES are not defined; use outcome-appropriate
+diagnostics. Because a likelihood does not uniquely define an outcome
+generator, stochastic simulation must explicitly draw outcomes from the saved
+probability outputs.
+
+## Hidden Markov models
+
+For latent-state models, `nm_hmm_config()` connects named `$ERROR`
+assignments to a finite-state hidden Markov model. LibeRation evaluates the
+initial distribution, transition matrix, and state-conditional emissions for
+each record, then combines them with a numerically scaled forward algorithm in
+C++. The entire marginal likelihood remains differentiable; hidden state
+sequences are not treated as observed outcomes or sampled during deterministic
+estimation.
+
+This two-state example models binary observations whose distribution depends
+on an unobserved `controlled` or `active` state:
+
+```{r hidden-markov-model, eval=FALSE}
+hmm <- nm_model(
+  INPUT = c("ID", "TIME", "DV", "MDV"),
+  ADVAN = 1,
+  PRED = "CL = 1; V = 1; S1 = V; F = 0",
+  ERROR = "
+    PI_C = 1 / (1 + exp(-THETA(1)))
+    PI_A = 1 - PI_C
+    P_CC = 1 / (1 + exp(-THETA(2)))
+    P_CA = 1 - P_CC
+    P_AC = 1 / (1 + exp(-THETA(3)))
+    P_AA = 1 - P_AC
+    EMIT_C = ifelse(DV == 0, 1 - THETA(4), THETA(4))
+    EMIT_A = ifelse(DV == 0, 1 - THETA(5), THETA(5))
+  ",
+  THETAS = data.frame(
+    THETA = 1:5,
+    Value = c(qlogis(0.8), qlogis(0.9), qlogis(0.3), 0.1, 0.8),
+    LOWER = c(rep(-10, 3), 1e-6, 1e-6),
+    UPPER = c(rep(10, 3), 1 - 1e-6, 1 - 1e-6)
+  ),
+  HMM_CONFIG = nm_hmm_config(
+    states = c("controlled", "active"),
+    initial = c("PI_C", "PI_A"),
+    transition = matrix(
+      c("P_CC", "P_CA", "P_AC", "P_AA"), 2, 2, byrow = TRUE
+    ),
+    emission = c("EMIT_C", "EMIT_A")
+  )
+)
+
+fit <- nm_est(hmm, observations, method = "LAPLACE")
+states <- nm_hmm_decode(fit, method = "all")
+gof <- nm_gof(fit) # includes HMM_STATE and HMM_PROB_* columns
+```
+
+Rows of `transition` are the state before the transition and columns are the
+state after it. Probability-scale initial and transition values are normalized
+internally, so they may be probabilities or non-negative weights; setting
+`initial_scale = "log"` or `transition_scale = "log"` uses a stable softmax.
+Emissions can be positive probabilities/densities or log likelihoods. By
+default each `DVID` forms an independent hidden-state sequence within subject;
+set `by_dvid = FALSE` to use one sequence. `MDV = 1` records do not emit an
+observation or advance the hidden state.
+
+All assignments are evaluated at the current record and may depend on `TIME`,
+`DT`, numeric input covariates, `F`, `THETA()`, `ETA()`, and `SIGMA()`. The
+transition matrix can therefore be time-inhomogeneous or use a continuous-time
+intensity model converted to interval transition probabilities using `DT`.
+
+`nm_hmm_decode()` supports `method = "filtered"`, `"smoothed"`, `"viterbi"`,
+or `"all"`. Filtering uses observations up to the current record. The scaled
+forward-backward smoother revises each state probability using the complete
+sequence, while the log-domain Viterbi decoder returns the single most
+probable joint path. `method = "all"` uses explicit `HMM_FILTER_*`,
+`HMM_SMOOTH_*`, and `HMM_VITERBI_*` columns; the per-sequence log likelihood,
+Viterbi joint log likelihood, and Viterbi log-posterior probability are stored
+in `attr(states, "sequence_summary")`. These probabilities condition on the
+selected parameter estimates and individual or population ETAs; they do not
+integrate parameter uncertainty.
+
+For fitted HMM runs, the workbench adds an **HMM** tab on demand. Its decoder
+selector switches among filtered, retrospectively smoothed, Viterbi, and
+combined views; subject/sequence and state selectors drive probability and
+classified-path plots plus the per-sequence likelihood summary. Decoding rows
+are generated only when this tab is first opened for the selected run and are
+then cached in the GUI session.
+
+LAPLACE is the recommended deterministic method when random effects are present; GQ, IMP, SAEM,
+HMC/NUTS, BAYES, ITS, NPML, and NPAG also use the compiled HMM likelihood.
+FO/FOCE/FOCEI remain unavailable because those algorithms assume a Gaussian
+residual linearization. Automatic NONMEM control-stream export rejects an HMM
+explicitly because NONMEM has no single general control-stream representation
+for recursive latent-state likelihoods.
+
+### Continuous-time and observed multi-state models
+
+`nm_cthmm_config()` replaces a discrete transition matrix with an arbitrary
+generator. Only off-diagonal rate assignments are supplied; LibeRation creates
+each diagonal as the negative row sum and evaluates `exp(Q * DT)` inside the
+CppAD objective. The same `nm_hmm_decode()` call then provides filtering,
+smoothing, and Viterbi paths for irregularly timed observations. Set
+`rate_scale = "log"` when the named `$ERROR` assignments are unconstrained log
+rates.
+
+An observed multi-state outcome uses `nm_outcome("continuous_time_markov", ...)`
+with matching `initial`, `categories`, and a square off-diagonal `rates`
+matrix. Two-state declarations retain their analytical closed form; larger
+models are automatically compiled through the general matrix-exponential
+sequence engine and support outcome simulation.
+
+### Hidden semi-Markov models
+
+`nm_hsmm_config()` adds an explicit dwell-time distribution to each hidden
+state. Rows of its `dwell` matrix are states and columns are durations measured
+in observation steps. LibeRation expands this declaration to a sparse
+state-duration HMM internally, so the existing exact forward likelihood,
+retrospective smoother, Viterbi decoder, and CppAD gradients are reused.
+`nm_hmm_decode()` aggregates the expanded representation back to the original
+state labels.
+
+```{r hsmm-model, eval=FALSE}
+semi_markov <- nm_hsmm_config(
+  states = c("controlled", "active"),
+  initial = c("PI_C", "PI_A"),
+  transition = matrix(c("P_CC", "P_CA", "P_AC", "P_AA"), 2, 2,
+                      byrow = TRUE),
+  dwell = matrix(c("D_C1", "D_C2", "D_C3",
+                   "D_A1", "D_A2", "D_A3"), 2, 3, byrow = TRUE),
+  emission = c("EMIT_C", "EMIT_A")
+)
+```
+
+## Residual covariance
+
+`nm_lik_config()` accepts an estimated AR(1) coefficient through, for example,
+`ar1_parameter = "THETA(5)"`. The default `tanh` transform keeps the resulting
+correlation strictly between minus one and one. Interleaved DVID observations
+retain separate residual histories.
+
+Use `nm_residual_group()` when endpoints observed at the same subject and time
+have correlated residuals. Marginal variances continue to come from SIGMA;
+the declaration supplies a full DVID correlation matrix. Entries may be fixed
+correlations or transformed `THETA(i)`/`SIGMA(i)` references. The exact
+conditional likelihood, FO marginal covariance, and stochastic simulator all
+use the same block.
+
+`nm_arma_config()` generates an exact linear state-space representation for an
+ARMA(p,q) residual process around the structural prediction. AR/MA coefficients
+and innovation variance remain ordinary THETA/SIGMA expressions. The generated
+`$ERROR` assignments are inserted automatically when `ERROR` is omitted.
+
+## Nested and crossed random effects
+
+`nm_re_config()` maps each ETA block to any dataset grouping column. Blocks
+may be nested (study/site/subject) or crossed (subject/reader/device). When no
+top-level `cluster` is supplied, LibeRation constructs independent connected
+components from all memberships and optimizes the exact joint conditional mode
+for each component. Structural PK states still propagate per patient.
+
+```{r random-effect-design, eval=FALSE}
+design <- nm_re_config(
+  nm_re_block("site", "SITE", 1),
+  nm_re_block("patient", "ID", 2:3),
+  nm_re_block("reader", "READER", 4)
+)
+
+model <- nm_model(
+  # ordinary INPUT/PRED/ERROR/parameter declarations ...
+  RE_CONFIG = design
+)
+```
+
+Every ETA must belong to exactly one block. OMEGA correlation is permitted
+within a block but not between blocks. A highly connected crossed design can
+produce one large conditional mode; supplying a valid independent `cluster`
+column limits its dimension.
+
+## Gaussian and nonlinear state-space models
+
+`nm_kalman_config()` connects named `$ERROR` assignments to initial state,
+transition, process covariance, observation loading, and observation variance
+components. Assignments may use `DT`, covariates, THETA/ETA/SIGMA, or generated
+model variables. The compiled Kalman filter contributes its exact marginal
+likelihood to estimation; it does not turn latent process states into ETAs.
+
+```{r kalman-model, eval=FALSE}
+ou <- nm_model(
+  INPUT = c("ID", "TIME", "DV", "MDV"), ADVAN = 1,
+  PRED = "CL=1; V=1; S1=V; F=0",
+  ERROR = "
+    M0=0; P0=THETA(2)
+    A11=exp(-THETA(1)*DT)
+    Q11=THETA(2)*(1-exp(-2*THETA(1)*DT))
+    H1=1; R1=THETA(3)*THETA(3)
+  ",
+  THETAS = data.frame(THETA=1:3, Value=c(0.3, 0.8, 0.2)),
+  KALMAN_CONFIG = nm_kalman_config(
+    states = "deviation", initial_mean = "M0",
+    initial_covariance = matrix("P0", 1),
+    transition = matrix("A11", 1),
+    process_covariance = matrix("Q11", 1),
+    observation = "H1", observation_variance = "R1",
+    by_dvid = FALSE
+  )
+)
+
+fit <- nm_est(ou, observations, method = "LAPLACE")
+states <- nm_kalman_decode(fit)
+simulated <- nm_simulate(ou, schedule, residual = TRUE, nsim = 100)
+```
+
+The measurement equation defaults to `DV = F + H x + epsilon`; use
+`baseline = "zero"` for `DV = H x + epsilon`. `nm_kalman_decode()` reports
+one-step predictions, filtered states, innovations, and retrospective
+Rauch--Tung--Striebel smoothed states.
+
+For nonlinear dynamics, set `filter = "ekf"`, `"ukf"`, or `"particle"` and
+name one next-state assignment per latent state plus a scalar nonlinear
+observation assignment. EKF and UKF decoding use a retrospective RTS-style
+smoother. The bootstrap particle filter uses saved common random numbers for a
+reproducible particle likelihood and returns genealogically smoothed states;
+`particles`, `ess_threshold`, and `seed` control its approximation.
+
+Continuous-discrete Itô models use `nm_sde_config()`. Its `drift` vector and
+diffusion-loading matrix are `$ERROR` assignments evaluated at fixed substeps.
+Euler--Maruyama supports general diffusion; Milstein is available for diagonal
+diffusion. EKF/UKF use propagated moments, while the particle filter propagates
+stochastic paths directly.
+
+```{r sde-model, eval=FALSE}
+sde <- nm_sde_config(
+  states = "deviation", initial_mean = "M0",
+  initial_covariance = matrix("P0", 1),
+  drift = "DRIFT", diffusion = matrix("G", 1),
+  observation = "HX", observation_variance = "R",
+  filter = "ukf", method = "euler", substeps = 8
+)
+```
+
 For inter-occasion variability, trailing ETAs are treated as occasion-specific
 and the event data must contain the configured occasion column. Mixture models
 can refer to `MIXNUM` in `PRED`.

@@ -21,6 +21,8 @@ serializable and is the object sent to workers.
   \itemize{
     \item \href{#method-NMEngine-initialize}{\code{NMEngine$new()}}
     \item \href{#method-NMEngine-simulate}{\code{NMEngine$simulate()}}
+    \item \href{#method-NMEngine-hmm_filter}{\code{NMEngine$hmm_filter()}}
+    \item \href{#method-NMEngine-kalman_filter}{\code{NMEngine$kalman_filter()}}
     \item \href{#method-NMEngine-prediction_tape}{\code{NMEngine$prediction_tape()}}
     \item \href{#method-NMEngine-prediction_derivatives}{\code{NMEngine$prediction_derivatives()}}
     \item \href{#method-NMEngine-objective_tape}{\code{NMEngine$objective_tape()}}
@@ -78,6 +80,66 @@ serializable and is the object sent to workers.
   }
   \subsection{Returns}{
     Event data augmented with `IPRED` and compartment amounts.
+  }
+}
+
+\if{html}{\out{<hr>}}
+\if{html}{\out{<a id="method-NMEngine-hmm_filter"></a>}}
+\if{latex}{\out{\hypertarget{method-NMEngine-hmm_filter}{}}}
+\subsection{\code{NMEngine$hmm_filter()}}{
+  Run the scaled hidden Markov forward filter.
+  \subsection{Usage}{
+    \if{html}{\out{<div class="r">}}
+    \preformatted{NMEngine$hmm_filter(
+  data,
+  theta = self$model$THETAS$Value,
+  eta = NULL,
+  sigma = self$model$SIGMAS$Value
+)}
+    \if{html}{\out{</div>}}
+  }
+  \subsection{Arguments}{
+    \if{html}{\out{<div class="arguments">}}
+    \describe{
+      \item{\code{data}}{NONMEM-style observation data.}
+      \item{\code{theta}}{Population fixed effects.}
+      \item{\code{eta}}{Subject-by-effect random-effect matrix.}
+      \item{\code{sigma}}{Residual parameters used by emission expressions.}
+    }
+    \if{html}{\out{</div>}}
+  }
+  \subsection{Returns}{
+    Filtered hidden-state probabilities and likelihood details.
+  }
+}
+
+\if{html}{\out{<hr>}}
+\if{html}{\out{<a id="method-NMEngine-kalman_filter"></a>}}
+\if{latex}{\out{\hypertarget{method-NMEngine-kalman_filter}{}}}
+\subsection{\code{NMEngine$kalman_filter()}}{
+  Run the linear Gaussian Kalman filter and RTS smoother.
+  \subsection{Usage}{
+    \if{html}{\out{<div class="r">}}
+    \preformatted{NMEngine$kalman_filter(
+  data,
+  theta = self$model$THETAS$Value,
+  eta = NULL,
+  sigma = self$model$SIGMAS$Value
+)}
+    \if{html}{\out{</div>}}
+  }
+  \subsection{Arguments}{
+    \if{html}{\out{<div class="arguments">}}
+    \describe{
+      \item{\code{data}}{NONMEM-style observation data.}
+      \item{\code{theta}}{Population fixed effects.}
+      \item{\code{eta}}{Subject-by-effect random-effect matrix.}
+      \item{\code{sigma}}{Parameters used by state-space component expressions.}
+    }
+    \if{html}{\out{</div>}}
+  }
+  \subsection{Returns}{
+    Filtered and smoothed state summaries and likelihood details.
   }
 }
 

@@ -107,12 +107,23 @@ test_that("model versions own numbered runs and persistent diagnostics", {
   index <- match(first, manifest$snapshots$id)
   manifest$snapshots$result_type[[index]] <- "estimation"
   saveRDS(manifest, manifest_path)
-  saved <- nm_project_save_diagnostics(workspace, project$id, first, list(vpc = diagnostic))
+  count <- structure(list(nsim = 25L), class = "nm_vpc_count")
+  competing <- structure(list(nsim = 25L), class = "nm_vpc_competing")
+  recurrent <- structure(list(nsim = 25L), class = "nm_vpc_recurrent")
+  saved <- nm_project_save_diagnostics(workspace, project$id, first, list(
+    vpc = diagnostic, vpc_count = count,
+    vpc_competing = competing, vpc_recurrent = recurrent
+  ))
   expect_identical(saved$vpc, diagnostic)
   expect_identical(nm_project_load_diagnostics(workspace, project$id, first)$vpc, diagnostic)
   expect_true(nm_project_list(workspace, project$id)$has_vpc[
     nm_project_list(workspace, project$id)$id == first
   ])
+  record <- nm_project_list(workspace, project$id)
+  record <- record[record$id == first, , drop = FALSE]
+  expect_true(record$has_vpc_count)
+  expect_true(record$has_vpc_competing)
+  expect_true(record$has_vpc_recurrent)
 
   expect_true(nm_project_delete_snapshot(workspace, project$id, version))
   expect_equal(nrow(nm_project_list(workspace, project$id)), 0L)

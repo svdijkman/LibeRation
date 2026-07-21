@@ -10,6 +10,7 @@ liber_gui(
   queue = NULL,
   workspace = NULL,
   project = NULL,
+  session_workspace = FALSE,
   launch.browser = getOption("shiny.launch.browser", interactive()),
   ...
 )
@@ -26,6 +27,10 @@ workspace when LibeRties is installed. Use `FALSE` for in-process work.}
 \item{workspace}{Workspace object or directory. By default the GUI uses
 `C:/Users/<username>/Documents/LibeR/workspace` on Windows and
 `~/LibeR/workspace` on Linux and macOS.}
+
+\item{session_workspace}{Create a separate ephemeral workspace beneath
+`workspace` for every browser session. This is intended for hosted
+demonstrations where application users must not share project files.}
 
 \item{project}{Optional project id to open when the application starts.}
 

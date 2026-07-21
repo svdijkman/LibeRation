@@ -556,11 +556,13 @@
   engine <- if (inherits(model, "NMEngine")) model else nm_compile(model)
   model <- engine$model
   data <- .nm_engine_data(model, data)
-  if (model$LIK_CONFIG$error == "none" || !nrow(model$SIGMAS)) {
-    .nm_stop("Estimation requires a residual error model and positive SIGMAS.")
+  user_likelihood <- identical(model$LIK_CONFIG$error, "likelihood")
+  if (model$LIK_CONFIG$error == "none" || (!user_likelihood && !nrow(model$SIGMAS))) {
+    .nm_stop("Estimation requires a residual error model or a compiled user likelihood.")
   }
   omega_diagonal <- model$OMEGAS$ROW == model$OMEGAS$COL
-  if (any(model$SIGMAS$Value <= 0) || any(model$OMEGAS$Value[omega_diagonal] <= 0)) {
+  if ((!user_likelihood && any(model$SIGMAS$Value <= 0)) ||
+      any(model$OMEGAS$Value[omega_diagonal] <= 0)) {
     .nm_stop("Initial SIGMA and diagonal OMEGA values must be positive.")
   }
   n_subjects <- length(unique(data$.ID_INDEX))
@@ -1536,9 +1538,30 @@
   variance <- .nm_residual_variance(model, f, sigma, dvid)
   correlation <- diag(length(f))
   if (model$LIK_CONFIG$sigma_corr == "ar1" && length(f) > 1L) {
+    rho <- .nm_ar1_rho(model, theta = theta, sigma = sigma)
     correlation <- outer(seq_along(f), seq_along(f), function(i, j) {
-      model$LIK_CONFIG$ar1_rho^abs(i - j)
+      rho^abs(i - j)
     })
+  }
+  if (length(model$LIK_CONFIG$residual_groups) && length(f) > 1L) {
+    observed_data <- evaluator$data[observed, , drop = FALSE]
+    observed_dvid <- if ("DVID" %in% names(observed_data)) observed_data$DVID else
+      rep(1L, nrow(observed_data))
+    for (group in model$LIK_CONFIG$residual_groups) {
+      group_correlation <- .nm_residual_group_value(group, theta, sigma)
+      for (row in seq_len(nrow(observed_data))) {
+        if (!observed_dvid[[row]] %in% group$dvid) next
+        for (column in seq_len(nrow(observed_data))) {
+          if (row == column || observed_data$.ID_INDEX[[row]] != observed_data$.ID_INDEX[[column]] ||
+              observed_data$TIME[[row]] != observed_data$TIME[[column]] ||
+              !observed_dvid[[column]] %in% group$dvid) next
+          correlation[row, column] <- group_correlation[
+            match(observed_dvid[[row]], group$dvid),
+            match(observed_dvid[[column]], group$dvid)
+          ]
+        }
+      }
+    }
   }
   residual_covariance <- correlation * outer(sqrt(variance), sqrt(variance))
   marginal <- residual_covariance +
@@ -1871,6 +1894,15 @@ nm_est <- function(model, data,
     .nm_stop("`model` must be an nm_model or NMEngine.")
   }
   if (missing(data)) .nm_stop("`data` is required.")
+  model_definition <- if (inherits(model, "NMEngine")) model$model else model
+  if (identical(model_definition$LIK_CONFIG$error, "likelihood") &&
+      method %in% c("FO", "FOCE", "FOCEI")) {
+    .nm_stop(
+      method, " assumes a Gaussian residual linearization and cannot be used ",
+      "with a user-defined likelihood. Use LAPLACE for NONMEM-like conditional ",
+      "likelihood estimation, or ITS/GQ/IMP/SAEM/BAYES/HMC/NUTS/NPML/NPAG."
+    )
+  }
   context <- .nm_estimation_context(model, data, n_cores = n_cores, method = method)
   if (!is.null(initial_eta)) {
     initial_eta <- as.matrix(initial_eta)

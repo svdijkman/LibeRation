@@ -360,9 +360,9 @@ results.</p>
 <span id="cb1-8"><a href="#cb1-8" tabindex="-1"></a>)</span>
 <span id="cb1-9"><a href="#cb1-9" tabindex="-1"></a><span class="fu">nm_project_list</span>(workspace)</span>
 <span id="cb1-10"><a href="#cb1-10" tabindex="-1"></a><span class="co">#&gt;                    id                name                  created</span></span>
-<span id="cb1-11"><a href="#cb1-11" tabindex="-1"></a><span class="co">#&gt; 1 oral-pk-development Oral PK development 2026-07-19T19:21:24.973Z</span></span>
+<span id="cb1-11"><a href="#cb1-11" tabindex="-1"></a><span class="co">#&gt; 1 oral-pk-development Oral PK development 2026-07-21T10:33:49.454Z</span></span>
 <span id="cb1-12"><a href="#cb1-12" tabindex="-1"></a><span class="co">#&gt;                      description                  updated snapshots versions</span></span>
-<span id="cb1-13"><a href="#cb1-13" tabindex="-1"></a><span class="co">#&gt; 1 Example project created from R 2026-07-19T19:21:24.973Z         0        0</span></span></code></pre></div>
+<span id="cb1-13"><a href="#cb1-13" tabindex="-1"></a><span class="co">#&gt; 1 Example project created from R 2026-07-21T10:33:49.454Z         0        0</span></span></code></pre></div>
 <p>Model and data objects are serializable. Compiled external pointers
 are not stored; they are reconstructed when a version or run is
 opened.</p>
@@ -429,13 +429,20 @@ parameter in the visual parameter table.</p>
 <div id="browser-local-ai" class="section level3">
 <h3>Browser-local AI</h3>
 <p><strong>Activate AI</strong> is opt-in and remembers the user’s
-consent and selected open model. Activation itself does not allocate GPU
-memory: the dedicated WebGPU worker and weights are lazy-loaded only
-when Help or report drafting is first used. The download is cached under
-LibeRation’s stable local browser origin. After initialization, the
-worker disables its network APIs before model or run context is sent,
-and receives no tools or DOM access. A compromised browser, extension,
-or operating system remains outside that isolation boundary.</p>
+consent, selected open models, and separate Help and Report context
+settings. <code>Auto</code> selects 8K for the recommended 3B Help model
+and a conservative 6K for the 7B Report model; 1K–16K presets and a
+guarded custom value are also available. The status line shows the
+approximate prompt use, output reserve, retained message count, and
+whether older context was compacted. If browser GPU allocation fails
+before generation, LibeRation retries with a smaller context.</p>
+<p>Activation itself does not allocate GPU memory: the dedicated WebGPU
+worker and weights are lazy-loaded only when Help or report drafting is
+first used. The download is cached under LibeRation’s stable local
+browser origin. After initialization, the worker disables its network
+APIs before model or run context is sent, and receives no tools or DOM
+access. A compromised browser, extension, or operating system remains
+outside that isolation boundary.</p>
 </div>
 </div>
 <div id="local-and-remote-execution" class="section level2">

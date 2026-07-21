@@ -126,9 +126,15 @@
 }
 
 .nm_error_type <- function(code, requested = "auto") {
-  requested <- match.arg(requested, c("auto", "none", "additive", "proportional", "combined", "exponential"))
+  requested <- match.arg(requested, c(
+    "auto", "none", "additive", "proportional", "combined",
+    "exponential", "power", "likelihood"
+  ))
   if (requested != "auto") return(requested)
   compact <- toupper(gsub("[[:space:]]+", "", code %||% ""))
+  if (grepl("\\b(?:LOGLIK|LIK)(?:<-|=)", compact, perl = TRUE)) {
+    return("likelihood")
+  }
   if (!grepl("ERR\\(", compact)) return("none")
   has1 <- grepl("ERR\\(1\\)", compact)
   has2 <- grepl("ERR\\(2\\)", compact)
@@ -136,6 +142,92 @@
   if (grepl("EXP\\(ERR\\(1\\)\\)", compact)) return("exponential")
   if (grepl("F\\*.*ERR\\(1\\)|ERR\\(1\\).*\\*F", compact)) return("proportional")
   "additive"
+}
+
+.nm_compile_error_ir <- function(error, pred_ir, n_theta, n_eta, input,
+                                 covariates, likelihood_type, hmm_config = NULL,
+                                 kalman_config = NULL) {
+  if (!identical(likelihood_type, "likelihood")) return(NULL)
+  # Let the IR discover only symbols that the likelihood actually uses. This
+  # avoids treating unused character identifiers or unrelated dataset columns
+  # as numeric runtime inputs while still resolving referenced $PRED outputs
+  # in the C++ likelihood evaluator.
+  ir <- LibeRtAD::ad_ir(error)
+  if (!is.null(kalman_config)) {
+    required <- unique(c(
+      kalman_config$initial_mean, as.vector(kalman_config$initial_covariance),
+      as.vector(kalman_config$transition),
+      as.vector(kalman_config$process_covariance), kalman_config$observation,
+      kalman_config$observation_variance
+    ))
+    missing <- setdiff(required, ir$output_names)
+    if (length(missing)) {
+      .nm_stop(
+        "KALMAN_CONFIG references $ERROR assignment(s) that were not found: ",
+        paste(missing, collapse = ", "), "."
+      )
+    }
+    if (any(c("LOGLIK", "LIK", "Y") %in% ir$output_names)) {
+      .nm_stop(
+        "A Kalman $ERROR block supplies state-space component outputs; ",
+        "do not also assign LIK, LOGLIK, or Y."
+      )
+    }
+    if (any(grepl("^ERR_", ir$input_names))) {
+      .nm_stop("A state-space likelihood cannot use ERR(); define its observation variance explicitly.")
+    }
+    return(list(ir = ir, output = NULL, scale = "kalman"))
+  }
+  if (!is.null(hmm_config)) {
+    transition_type <- hmm_config$transition_type %||% "discrete"
+    transition_names <- if (identical(transition_type, "continuous")) {
+      generator <- hmm_config$generator
+      unname(generator[row(generator) != col(generator)])
+    } else {
+      as.vector(hmm_config$transition)
+    }
+    required <- unique(c(
+      hmm_config$initial, transition_names, hmm_config$emission
+    ))
+    missing <- setdiff(required, ir$output_names)
+    if (length(missing)) {
+      .nm_stop(
+        "HMM_CONFIG references $ERROR assignment(s) that were not found: ",
+        paste(missing, collapse = ", "), "."
+      )
+    }
+    if (any(c("LOGLIK", "LIK", "Y") %in% ir$output_names)) {
+      .nm_stop(
+        "An HMM $ERROR block supplies initial, transition/rate, and emission outputs; ",
+        "do not also assign LIK, LOGLIK, or Y."
+      )
+    }
+    if (any(grepl("^ERR_", ir$input_names))) {
+      .nm_stop("A hidden Markov likelihood cannot use ERR(); define emission likelihoods explicitly.")
+    }
+    return(list(ir = ir, output = NULL, scale = "hmm"))
+  }
+  candidates <- intersect(c("LOGLIK", "LIK", "Y"), ir$output_names)
+  if (!length(candidates)) {
+    .nm_stop(
+      "A user-defined likelihood `$ERROR` block must assign `LOGLIK` ",
+      "(log likelihood) or `LIK` (probability/density). `Y` is also accepted ",
+      "when LIK_CONFIG explicitly selects `error = \"likelihood\"`."
+    )
+  }
+  preferred <- intersect(c("LOGLIK", "LIK"), candidates)
+  if (length(preferred) > 1L) {
+    .nm_stop("Assign only one of `LOGLIK` or `LIK` in a user-defined likelihood.")
+  }
+  output <- if (length(preferred)) preferred[[1L]] else "Y"
+  if (any(grepl("^ERR_", ir$input_names))) {
+    .nm_stop("A user-defined likelihood cannot use ERR(); put all randomness in LIK/LOGLIK.")
+  }
+  list(
+    ir = ir,
+    output = output,
+    scale = if (identical(output, "LOGLIK")) "log" else "likelihood"
+  )
 }
 
 .nm_known_graph <- function(advan) {
@@ -177,8 +269,11 @@
   code
 }
 
-.nm_compile_des_ir <- function(des, pred_ir, n_theta, n_eta, covariates) {
-  rewritten <- .nm_rewrite_ode_indexing(des)
+.nm_compile_des_ir <- function(des, pred_ir, n_theta, n_eta, covariates,
+                               dde_config = NULL,
+                               algebraic_variables = character()) {
+  lagged <- .nm_rewrite_dde_lags(paste(des, collapse = "\n"), dde_config)
+  rewritten <- .nm_rewrite_ode_indexing(lagged$code)
   parsed <- tryCatch(
     parse(text = rewritten),
     error = function(e) .nm_stop("Unable to parse DES block: ", conditionMessage(e))
@@ -199,9 +294,23 @@
     .nm_stop("Each DADT(i) derivative may only be assigned once in DES.")
   }
   n_state <- max(derivative_index)
+  if (length(lagged$lags)) {
+    lag_states <- vapply(lagged$lags, `[[`, integer(1), "state")
+    lag_delays <- vapply(lagged$lags, `[[`, character(1), "delay")
+    if (any(lag_states < 1L | lag_states > n_state)) {
+      .nm_stop("A DDE LAG() state index exceeds the DES state dimension.")
+    }
+    missing_delay <- setdiff(lag_delays, pred_ir$output_names)
+    if (length(missing_delay)) {
+      .nm_stop("DDE delay assignment(s) missing from $PK/$PRED: ",
+               paste(missing_delay, collapse = ", "), ".")
+    }
+  }
   declared <- unique(c(
     pred_ir$output_names,
     paste0("A_", seq_len(n_state)), "T",
+    vapply(lagged$lags, `[[`, character(1), "input"),
+    as.character(algebraic_variables),
     if (n_theta > 0L) paste0("THETA_", seq_len(n_theta)) else character(),
     if (n_eta > 0L) paste0("ETA_", seq_len(n_eta)) else character(),
     as.character(covariates %||% character())
@@ -210,7 +319,8 @@
     ir = LibeRtAD::ad_ir(
       rewritten, inputs = declared, outputs = paste0("DADT_", seq_len(n_state))
     ),
-    n_state = n_state
+    n_state = n_state,
+    lags = lagged$lags
   )
 }
 
@@ -369,8 +479,14 @@
 #' @param DOSECMP Default dosing compartment.
 #' @param OBSCMP Default observation compartment.
 #' @param PRED Parameter/model assignment code.
-#' @param ERROR Residual-error assignment code.
+#' @param ERROR Residual-error or user-likelihood assignment code. With
+#'   `LIK_CONFIG = nm_lik_config(error = "likelihood")`, assign either `LIK`
+#'   (a positive row probability/density) or `LOGLIK` (its logarithm). The
+#'   compiled block may use `DV`, `F`/`PRED`/`IPRED`, model assignments,
+#'   parameters, numeric input columns, and the Markov helpers `PREV_DV`,
+#'   `PREV_TIME`, `DT`, and `FIRST`.
 #' @param DES ODE derivative code for ADVAN6/13.
+#' @param ALG Algebraic residual equations for an experimental index-1 DAE.
 #' @param THETAS,OMEGAS,SIGMAS Parameter tables.
 #' @param COVARIATES Dataset covariates exposed to `PRED`.
 #' @param USE_ODE Whether an ODE solver is explicitly requested.
@@ -379,7 +495,31 @@
 #'   A-stable adaptive implicit trapezoidal method.
 #' @param IOV Number of trailing inter-occasion ETAs.
 #' @param LIK_CONFIG Reserved likelihood configuration.
-#' @param SOLVER `auto`, `advan`, `matrix`, or `ode`.
+#' @param HMM_CONFIG Optional finite-state hidden Markov configuration created
+#'   by [nm_hmm_config()] or [nm_cthmm_config()]. Its initial,
+#'   transition/rate, and emission names refer to assignments in `ERROR`; the
+#'   complete scaled forward likelihood runs in C++ and remains differentiable
+#'   by CppAD.
+#' @param KALMAN_CONFIG Optional linear Gaussian state-space configuration
+#'   created by [nm_kalman_config()]. Filtering is part of the compiled exact
+#'   likelihood; retrospective smoothing is available through
+#'   [nm_kalman_decode()].
+#' @param DDE_CONFIG Optional method-of-steps declaration created by
+#'   [nm_dde_config()]. Delayed states use `LAG(A(i), delay_name)` in `DES`.
+#' @param DAE_CONFIG Optional semi-explicit index-1 declaration created by
+#'   [nm_dae_config()]. Algebraic residuals are supplied through `ALG`.
+#' @param COMPONENTS Optional list of immutable offline [nm_component()]
+#'   declarations expanded into compiled `$PK/$PRED` or `$DES` IR according
+#'   to each component's scope.
+#' @param EXPERIMENTAL Explicit experimental-engine acknowledgement and policy.
+#' @param RE_CONFIG Optional nested/crossed random-effect design created by
+#'   [nm_re_config()]. Every ETA is assigned to a grouping block; connected
+#'   components are evaluated as independent conditional-likelihood units.
+#' @param OUTCOMES Optional first-class observation declaration created by
+#'   [nm_outcome()] or [nm_outcomes()]. When `ERROR` is omitted, LibeRation
+#'   generates an editable normalized likelihood block. The declaration is
+#'   also used for stochastic outcome simulation and family diagnostics.
+#' @param SOLVER `auto`, `advan`, `matrix`, `ode`, `dde`, or `dae`.
 #' @param ERROR_TYPE Standard residual-error form, or `auto`.
 #' @param GRAPH Optional semantic compartment graph.
 #' @param LAYOUT Optional graphical layout, stored separately from `GRAPH`.
@@ -407,6 +547,7 @@ nm_model <- function(INPUT,
                      PRED = "",
                      ERROR = "Y = F",
                      DES = "",
+                     ALG = "",
                      THETAS,
                      OMEGAS = NULL,
                      SIGMAS = NULL,
@@ -415,11 +556,20 @@ nm_model <- function(INPUT,
                      ODE_CONTROL = NULL,
                      IOV = 0L,
                      LIK_CONFIG = NULL,
-                     SOLVER = c("auto", "advan", "matrix", "ode"),
-                     ERROR_TYPE = c("auto", "none", "additive", "proportional", "combined", "exponential"),
+                     HMM_CONFIG = NULL,
+                     KALMAN_CONFIG = NULL,
+                     DDE_CONFIG = NULL,
+                     DAE_CONFIG = NULL,
+                     RE_CONFIG = NULL,
+                     COMPONENTS = NULL,
+                     EXPERIMENTAL = NULL,
+                     OUTCOMES = NULL,
+                     SOLVER = c("auto", "advan", "matrix", "ode", "dde", "dae"),
+                     ERROR_TYPE = c("auto", "none", "additive", "proportional", "combined", "exponential", "power", "likelihood"),
                      GRAPH = NULL,
                      LAYOUT = NULL,
                      LANGUAGE = c("R", "C++")) {
+  error_was_missing <- missing(ERROR)
   advan <- as.integer(ADVAN)
   supported <- c(1L, 2L, 3L, 4L, 6L, 11L, 12L, 13L)
   if (length(advan) != 1L || is.na(advan) || !advan %in% supported) {
@@ -427,16 +577,114 @@ nm_model <- function(INPUT,
   }
   solver <- match.arg(SOLVER)
   language <- match.arg(LANGUAGE)
+  pred_source <- paste(PRED, collapse = "\n")
+  des_source <- paste(DES, collapse = "\n")
+  components <- .nm_components(COMPONENTS)
+  pred_components <- Filter(function(value) identical(value$scope %||% "pred", "pred"), components)
+  des_components <- Filter(function(value) identical(value$scope %||% "pred", "des"), components)
+  if (length(pred_components)) {
+    PRED <- paste(c(pred_source,
+                    vapply(pred_components, nm_component_code, character(1))),
+                  collapse = "\n")
+  } else PRED <- pred_source
+  if (length(des_components)) {
+    DES <- paste(c(vapply(des_components, nm_component_code, character(1)), des_source),
+                 collapse = "\n")
+  } else DES <- des_source
+  dde_config <- .nm_dde_config(DDE_CONFIG)
+  dae_config <- .nm_dae_config(DAE_CONFIG)
+  if (!is.null(dde_config) && !is.null(dae_config)) {
+    .nm_stop("A model cannot currently combine DDE_CONFIG and DAE_CONFIG.")
+  }
+  if ((!is.null(dde_config) || !is.null(dae_config)) && !advan %in% c(6L, 13L)) {
+    .nm_stop("DDE/DAE models require ADVAN6 or ADVAN13.")
+  }
+  hmm_config <- .nm_hmm_config(HMM_CONFIG)
+  generated_hmm_error <- attr(hmm_config, "generated_error", exact = TRUE)
+  if (!is.null(generated_hmm_error)) {
+    ERROR <- if (isTRUE(error_was_missing)) generated_hmm_error else
+      paste(ERROR, generated_hmm_error, sep = "\n")
+  }
+  kalman_config <- .nm_kalman_config(KALMAN_CONFIG)
+  generated_kalman_error <- attr(kalman_config, "generated_error", exact = TRUE)
+  if (!is.null(generated_kalman_error)) {
+    ERROR <- if (isTRUE(error_was_missing)) generated_kalman_error else
+      paste(ERROR, generated_kalman_error, sep = "\n")
+  }
+  outcomes <- .nm_outcomes(OUTCOMES)
+  sequence_count <- sum(!vapply(
+    list(outcomes, hmm_config, kalman_config), is.null, logical(1)
+  ))
+  if (sequence_count > 1L) {
+    .nm_stop("Use only one of OUTCOMES, HMM_CONFIG, or KALMAN_CONFIG in a model.")
+  }
+  general_ctmc <- !is.null(outcomes) && any(vapply(outcomes, function(outcome) {
+    identical(outcome$family, "continuous_time_markov") && length(outcome$initial) > 2L
+  }, logical(1)))
+  if (general_ctmc) {
+    if (length(outcomes) != 1L) {
+      .nm_stop("A general multi-state continuous-time Markov outcome must currently be the model's sole OUTCOME.")
+    }
+    if (!isTRUE(error_was_missing)) {
+      .nm_stop("Omit ERROR for a general continuous-time Markov OUTCOME; LibeRation generates its matrix-exponential likelihood outputs.")
+    }
+    compiled_ctmc <- .nm_outcome_ctmc_hmm(outcomes[[1L]])
+    hmm_config <- compiled_ctmc$config
+    ERROR <- compiled_ctmc$error
+  } else if (!is.null(outcomes) && isTRUE(error_was_missing)) {
+    ERROR <- .nm_outcome_error(outcomes)
+  }
   error_type <- .nm_error_type(ERROR, match.arg(ERROR_TYPE))
+  if (!is.null(outcomes)) error_type <- "likelihood"
+  if (!is.null(hmm_config)) error_type <- "likelihood"
+  if (!is.null(kalman_config)) error_type <- "likelihood"
   lik_config <- .nm_lik_config(LIK_CONFIG, error_type, as.integer(IOV))
+  if (!is.null(hmm_config)) {
+    if (!lik_config$error %in% c("auto", "likelihood")) {
+      .nm_stop("HMM_CONFIG requires LIK_CONFIG$error = 'likelihood'.")
+    }
+    lik_config$error <- "likelihood"
+  }
+  if (!is.null(kalman_config)) {
+    if (!lik_config$error %in% c("auto", "likelihood")) {
+      .nm_stop("KALMAN_CONFIG requires LIK_CONFIG$error = 'likelihood'.")
+    }
+    if (lik_config$blq_method != "none") {
+      .nm_stop("KALMAN_CONFIG does not currently support censored/BLQ observations.")
+    }
+    lik_config$error <- "likelihood"
+  }
+  error_type <- lik_config$error
   theta <- .nm_parameter_table(THETAS, "THETA", required = TRUE)
   omega <- .nm_omega_table(OMEGAS)
   sigma <- .nm_parameter_table(SIGMAS, "SIGMA")
+  if (!identical(lik_config$ar1_source %||% "fixed", "fixed")) {
+    available <- if (identical(lik_config$ar1_source, "theta")) nrow(theta) else nrow(sigma)
+    if (lik_config$ar1_index < 1L || lik_config$ar1_index > available) {
+      .nm_stop(
+        "Estimated AR(1) parameter ", lik_config$ar1_parameter,
+        " is outside the model's ", toupper(lik_config$ar1_source), " table."
+      )
+    }
+  }
+  if (length(lik_config$residual_groups)) {
+    for (group in lik_config$residual_groups) {
+      for (source in c("theta", "sigma")) {
+        indices <- group$index[group$source == source]
+        available <- if (source == "theta") nrow(theta) else nrow(sigma)
+        if (length(indices) && any(indices < 1L | indices > available)) {
+          .nm_stop("Residual group '", group$label, "' references an unavailable ",
+                   toupper(source), " parameter.")
+        }
+      }
+      .nm_residual_group_value(group, theta$Value, sigma$Value)
+    }
+  }
   if (lik_config$omega == "full" && .nm_n_eta(omega) > 1L &&
       nrow(omega) != .nm_n_eta(omega) * (.nm_n_eta(omega) + 1L) / 2L) {
     .nm_stop("A full OMEGA requires the complete lower triangle.")
   }
-  if (error_type != "none" && nrow(sigma) == 0L) {
+  if (!error_type %in% c("none", "likelihood") && nrow(sigma) == 0L) {
     .nm_stop("Residual error type '", error_type, "' requires SIGMAS.")
   }
   if (advan %in% c(6L, 13L) && !nzchar(trimws(DES))) {
@@ -444,6 +692,29 @@ nm_model <- function(INPUT,
   }
   if (!nzchar(trimws(PRED))) .nm_stop("PRED code must not be empty.")
   n_eta <- .nm_n_eta(omega)
+  re_config <- .nm_re_config(RE_CONFIG, n_eta)
+  if (!is.null(re_config) && lik_config$iov > 0L) {
+    .nm_stop("Use either RE_CONFIG or legacy IOV expansion, not both.")
+  }
+  if (!is.null(re_config) && (!is.null(hmm_config) || !is.null(kalman_config) ||
+      lik_config$sigma_corr != "independent" || length(lik_config$residual_groups))) {
+    .nm_stop(
+      "RE_CONFIG currently requires independent row residuals and cannot be combined ",
+      "with HMM/KALMAN_CONFIG; sequence state belongs to structural subjects rather than ",
+      "connected random-effect components."
+    )
+  }
+  if (!is.null(re_config)) {
+    eta_block <- integer(n_eta)
+    for (block_index in seq_along(re_config$blocks)) {
+      eta_block[re_config$blocks[[block_index]]$etas] <- block_index
+    }
+    cross_block <- omega$ROW != omega$COL &
+      eta_block[omega$ROW] != eta_block[omega$COL] & omega$Value != 0
+    if (any(cross_block)) {
+      .nm_stop("OMEGA correlation is allowed within, but not between, random-effect blocks.")
+    }
+  }
   if (lik_config$iov > n_eta) .nm_stop("IOV cannot exceed the number of ETA definitions.")
   if (lik_config$iov > 0L && n_eta > lik_config$iov) {
     between <- n_eta - lik_config$iov
@@ -457,17 +728,57 @@ nm_model <- function(INPUT,
     COVARIATES, if (!is.null(lik_config$mixtures)) "MIXNUM" else character()
   ))
   pred_ir <- .nm_compile_pred_ir(PRED, nrow(theta), n_eta, compiler_covariates)
+  error_info <- .nm_compile_error_ir(
+    ERROR, pred_ir, nrow(theta), n_eta, INPUT, compiler_covariates, error_type,
+    hmm_config, kalman_config
+  )
   des_info <- if (advan %in% c(6L, 13L)) {
-    .nm_compile_des_ir(DES, pred_ir, nrow(theta), n_eta, compiler_covariates)
+    .nm_compile_des_ir(
+      DES, pred_ir, nrow(theta), n_eta, compiler_covariates,
+      dde_config = dde_config,
+      algebraic_variables = dae_config$variables %||% character()
+    )
   } else NULL
+  if (!is.null(dde_config)) {
+    history <- dde_config$history
+    if (length(history) == 1L) history <- rep(history, des_info$n_state)
+    if (length(history) != des_info$n_state) {
+      .nm_stop("DDE history must be scalar or contain one value per DES state.")
+    }
+    dde_config$history <- history
+    dde_config$lags <- des_info$lags
+    if (identical(solver, "auto")) solver <- "dde"
+  }
+  alg_ir <- .nm_compile_alg_ir(
+    ALG, dae_config, pred_ir, des_info$n_state %||% 0L,
+    nrow(theta), n_eta, compiler_covariates
+  )
+  if (!is.null(dae_config) && identical(solver, "auto")) solver <- "dae"
+  experimental_features <- c(
+    if (!is.null(dde_config)) "delay differential equations",
+    if (!is.null(dae_config)) "index-1 differential-algebraic equations",
+    if (inherits(hmm_config, "nm_factorial_hmm_config")) "factorial hidden Markov models",
+    if (inherits(kalman_config, "nm_switching_state_space_config")) "switching state-space models",
+    if (length(components)) "offline hybrid components"
+  )
+  experimental <- .nm_experimental_config(EXPERIMENTAL, experimental_features)
   ode_control <- .nm_ode_control(ODE_CONTROL, advan)
   graph <- GRAPH %||% if (is.null(des_info)) .nm_known_graph(advan) else .nm_ode_graph(des_info$n_state)
   n_state <- des_info$n_state %||% nrow(graph$compartments %||% data.frame())
   output_catalog <- .nm_output_catalog(pred_ir, n_state, n_eta, INPUT)
   selected_output <- .nm_validate_outputs(OUTPUT, output_catalog)
+  outcome_outputs <- .nm_outcome_symbols(outcomes)
+  missing_outcome_outputs <- setdiff(outcome_outputs, output_catalog$name)
+  if (length(missing_outcome_outputs)) {
+    .nm_stop(
+      "OUTCOMES references model assignment(s) not found in $PK/$PRED: ",
+      paste(missing_outcome_outputs, collapse = ", "), "."
+    )
+  }
+  selected_output <- unique(c(selected_output, outcome_outputs))
   structure(
     list(
-      version = 1L,
+      version = 2L,
       INPUT = unique(as.character(INPUT)),
       OUTPUT = selected_output,
       ADVAN = advan,
@@ -475,9 +786,10 @@ nm_model <- function(INPUT,
       SS = as.integer(SS),
       DOSECMP = as.integer(DOSECMP),
       OBSCMP = as.integer(OBSCMP),
-      PRED = paste(PRED, collapse = "\n"),
+      PRED = pred_source,
       ERROR = paste(ERROR, collapse = "\n"),
-      DES = paste(DES, collapse = "\n"),
+      DES = des_source,
+      ALG = paste(ALG, collapse = "\n"),
       THETAS = theta,
       OMEGAS = omega,
       SIGMAS = sigma,
@@ -486,13 +798,26 @@ nm_model <- function(INPUT,
       ODE_CONTROL = ode_control,
       IOV = as.integer(IOV),
       LIK_CONFIG = lik_config,
+      HMM_CONFIG = hmm_config,
+      KALMAN_CONFIG = kalman_config,
+      DDE_CONFIG = dde_config,
+      DAE_CONFIG = dae_config,
+      RE_CONFIG = re_config,
+      COMPONENTS = components,
+      EXPERIMENTAL = experimental,
+      OUTCOMES = outcomes,
+      outcome_error_generated = !is.null(outcomes) && isTRUE(error_was_missing),
       SOLVER = solver,
       ERROR_TYPE = error_type,
       GRAPH = graph,
       LAYOUT = LAYOUT,
       LANGUAGE = language,
       pred_ir = pred_ir,
+      error_ir = error_info$ir %||% NULL,
+      likelihood_output = error_info$output %||% NULL,
+      likelihood_scale = error_info$scale %||% NULL,
       des_ir = des_info$ir %||% NULL,
+      alg_ir = alg_ir,
       n_eta = n_eta,
       n_state = n_state,
       output_catalog = output_catalog
@@ -612,6 +937,25 @@ print.nm_model <- function(x, ...) {
       " SIGMA:", nrow(x$SIGMAS), "\n")
   cat("  graph compartments:", nrow(x$GRAPH$compartments %||% data.frame()),
       " layout:", if (is.null(x$LAYOUT)) "none" else "present", "\n")
+  if (!is.null(x$HMM_CONFIG)) {
+    cat("  hidden states:", paste(x$HMM_CONFIG$states, collapse = ", "),
+        " sequence:", if (isTRUE(x$HMM_CONFIG$by_dvid)) "subject + DVID" else "subject",
+        "\n")
+  }
+  if (!is.null(x$KALMAN_CONFIG)) {
+    cat("  Gaussian states:", paste(x$KALMAN_CONFIG$states, collapse = ", "),
+        " sequence:", if (isTRUE(x$KALMAN_CONFIG$by_dvid)) "subject + DVID" else "subject",
+        "\n")
+  }
+  if (isTRUE(x$EXPERIMENTAL$enabled)) {
+    cat("  experimental:", paste(x$EXPERIMENTAL$features, collapse = "; "),
+        if (isTRUE(x$EXPERIMENTAL$strict)) "[strict]" else "[fallback allowed]", "\n")
+  }
+  if (!is.null(x$OUTCOMES)) {
+    cat("  outcomes:", paste(vapply(x$OUTCOMES, function(value) {
+      paste0(value$name, " [", value$family, "]")
+    }, character(1)), collapse = "; "), "\n")
+  }
   invisible(x)
 }
 
@@ -624,11 +968,35 @@ nm_support_matrix <- function() {
                "FO", "FOCE", "FOCEI", "LAPLACE", "ITS", "GQ", "IMP", "SAEM", "BAYES",
                "HMC", "NUTS", "NPML", "NPAG",
                "full OMEGA", "IOV", "M3/M4 BLQ", "finite mixtures", "priors",
-               "AR1 residuals", "stochastic simulation", "VPC", "categorical VPC",
-               "time-to-event VPC", "bootstrap", "profile likelihood", "SCM",
+               "user-defined likelihood", "first-class outcome families",
+               "joint DVID endpoints", "Markov likelihood helpers",
+               "finite-state hidden Markov models", "continuous-time HMM",
+               "hidden semi-Markov models",
+               "arbitrary-state continuous-time Markov", "Kalman filter",
+               "extended Kalman filter", "unscented Kalman filter",
+               "particle filter", "genealogical particle smoothing",
+               "RTS state smoothing", "state-space simulation",
+               "continuous-discrete SDE", "Euler-Maruyama", "Milstein",
+               "AR1 residuals", "estimated AR1 correlation",
+               "ARMA residual processes", "nested random effects",
+               "crossed random effects",
+               "cross-endpoint residual covariance",
+               "stochastic simulation", "VPC", "multicategory VPC",
+               "count VPC", "time-to-event VPC", "recurrent-event VPC",
+               "competing-risk VPC", "bootstrap", "profile likelihood", "SCM",
                "NONMEM control-stream round-trip", "local queue", "remote queue",
                "React workbench", "model versions", "THETA bounds",
                "parallel estimation", "parallel simulation", "iteration gradients")
-  data.frame(feature = feature, status = rep("implemented", length(feature)),
+  experimental <- c(
+    "delay differential equations", "index-1 DAE",
+    "block-sparse algebraic solves", "stoichiometric QSP networks",
+    "exact factorial HMM", "switching nonlinear state-space models",
+    "filtered and smoothed regime probabilities",
+    "offline dense neural components", "offline spline components",
+    "offline Gaussian-process components", "learned DES dynamics"
+  )
+  data.frame(feature = c(feature, experimental),
+             status = c(rep("implemented", length(feature)),
+                        rep("experimental", length(experimental))),
              stringsAsFactors = FALSE)
 }

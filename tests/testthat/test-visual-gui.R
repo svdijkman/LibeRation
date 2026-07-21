@@ -12,7 +12,6 @@ test_that("GUI persists lazy AI settings and applies nonlinear diagrams", {
   app <- liber_gui(workspace = workspace, project = project$id,
                    launch.browser = NULL)
   server <- app[["serverFuncSource"]]()
-  state <- get("state", envir = environment(server), inherits = TRUE)
   graph <- list(
     title = "Nonlinear diagram", advan = 6L, residual = "additive",
     covariates = list(),
@@ -38,7 +37,8 @@ test_that("GUI persists lazy AI settings and applies nonlinear diagrams", {
     session$setInputs(liber_workbench_event = list(
       action = "ai_settings", activated = TRUE, consented = TRUE,
       help_model = "SmolLM2-360M-Instruct-q4f16_1-MLC",
-      report_model = "same_as_help", nonce = 1
+      report_model = "same_as_help", help_context = "8192",
+      report_context = "6144", nonce = 1
     ))
     session$flushReact()
     expect_true(state$ai_config$activated)
@@ -61,6 +61,8 @@ test_that("GUI persists lazy AI settings and applies nonlinear diagrams", {
   expect_true(settings$ai$activated)
   expect_equal(settings$ai$help_model, "SmolLM2-360M-Instruct-q4f16_1-MLC")
   expect_equal(settings$ai$report_model, "same_as_help")
+  expect_equal(settings$ai$help_context, "8192")
+  expect_equal(settings$ai$report_context, "6144")
   expect_equal(settings$ai$model, settings$ai$help_model)
 })
 
@@ -85,6 +87,14 @@ test_that("browser-local AI exposes distinct quality and memory choices", {
   }, logical(1))))
 })
 
+test_that("AI context settings are bounded and migration-safe", {
+  expect_equal(LibeRation:::.liber_ai_context_setting("auto"), "auto")
+  expect_equal(LibeRation:::.liber_ai_context_setting(8192), "8192")
+  expect_equal(LibeRation:::.liber_ai_context_setting(10000), "10000")
+  expect_equal(LibeRation:::.liber_ai_context_setting(512), "auto")
+  expect_equal(LibeRation:::.liber_ai_context_setting(32768), "auto")
+})
+
 test_that("single-model AI settings migrate without losing the old choice", {
   workspace <- nm_workspace(tempfile("legacy-ai-settings-"))
   path <- LibeRation:::.liber_client_settings_path(workspace)
@@ -97,7 +107,7 @@ test_that("single-model AI settings migrate without losing the old choice", {
     )
   ), path)
   settings <- LibeRation:::.liber_client_settings_read(workspace)
-  expect_equal(settings$version, 4L)
+  expect_equal(settings$version, 5L)
   expect_equal(
     settings$ai$help_model,
     "Qwen2.5-1.5B-Instruct-q4f16_1-MLC"
@@ -106,6 +116,8 @@ test_that("single-model AI settings migrate without losing the old choice", {
     settings$ai$report_model,
     "Qwen2.5-7B-Instruct-q4f16_1-MLC"
   )
+  expect_equal(settings$ai$help_context, "auto")
+  expect_equal(settings$ai$report_context, "auto")
 })
 
 test_that("Help and Report generation route through separate lazy models", {
@@ -143,7 +155,6 @@ test_that("GUI report workflow renders without a selected estimation", {
   app <- liber_gui(workspace = workspace, project = project$id,
                    launch.browser = NULL)
   server <- app[["serverFuncSource"]]()
-  state <- get("state", envir = environment(server), inherits = TRUE)
   blocks <- list(
     list(id = "intro", type = "introduction", title = "Introduction",
          source = "user", text = "A report.", run_ids = list(),
@@ -155,23 +166,27 @@ test_that("GUI report workflow renders without a selected estimation", {
   shiny::testServer(server, {
     session$setInputs(liber_workbench_event = list(action = "noop", nonce = 0))
     session$flushReact()
+    output_directory <- file.path(tempdir(), "liber-gui-selected-report-directory")
     session$setInputs(liber_workbench_event = list(
       action = "report_design_render", id = "gui-report", title = "GUI report",
-      name = "gui-report", formats = list("pdf"), blocks = blocks, nonce = 1
+      name = "gui-report", directory = output_directory,
+      formats = list("pdf"), blocks = blocks, nonce = 1
     ))
     session$flushReact()
     expect_s3_class(state$report, "nm_report_bundle")
     expect_s3_class(state$report_design, "nm_report_design")
     expect_true(file.exists(state$report$pdf))
+    expect_equal(normalizePath(dirname(state$report$pdf), winslash = "/"),
+                 normalizePath(output_directory, winslash = "/"))
+    expect_equal(state$report_design$style$output_directory, output_directory)
   })
 
   reopened <- liber_gui(workspace = workspace, project = project$id,
                         launch.browser = NULL)
-  reopened_state <- get(
-    "state", envir = environment(reopened[["serverFuncSource"]]()),
-    inherits = TRUE
-  )
-  restored_design <- shiny::isolate(reopened_state$report_design)
+  restored_design <- NULL
+  shiny::testServer(reopened[["serverFuncSource"]](), {
+    restored_design <<- shiny::isolate(state$report_design)
+  })
   expect_s3_class(restored_design, "nm_report_design")
   expect_equal(restored_design$title, "GUI report")
 })

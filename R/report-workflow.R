@@ -19,7 +19,8 @@
 #' @param file Optional TXT, Markdown, or DOCX source for user text.
 #' @param run_ids Immutable model-run ids used by run/comparison blocks.
 #' @param elements Run evidence to include, such as summary, parameters, code,
-#'   GOF, VPC, NPDE, NPC, covariance, and run information.
+#'   GOF, continuous/categorical/count/event VPCs, NPDE, NPC, covariance, and
+#'   run information.
 #' @param options Named block options, including AI instructions, templates,
 #'   and locally extracted source documents.
 #' @param id Optional stable block id.
@@ -49,7 +50,8 @@ nm_report_block <- function(type, title = NULL, source = c("user", "ai"),
     if (type %in% c("run", "comparison")) c("summary", "parameters") else character())))
   allowed_elements <- c(
     "summary", "parameters", "code", "gof", "vpc", "vpc_categorical",
-    "vpc_tte", "npde", "npc", "covariance", "run_info"
+    "vpc_count", "vpc_tte", "vpc_competing", "vpc_recurrent",
+    "npde", "npc", "covariance", "run_info"
   )
   if (length(setdiff(elements, allowed_elements))) {
     .nm_stop("Unknown report evidence element(s): ",
@@ -301,12 +303,33 @@ nm_report_design_load <- function(workspace, project, id = NULL) {
   } else if (kind == "vpc_categorical" && inherits(result, "nm_vpc_categorical")) {
     simulated <- result$simulated; observed <- result$observed
     graphics::plot(range(simulated$TIME), c(0, 1), type = "n", xlab = "Time",
-                   ylab = "Proportion", main = "Categorical VPC")
+                    ylab = "Proportion", main = "Categorical VPC")
+    categories <- unique(as.character(simulated$CATEGORY %||% "outcome"))
+    colors <- grDevices::hcl.colors(max(3L, length(categories)), "Dark 3")
+    for (index in seq_along(categories)) {
+      category <- categories[[index]]
+      sim <- simulated[as.character(simulated$CATEGORY %||% "outcome") == category, , drop = FALSE]
+      obs <- observed[as.character(observed$CATEGORY %||% "outcome") == category, , drop = FALSE]
+      graphics::polygon(c(sim$TIME, rev(sim$TIME)), c(sim$lower, rev(sim$upper)),
+                        col = grDevices::adjustcolor(colors[[index]], .2), border = NA)
+      graphics::lines(sim$TIME, sim$median, lty = 2, col = colors[[index]])
+      graphics::lines(obs$TIME, obs$PROPORTION, type = "b", pch = 16,
+                      col = colors[[index]])
+    }
+    graphics::legend("topright", legend = categories,
+                     col = colors[seq_along(categories)], lty = 1, pch = 16,
+                     bty = "n", cex = .8)
+  } else if (kind == "vpc_count" && inherits(result, "nm_vpc_count")) {
+    simulated <- result$simulated; observed <- result$observed
+    limits <- range(c(simulated$MEAN_lower, simulated$MEAN_upper, observed$MEAN),
+                    finite = TRUE)
+    graphics::plot(range(simulated$TIME), limits, type = "n", xlab = "Time",
+                   ylab = "Mean count", main = "Count VPC")
     graphics::polygon(c(simulated$TIME, rev(simulated$TIME)),
-                      c(simulated$lower, rev(simulated$upper)),
+                      c(simulated$MEAN_lower, rev(simulated$MEAN_upper)),
                       col = grDevices::adjustcolor("#77aee0", .35), border = NA)
-    graphics::lines(simulated$TIME, simulated$median, lty = 2)
-    graphics::lines(observed$TIME, observed$PROPORTION, type = "b", pch = 16)
+    graphics::lines(simulated$TIME, simulated$MEAN_median, lty = 2)
+    graphics::lines(observed$TIME, observed$MEAN, type = "b", pch = 16)
   } else if (kind == "vpc_tte" && inherits(result, "nm_vpc_tte")) {
     simulated <- result$simulated; observed <- result$observed
     graphics::plot(range(simulated$TIME), c(0, 1), type = "n", xlab = "Time",
@@ -316,6 +339,37 @@ nm_report_design_load <- function(workspace, project, id = NULL) {
                       col = grDevices::adjustcolor("#77aee0", .35), border = NA)
     graphics::lines(simulated$TIME, simulated$median, lty = 2)
     graphics::lines(observed$TIME, observed$SURVIVAL, lwd = 1.5)
+  } else if (kind == "vpc_competing" && inherits(result, "nm_vpc_competing")) {
+    simulated <- result$simulated; observed <- result$observed
+    causes <- unique(as.character(simulated$CAUSE))
+    colors <- grDevices::hcl.colors(max(3L, length(causes)), "Dark 3")
+    graphics::plot(range(simulated$TIME), c(0, 1), type = "n", xlab = "Time",
+                   ylab = "Cumulative incidence", main = "Competing-risk VPC")
+    for (index in seq_along(causes)) {
+      cause <- causes[[index]]
+      sim <- simulated[as.character(simulated$CAUSE) == cause, , drop = FALSE]
+      obs <- observed[as.character(observed$CAUSE) == cause, , drop = FALSE]
+      graphics::polygon(c(sim$TIME, rev(sim$TIME)), c(sim$lower, rev(sim$upper)),
+                        col = grDevices::adjustcolor(colors[[index]], .2), border = NA)
+      graphics::lines(sim$TIME, sim$median, lty = 2, col = colors[[index]])
+      graphics::lines(obs$TIME, obs$CIF, type = "b", pch = 16,
+                      col = colors[[index]])
+    }
+    graphics::legend("topleft", legend = causes,
+                     col = colors[seq_along(causes)], lty = 1, pch = 16,
+                     bty = "n", cex = .8)
+  } else if (kind == "vpc_recurrent" && inherits(result, "nm_vpc_recurrent")) {
+    simulated <- result$simulated; observed <- result$observed
+    limits <- range(c(simulated$lower, simulated$upper, observed$MEAN_CUMULATIVE),
+                    finite = TRUE)
+    graphics::plot(range(simulated$TIME), limits, type = "n", xlab = "Time",
+                   ylab = "Mean cumulative events", main = "Recurrent-event VPC")
+    graphics::polygon(c(simulated$TIME, rev(simulated$TIME)),
+                      c(simulated$lower, rev(simulated$upper)),
+                      col = grDevices::adjustcolor("#77aee0", .35), border = NA)
+    graphics::lines(simulated$TIME, simulated$median, lty = 2)
+    graphics::lines(observed$TIME, observed$MEAN_CUMULATIVE,
+                    type = "b", pch = 16)
   } else {
     graphics::plot.new(); graphics::title(main = toupper(gsub("_", " ", kind)))
     graphics::text(.5, .5, "Saved diagnostic is available in the report manifest.")
@@ -413,7 +467,8 @@ nm_report_design_load <- function(workspace, project, id = NULL) {
       }
       diagnostic_kinds <- intersect(
         block$elements,
-        c("vpc", "vpc_categorical", "vpc_tte", "npde", "npc")
+        c("vpc", "vpc_categorical", "vpc_count", "vpc_tte",
+          "vpc_competing", "vpc_recurrent", "npde", "npc")
       )
       for (kind in diagnostic_kinds) {
         diagnostic <- evidence$diagnostics[[kind]]

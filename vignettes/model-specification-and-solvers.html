@@ -1,0 +1,969 @@
+<!DOCTYPE html>
+
+<html>
+
+<head>
+
+<meta charset="utf-8" />
+<meta name="generator" content="pandoc" />
+<meta http-equiv="X-UA-Compatible" content="IE=EDGE" />
+
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+
+<meta name="author" content="Sven C. van Dijkman" />
+
+
+<title>Model specification and numerical solvers</title>
+
+<script>// Pandoc 2.9 adds attributes on both header and div. We remove the former (to
+// be compatible with the behavior of Pandoc < 2.8).
+document.addEventListener('DOMContentLoaded', function(e) {
+  var hs = document.querySelectorAll("div.section[class*='level'] > :first-child");
+  var i, h, a;
+  for (i = 0; i < hs.length; i++) {
+    h = hs[i];
+    if (!/^h[1-6]$/i.test(h.tagName)) continue;  // it should be a header h1-h6
+    a = h.attributes;
+    while (a.length > 0) h.removeAttribute(a[0].name);
+  }
+});
+</script>
+
+<style type="text/css">
+code{white-space: pre-wrap;}
+span.smallcaps{font-variant: small-caps;}
+span.underline{text-decoration: underline;}
+div.column{display: inline-block; vertical-align: top; width: 50%;}
+div.hanging-indent{margin-left: 1.5em; text-indent: -1.5em;}
+ul.task-list{list-style: none;}
+</style>
+
+
+
+<style type="text/css">
+code {
+white-space: pre;
+}
+.sourceCode {
+overflow: visible;
+}
+</style>
+<style type="text/css" data-origin="pandoc">
+html { -webkit-text-size-adjust: 100%; }
+pre > code.sourceCode { white-space: pre; position: relative; }
+pre > code.sourceCode > span { display: inline-block; line-height: 1.25; }
+pre > code.sourceCode > span:empty { height: 1.2em; }
+.sourceCode { overflow: visible; }
+code.sourceCode > span { color: inherit; text-decoration: inherit; }
+div.sourceCode { margin: 1em 0; }
+pre.sourceCode { margin: 0; }
+@media screen {
+div.sourceCode { overflow: auto; }
+}
+@media print {
+pre > code.sourceCode { white-space: pre-wrap; }
+pre > code.sourceCode > span { text-indent: -5em; padding-left: 5em; }
+}
+pre.numberSource code
+{ counter-reset: source-line 0; }
+pre.numberSource code > span
+{ position: relative; left: -4em; counter-increment: source-line; }
+pre.numberSource code > span > a:first-child::before
+{ content: counter(source-line);
+position: relative; left: -1em; text-align: right; vertical-align: baseline;
+border: none; display: inline-block;
+-webkit-touch-callout: none; -webkit-user-select: none;
+-khtml-user-select: none; -moz-user-select: none;
+-ms-user-select: none; user-select: none;
+padding: 0 4px; width: 4em;
+color: #aaaaaa;
+}
+pre.numberSource { margin-left: 3em; border-left: 1px solid #aaaaaa; padding-left: 4px; }
+div.sourceCode
+{ }
+@media screen {
+pre > code.sourceCode > span > a:first-child::before { text-decoration: underline; }
+}
+code span.al { color: #ff0000; font-weight: bold; } 
+code span.an { color: #60a0b0; font-weight: bold; font-style: italic; } 
+code span.at { color: #7d9029; } 
+code span.bn { color: #40a070; } 
+code span.bu { color: #008000; } 
+code span.cf { color: #007020; font-weight: bold; } 
+code span.ch { color: #4070a0; } 
+code span.cn { color: #880000; } 
+code span.co { color: #60a0b0; font-style: italic; } 
+code span.cv { color: #60a0b0; font-weight: bold; font-style: italic; } 
+code span.do { color: #ba2121; font-style: italic; } 
+code span.dt { color: #902000; } 
+code span.dv { color: #40a070; } 
+code span.er { color: #ff0000; font-weight: bold; } 
+code span.ex { } 
+code span.fl { color: #40a070; } 
+code span.fu { color: #06287e; } 
+code span.im { color: #008000; font-weight: bold; } 
+code span.in { color: #60a0b0; font-weight: bold; font-style: italic; } 
+code span.kw { color: #007020; font-weight: bold; } 
+code span.op { color: #666666; } 
+code span.ot { color: #007020; } 
+code span.pp { color: #bc7a00; } 
+code span.sc { color: #4070a0; } 
+code span.ss { color: #bb6688; } 
+code span.st { color: #4070a0; } 
+code span.va { color: #19177c; } 
+code span.vs { color: #4070a0; } 
+code span.wa { color: #60a0b0; font-weight: bold; font-style: italic; } 
+</style>
+<script>
+// apply pandoc div.sourceCode style to pre.sourceCode instead
+(function() {
+  var sheets = document.styleSheets;
+  for (var i = 0; i < sheets.length; i++) {
+    if (sheets[i].ownerNode.dataset["origin"] !== "pandoc") continue;
+    try { var rules = sheets[i].cssRules; } catch (e) { continue; }
+    var j = 0;
+    while (j < rules.length) {
+      var rule = rules[j];
+      // check if there is a div.sourceCode rule
+      if (rule.type !== rule.STYLE_RULE || rule.selectorText !== "div.sourceCode") {
+        j++;
+        continue;
+      }
+      var style = rule.style.cssText;
+      // check if color or background-color is set
+      if (rule.style.color === '' && rule.style.backgroundColor === '') {
+        j++;
+        continue;
+      }
+      // replace div.sourceCode by a pre.sourceCode rule
+      sheets[i].deleteRule(j);
+      sheets[i].insertRule('pre.sourceCode{' + style + '}', j);
+    }
+  }
+})();
+</script>
+
+
+
+
+<style type="text/css">body {
+background-color: #fff;
+margin: 1em auto;
+max-width: 700px;
+overflow: visible;
+padding-left: 2em;
+padding-right: 2em;
+font-family: "Open Sans", "Helvetica Neue", Helvetica, Arial, sans-serif;
+font-size: 14px;
+line-height: 1.35;
+}
+#TOC {
+clear: both;
+margin: 0 0 10px 10px;
+padding: 4px;
+width: 400px;
+border: 1px solid #CCCCCC;
+border-radius: 5px;
+background-color: #f6f6f6;
+font-size: 13px;
+line-height: 1.3;
+}
+#TOC .toctitle {
+font-weight: bold;
+font-size: 15px;
+margin-left: 5px;
+}
+#TOC ul {
+padding-left: 40px;
+margin-left: -1.5em;
+margin-top: 5px;
+margin-bottom: 5px;
+}
+#TOC ul ul {
+margin-left: -2em;
+}
+#TOC li {
+line-height: 16px;
+}
+table {
+margin: 1em auto;
+border-width: 1px;
+border-color: #DDDDDD;
+border-style: outset;
+border-collapse: collapse;
+}
+table th {
+border-width: 2px;
+padding: 5px;
+border-style: inset;
+}
+table td {
+border-width: 1px;
+border-style: inset;
+line-height: 18px;
+padding: 5px 5px;
+}
+table, table th, table td {
+border-left-style: none;
+border-right-style: none;
+}
+table thead, table tr.even {
+background-color: #f7f7f7;
+}
+p {
+margin: 0.5em 0;
+}
+blockquote {
+background-color: #f6f6f6;
+padding: 0.25em 0.75em;
+}
+hr {
+border-style: solid;
+border: none;
+border-top: 1px solid #777;
+margin: 28px 0;
+}
+dl {
+margin-left: 0;
+}
+dl dd {
+margin-bottom: 13px;
+margin-left: 13px;
+}
+dl dt {
+font-weight: bold;
+}
+ul {
+margin-top: 0;
+}
+ul li {
+list-style: circle outside;
+}
+ul ul {
+margin-bottom: 0;
+}
+pre, code {
+background-color: #f7f7f7;
+border-radius: 3px;
+color: #333;
+white-space: pre-wrap; 
+}
+pre {
+border-radius: 3px;
+margin: 5px 0px 10px 0px;
+padding: 10px;
+}
+pre:not([class]) {
+background-color: #f7f7f7;
+}
+code {
+font-family: Consolas, Monaco, 'Courier New', monospace;
+font-size: 85%;
+}
+p > code, li > code {
+padding: 2px 0px;
+}
+div.figure {
+text-align: center;
+}
+img {
+background-color: #FFFFFF;
+padding: 2px;
+border: 1px solid #DDDDDD;
+border-radius: 3px;
+border: 1px solid #CCCCCC;
+margin: 0 5px;
+}
+h1 {
+margin-top: 0;
+font-size: 35px;
+line-height: 40px;
+}
+h2 {
+border-bottom: 4px solid #f7f7f7;
+padding-top: 10px;
+padding-bottom: 2px;
+font-size: 145%;
+}
+h3 {
+border-bottom: 2px solid #f7f7f7;
+padding-top: 10px;
+font-size: 120%;
+}
+h4 {
+border-bottom: 1px solid #f7f7f7;
+margin-left: 8px;
+font-size: 105%;
+}
+h5, h6 {
+border-bottom: 1px solid #ccc;
+font-size: 105%;
+}
+a {
+color: #0033dd;
+text-decoration: none;
+}
+a:hover {
+color: #6666ff; }
+a:visited {
+color: #800080; }
+a:visited:hover {
+color: #BB00BB; }
+a[href^="http:"] {
+text-decoration: underline; }
+a[href^="https:"] {
+text-decoration: underline; }
+
+code > span.kw { color: #555; font-weight: bold; } 
+code > span.dt { color: #902000; } 
+code > span.dv { color: #40a070; } 
+code > span.bn { color: #d14; } 
+code > span.fl { color: #d14; } 
+code > span.ch { color: #d14; } 
+code > span.st { color: #d14; } 
+code > span.co { color: #888888; font-style: italic; } 
+code > span.ot { color: #007020; } 
+code > span.al { color: #ff0000; font-weight: bold; } 
+code > span.fu { color: #900; font-weight: bold; } 
+code > span.er { color: #a61717; background-color: #e3d2d2; } 
+</style>
+
+
+
+
+</head>
+
+<body>
+
+
+
+
+<h1 class="title toc-ignore">Model specification and numerical
+solvers</h1>
+<h4 class="author">Sven C. van Dijkman</h4>
+
+
+
+<div id="model-blocks" class="section level2">
+<h2>Model blocks</h2>
+<p>An <code>nm_model</code> is serializable and contains model text,
+parameter tables, likelihood configuration, solver controls, and
+compiled expression IR. An <code>NMEngine</code> adds process-local C++
+pointers and is rebuilt after serialization.</p>
+<p>The principal blocks are:</p>
+<ul>
+<li><code>INPUT</code>: required dataset columns;</li>
+<li><code>PRED</code>: parameter and scaling assignments;</li>
+<li><code>ERROR</code>: observation model;</li>
+<li><code>DES</code>: differential equations for ADVAN6/13;</li>
+<li><code>ALG</code>: algebraic residual equations for experimental
+index-1 DAEs;</li>
+<li><code>THETAS</code>, <code>OMEGAS</code>, and <code>SIGMAS</code>:
+parameter tables; and</li>
+<li><code>LIK_CONFIG</code>: covariance, residual, censoring, IOV,
+prior, and mixture configuration.</li>
+</ul>
+<p>Model text can use <code>THETA(i)</code>, <code>ETA(i)</code>,
+<code>SIGMA(i)</code>, <code>ERR(i)</code>, supported mathematical
+functions, and tape-safe <code>ifelse()</code> expressions.</p>
+</div>
+<div id="experimental-mechanistic-and-latent-state-engines" class="section level2">
+<h2>Experimental mechanistic and latent-state engines</h2>
+<p>Longer-range engines are opt-in so that exploratory methods cannot be
+mistaken for the established ADVAN paths. Supply
+<code>EXPERIMENTAL = nm_experimental_config(TRUE, label = &quot;purpose&quot;)</code>;
+this policy and the exact features used remain in the serialized model
+and queue payload.</p>
+<p>Delay models use <code>LAG(A(i), delay_name)</code> in
+<code>$DES</code>, with the delay assignment defined in
+<code>$PK/$PRED</code>:</p>
+<div class="sourceCode" id="cb1"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb1-1"><a href="#cb1-1" tabindex="-1"></a>model <span class="ot">&lt;-</span> <span class="fu">nm_model</span>(</span>
+<span id="cb1-2"><a href="#cb1-2" tabindex="-1"></a>  <span class="at">INPUT =</span> <span class="fu">c</span>(<span class="st">&quot;ID&quot;</span>, <span class="st">&quot;TIME&quot;</span>, <span class="st">&quot;EVID&quot;</span>, <span class="st">&quot;AMT&quot;</span>), <span class="at">ADVAN =</span> <span class="dv">6</span>,</span>
+<span id="cb1-3"><a href="#cb1-3" tabindex="-1"></a>  <span class="at">PRED =</span> <span class="st">&quot;K=THETA(1); TAU=THETA(2); S1=1&quot;</span>,</span>
+<span id="cb1-4"><a href="#cb1-4" tabindex="-1"></a>  <span class="at">DES =</span> <span class="st">&quot;DADT(1)=-K*A(1)+0.05*LAG(A(1),TAU)&quot;</span>,</span>
+<span id="cb1-5"><a href="#cb1-5" tabindex="-1"></a>  <span class="at">THETAS =</span> <span class="fu">data.frame</span>(<span class="at">THETA=</span><span class="dv">1</span><span class="sc">:</span><span class="dv">2</span>, <span class="at">Value=</span><span class="fu">c</span>(<span class="fl">0.4</span>, <span class="fl">0.5</span>)),</span>
+<span id="cb1-6"><a href="#cb1-6" tabindex="-1"></a>  <span class="at">DDE_CONFIG =</span> <span class="fu">nm_dde_config</span>(<span class="at">step=</span><span class="fl">0.05</span>, <span class="at">minimum_delay=</span><span class="fl">0.5</span>),</span>
+<span id="cb1-7"><a href="#cb1-7" tabindex="-1"></a>  <span class="at">EXPERIMENTAL =</span> <span class="fu">nm_experimental_config</span>(<span class="cn">TRUE</span>)</span>
+<span id="cb1-8"><a href="#cb1-8" tabindex="-1"></a>)</span></code></pre></div>
+<p>Index-1 DAEs place one <code>RES(i)</code> equation per algebraic
+variable in <code>$ALG</code>. An optional logical sparsity matrix
+enables independent block solves. Named stoichiometric systems can
+instead be generated with <code>nm_qsp_system()</code> and passed to
+<code>nm_qsp_model()</code>.</p>
+<p><code>nm_factorial_hmm_config()</code> combines independent latent
+chains exactly for tractable joint state spaces.
+<code>nm_switching_state_space_config()</code> jointly propagates a
+discrete regime and nonlinear continuous state using the compiled
+particle filter and returns filtered and genealogically smoothed regime
+probabilities.</p>
+<p><code>nm_component()</code> stores immutable hashed dense-network,
+spline, or Gaussian-process payloads. <code>scope=&quot;pred&quot;</code> augments
+<code>$PK/$PRED</code>; <code>scope=&quot;des&quot;</code> allows
+state/time-dependent learned corrections inside <code>$DES</code>.
+Component execution is offline and part of the C++/CppAD objective.</p>
+</div>
+<div id="generated-output-columns" class="section level2">
+<h2>Generated output columns</h2>
+<p><code>OUTPUT</code> selects record-level values to retain with
+simulations and fitted runs. <code>nm_model_outputs()</code> discovers
+assignment names from the model text without executing the model and
+combines them with standard prediction, residual, ETA, and compartment
+outputs.</p>
+<div class="sourceCode" id="cb2"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb2-1"><a href="#cb2-1" tabindex="-1"></a>model <span class="ot">&lt;-</span> <span class="fu">nm_model</span>(</span>
+<span id="cb2-2"><a href="#cb2-2" tabindex="-1"></a>  <span class="at">INPUT =</span> <span class="fu">c</span>(<span class="st">&quot;ID&quot;</span>, <span class="st">&quot;TIME&quot;</span>, <span class="st">&quot;EVID&quot;</span>, <span class="st">&quot;AMT&quot;</span>, <span class="st">&quot;DV&quot;</span>, <span class="st">&quot;MDV&quot;</span>),</span>
+<span id="cb2-3"><a href="#cb2-3" tabindex="-1"></a>  <span class="at">OUTPUT =</span> <span class="fu">c</span>(<span class="st">&quot;PRED&quot;</span>, <span class="st">&quot;IPRED&quot;</span>, <span class="st">&quot;CWRES&quot;</span>, <span class="st">&quot;CL&quot;</span>, <span class="st">&quot;V&quot;</span>, <span class="st">&quot;A1&quot;</span>),</span>
+<span id="cb2-4"><a href="#cb2-4" tabindex="-1"></a>  <span class="at">ADVAN =</span> <span class="dv">1</span>,</span>
+<span id="cb2-5"><a href="#cb2-5" tabindex="-1"></a>  <span class="at">PRED =</span> <span class="st">&quot;CL=THETA(1)*exp(ETA(1)); V=THETA(2); K=CL/V; S1=V&quot;</span>,</span>
+<span id="cb2-6"><a href="#cb2-6" tabindex="-1"></a>  <span class="at">ERROR =</span> <span class="st">&quot;Y=F+ERR(1)&quot;</span>,</span>
+<span id="cb2-7"><a href="#cb2-7" tabindex="-1"></a>  <span class="at">THETAS =</span> <span class="fu">data.frame</span>(<span class="at">THETA =</span> <span class="dv">1</span><span class="sc">:</span><span class="dv">2</span>, <span class="at">Value =</span> <span class="fu">c</span>(<span class="dv">2</span>, <span class="dv">20</span>)),</span>
+<span id="cb2-8"><a href="#cb2-8" tabindex="-1"></a>  <span class="at">OMEGAS =</span> <span class="fu">data.frame</span>(<span class="at">OMEGA =</span> <span class="dv">1</span>, <span class="at">Value =</span> <span class="fl">0.1</span>),</span>
+<span id="cb2-9"><a href="#cb2-9" tabindex="-1"></a>  <span class="at">SIGMAS =</span> <span class="fu">data.frame</span>(<span class="at">SIGMA =</span> <span class="dv">1</span>, <span class="at">Value =</span> <span class="fl">0.1</span>)</span>
+<span id="cb2-10"><a href="#cb2-10" tabindex="-1"></a>)</span>
+<span id="cb2-11"><a href="#cb2-11" tabindex="-1"></a></span>
+<span id="cb2-12"><a href="#cb2-12" tabindex="-1"></a><span class="fu">nm_model_outputs</span>(model)</span></code></pre></div>
+<p>In the GUI, <strong>Validate</strong> compiles the unsaved editor
+draft and refreshes the generated-column choices. Selected columns are
+calculated once with the run, saved in its result, and merged into Data
+explorer only when that tab requests the row payload. The OMEGA table
+uses <code>OMEGA(row,col)</code> labels; ETA names refer to the random
+effects governed by that covariance matrix.</p>
+<p>Numeric data columns referenced by PRED or DES, such as weight or a
+laboratory covariate, are recorded as CppAD dynamic parameters when they
+do not define the event topology. Subjects with identical event layout
+can therefore share one prediction tape even when those covariates
+differ. Dose/event fields remain structural when changing them could
+alter ordering, ADDL expansion, infusion handling, or compartment
+routing. Runtime guards detect changed matrix pivots, matrix-exponential
+regimes, adaptive ODE paths, and nonlinear steady-state convergence
+paths and automatically retape at a finite valid anchor.</p>
+</div>
+<div id="advan-and-solver-selection" class="section level2">
+<h2>ADVAN and solver selection</h2>
+<table>
+<thead>
+<tr class="header">
+<th align="right">ADVAN</th>
+<th>Structural model</th>
+<th>Default propagation</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td align="right">1</td>
+<td>One-compartment IV</td>
+<td>analytical</td>
+</tr>
+<tr class="even">
+<td align="right">2</td>
+<td>One-compartment with depot</td>
+<td>analytical</td>
+</tr>
+<tr class="odd">
+<td align="right">3</td>
+<td>Two-compartment IV</td>
+<td>analytical</td>
+</tr>
+<tr class="even">
+<td align="right">4</td>
+<td>Two-compartment with depot</td>
+<td>analytical</td>
+</tr>
+<tr class="odd">
+<td align="right">11</td>
+<td>Three-compartment IV</td>
+<td>analytical</td>
+</tr>
+<tr class="even">
+<td align="right">12</td>
+<td>Three-compartment with depot</td>
+<td>analytical</td>
+</tr>
+<tr class="odd">
+<td align="right">6</td>
+<td>User ODE system</td>
+<td>adaptive Dormand–Prince 5(4)</td>
+</tr>
+<tr class="even">
+<td align="right">13</td>
+<td>User ODE system</td>
+<td>adaptive implicit trapezoidal</td>
+</tr>
+</tbody>
+</table>
+<p><code>SOLVER = &quot;matrix&quot;</code> selects linear matrix-exponential
+propagation for a semantic compartment graph.
+<code>SOLVER = &quot;auto&quot;</code> chooses the specialized ADVAN kernel when
+available.</p>
+<div class="sourceCode" id="cb3"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb3-1"><a href="#cb3-1" tabindex="-1"></a>ode_model <span class="ot">&lt;-</span> <span class="fu">nm_model</span>(</span>
+<span id="cb3-2"><a href="#cb3-2" tabindex="-1"></a>  <span class="at">INPUT =</span> <span class="fu">c</span>(<span class="st">&quot;ID&quot;</span>, <span class="st">&quot;TIME&quot;</span>, <span class="st">&quot;EVID&quot;</span>, <span class="st">&quot;AMT&quot;</span>, <span class="st">&quot;CMT&quot;</span>, <span class="st">&quot;DV&quot;</span>, <span class="st">&quot;MDV&quot;</span>),</span>
+<span id="cb3-3"><a href="#cb3-3" tabindex="-1"></a>  <span class="at">ADVAN =</span> <span class="dv">13</span>,</span>
+<span id="cb3-4"><a href="#cb3-4" tabindex="-1"></a>  <span class="at">DOSECMP =</span> <span class="dv">1</span>,</span>
+<span id="cb3-5"><a href="#cb3-5" tabindex="-1"></a>  <span class="at">OBSCMP =</span> <span class="dv">2</span>,</span>
+<span id="cb3-6"><a href="#cb3-6" tabindex="-1"></a>  <span class="at">PRED =</span> <span class="st">&quot;KFAST=THETA(1); KSLOW=THETA(2); S2=THETA(3)&quot;</span>,</span>
+<span id="cb3-7"><a href="#cb3-7" tabindex="-1"></a>  <span class="at">DES =</span> <span class="fu">paste</span>(</span>
+<span id="cb3-8"><a href="#cb3-8" tabindex="-1"></a>    <span class="st">&quot;DADT(1) = -KFAST * A(1)&quot;</span>,</span>
+<span id="cb3-9"><a href="#cb3-9" tabindex="-1"></a>    <span class="st">&quot;DADT(2) = KFAST * A(1) - KSLOW * A(2)&quot;</span>,</span>
+<span id="cb3-10"><a href="#cb3-10" tabindex="-1"></a>    <span class="at">sep =</span> <span class="st">&quot;</span><span class="sc">\n</span><span class="st">&quot;</span></span>
+<span id="cb3-11"><a href="#cb3-11" tabindex="-1"></a>  ),</span>
+<span id="cb3-12"><a href="#cb3-12" tabindex="-1"></a>  <span class="at">ERROR =</span> <span class="st">&quot;Y = F + ERR(1)&quot;</span>,</span>
+<span id="cb3-13"><a href="#cb3-13" tabindex="-1"></a>  <span class="at">THETAS =</span> <span class="fu">data.frame</span>(<span class="at">THETA =</span> <span class="dv">1</span><span class="sc">:</span><span class="dv">3</span>, <span class="at">Value =</span> <span class="fu">c</span>(<span class="dv">100</span>, <span class="dv">1</span>, <span class="dv">20</span>)),</span>
+<span id="cb3-14"><a href="#cb3-14" tabindex="-1"></a>  <span class="at">SIGMAS =</span> <span class="fu">data.frame</span>(<span class="at">SIGMA =</span> <span class="dv">1</span>, <span class="at">Value =</span> <span class="fl">0.1</span>),</span>
+<span id="cb3-15"><a href="#cb3-15" tabindex="-1"></a>  <span class="at">ODE_CONTROL =</span> <span class="fu">list</span>(<span class="at">rtol =</span> <span class="fl">1e-7</span>, <span class="at">atol =</span> <span class="fl">1e-9</span>, <span class="at">max_steps =</span> <span class="dv">100000</span>)</span>
+<span id="cb3-16"><a href="#cb3-16" tabindex="-1"></a>)</span></code></pre></div>
+</div>
+<div id="parameter-bounds-and-fixed-values" class="section level2">
+<h2>Parameter bounds and fixed values</h2>
+<p>THETA rows accept <code>Lower</code>, <code>Value</code>,
+<code>Upper</code>, and <code>FIX</code>. Bounds are applied by the
+outer optimizer. Variance parameters must remain non-negative; a zero
+OMEGA is allowed only when fixed.</p>
+<div class="sourceCode" id="cb4"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb4-1"><a href="#cb4-1" tabindex="-1"></a>theta <span class="ot">&lt;-</span> <span class="fu">data.frame</span>(</span>
+<span id="cb4-2"><a href="#cb4-2" tabindex="-1"></a>  <span class="at">THETA =</span> <span class="dv">1</span><span class="sc">:</span><span class="dv">2</span>,</span>
+<span id="cb4-3"><a href="#cb4-3" tabindex="-1"></a>  <span class="at">Lower =</span> <span class="fu">c</span>(<span class="fl">0.01</span>, <span class="dv">1</span>),</span>
+<span id="cb4-4"><a href="#cb4-4" tabindex="-1"></a>  <span class="at">Value =</span> <span class="fu">c</span>(<span class="dv">2</span>, <span class="dv">20</span>),</span>
+<span id="cb4-5"><a href="#cb4-5" tabindex="-1"></a>  <span class="at">Upper =</span> <span class="fu">c</span>(<span class="dv">20</span>, <span class="dv">200</span>),</span>
+<span id="cb4-6"><a href="#cb4-6" tabindex="-1"></a>  <span class="at">FIX =</span> <span class="fu">c</span>(<span class="cn">FALSE</span>, <span class="cn">FALSE</span>)</span>
+<span id="cb4-7"><a href="#cb4-7" tabindex="-1"></a>)</span>
+<span id="cb4-8"><a href="#cb4-8" tabindex="-1"></a></span>
+<span id="cb4-9"><a href="#cb4-9" tabindex="-1"></a>omega_full <span class="ot">&lt;-</span> <span class="fu">data.frame</span>(</span>
+<span id="cb4-10"><a href="#cb4-10" tabindex="-1"></a>  <span class="at">OMEGA =</span> <span class="dv">1</span><span class="sc">:</span><span class="dv">3</span>,</span>
+<span id="cb4-11"><a href="#cb4-11" tabindex="-1"></a>  <span class="at">ROW =</span> <span class="fu">c</span>(<span class="dv">1</span>, <span class="dv">2</span>, <span class="dv">2</span>),</span>
+<span id="cb4-12"><a href="#cb4-12" tabindex="-1"></a>  <span class="at">COL =</span> <span class="fu">c</span>(<span class="dv">1</span>, <span class="dv">1</span>, <span class="dv">2</span>),</span>
+<span id="cb4-13"><a href="#cb4-13" tabindex="-1"></a>  <span class="at">Value =</span> <span class="fu">c</span>(<span class="fl">0.10</span>, <span class="sc">-</span><span class="fl">0.02</span>, <span class="fl">0.20</span>)</span>
+<span id="cb4-14"><a href="#cb4-14" tabindex="-1"></a>)</span></code></pre></div>
+<p>A full OMEGA uses the complete lower triangle. Select it with
+<code>nm_lik_config(omega = &quot;full&quot;)</code>; the resulting matrix must be
+positive definite. A diagonal table needs only <code>OMEGA</code> and
+<code>Value</code>.</p>
+</div>
+<div id="priors-mixtures-censoring-and-iov" class="section level2">
+<h2>Priors, mixtures, censoring, and IOV</h2>
+<div class="sourceCode" id="cb5"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb5-1"><a href="#cb5-1" tabindex="-1"></a>priors <span class="ot">&lt;-</span> <span class="fu">rbind</span>(</span>
+<span id="cb5-2"><a href="#cb5-2" tabindex="-1"></a>  <span class="fu">nm_prior</span>(<span class="st">&quot;THETA1&quot;</span>, <span class="st">&quot;normal&quot;</span>, <span class="at">mean =</span> <span class="dv">2</span>, <span class="at">sd =</span> <span class="fl">0.5</span>),</span>
+<span id="cb5-3"><a href="#cb5-3" tabindex="-1"></a>  <span class="fu">nm_prior</span>(<span class="st">&quot;SIGMA1&quot;</span>, <span class="st">&quot;lognormal&quot;</span>, <span class="at">mean =</span> <span class="sc">-</span><span class="dv">2</span>, <span class="at">sd =</span> <span class="fl">0.5</span>),</span>
+<span id="cb5-4"><a href="#cb5-4" tabindex="-1"></a>  <span class="fu">nm_prior</span>(<span class="st">&quot;OMEGA1&quot;</span>, <span class="st">&quot;inverse_gamma&quot;</span>, <span class="at">shape =</span> <span class="dv">3</span>, <span class="at">rate =</span> <span class="fl">0.2</span>)</span>
+<span id="cb5-5"><a href="#cb5-5" tabindex="-1"></a>)</span>
+<span id="cb5-6"><a href="#cb5-6" tabindex="-1"></a></span>
+<span id="cb5-7"><a href="#cb5-7" tabindex="-1"></a>likelihood <span class="ot">&lt;-</span> <span class="fu">nm_lik_config</span>(</span>
+<span id="cb5-8"><a href="#cb5-8" tabindex="-1"></a>  <span class="at">omega =</span> <span class="st">&quot;full&quot;</span>,</span>
+<span id="cb5-9"><a href="#cb5-9" tabindex="-1"></a>  <span class="at">sigma_parameterization =</span> <span class="st">&quot;variance&quot;</span>,</span>
+<span id="cb5-10"><a href="#cb5-10" tabindex="-1"></a>  <span class="at">blq_method =</span> <span class="st">&quot;m3&quot;</span>,</span>
+<span id="cb5-11"><a href="#cb5-11" tabindex="-1"></a>  <span class="at">lloq =</span> <span class="fl">0.05</span>,</span>
+<span id="cb5-12"><a href="#cb5-12" tabindex="-1"></a>  <span class="at">iov =</span> <span class="dv">1</span>,</span>
+<span id="cb5-13"><a href="#cb5-13" tabindex="-1"></a>  <span class="at">occasion_col =</span> <span class="st">&quot;OCC&quot;</span>,</span>
+<span id="cb5-14"><a href="#cb5-14" tabindex="-1"></a>  <span class="at">priors =</span> priors,</span>
+<span id="cb5-15"><a href="#cb5-15" tabindex="-1"></a>  <span class="at">mixtures =</span> <span class="fu">nm_mixture</span>(<span class="fu">c</span>(<span class="fl">0.8</span>, <span class="fl">0.2</span>), <span class="fu">c</span>(<span class="st">&quot;typical&quot;</span>, <span class="st">&quot;slow&quot;</span>))</span>
+<span id="cb5-16"><a href="#cb5-16" tabindex="-1"></a>)</span></code></pre></div>
+</div>
+<div id="first-class-continuous-categorical-count-and-event-outcomes" class="section level2">
+<h2>First-class continuous, categorical, count, and event outcomes</h2>
+<p><code>nm_outcome()</code> turns common non-Gaussian and robust
+observation models into a declarative part of the model. LibeRation
+generates an ordinary, editable <code>$ERROR</code> block, compiles it
+to the C++/CppAD population objective, and retains the distribution
+metadata needed for stochastic simulation and diagnostics.</p>
+<div class="sourceCode" id="cb6"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb6-1"><a href="#cb6-1" tabindex="-1"></a>count_model <span class="ot">&lt;-</span> <span class="fu">nm_model</span>(</span>
+<span id="cb6-2"><a href="#cb6-2" tabindex="-1"></a>  <span class="at">INPUT =</span> <span class="fu">c</span>(<span class="st">&quot;ID&quot;</span>, <span class="st">&quot;TIME&quot;</span>, <span class="st">&quot;DV&quot;</span>, <span class="st">&quot;MDV&quot;</span>),</span>
+<span id="cb6-3"><a href="#cb6-3" tabindex="-1"></a>  <span class="at">ADVAN =</span> <span class="dv">1</span>,</span>
+<span id="cb6-4"><a href="#cb6-4" tabindex="-1"></a>  <span class="at">PRED =</span> <span class="st">&quot;MU=exp(THETA(1)+ETA(1)); CL=1; V=1; S1=V; F=MU&quot;</span>,</span>
+<span id="cb6-5"><a href="#cb6-5" tabindex="-1"></a>  <span class="at">THETAS =</span> <span class="fu">data.frame</span>(<span class="at">THETA=</span><span class="dv">1</span><span class="sc">:</span><span class="dv">2</span>, <span class="at">Value=</span><span class="fu">log</span>(<span class="fu">c</span>(<span class="dv">2</span>, <span class="dv">3</span>)), <span class="at">LOWER=</span><span class="sc">-</span><span class="dv">10</span>, <span class="at">UPPER=</span><span class="dv">10</span>),</span>
+<span id="cb6-6"><a href="#cb6-6" tabindex="-1"></a>  <span class="at">OMEGAS =</span> <span class="fu">data.frame</span>(<span class="at">OMEGA=</span><span class="dv">1</span>, <span class="at">Value=</span><span class="fl">0.2</span>),</span>
+<span id="cb6-7"><a href="#cb6-7" tabindex="-1"></a>  <span class="at">OUTCOMES =</span> <span class="fu">nm_outcome</span>(</span>
+<span id="cb6-8"><a href="#cb6-8" tabindex="-1"></a>    <span class="st">&quot;negative_binomial&quot;</span>, <span class="at">prediction=</span><span class="st">&quot;MU&quot;</span>, <span class="at">dispersion=</span><span class="st">&quot;THETA(2)&quot;</span>,</span>
+<span id="cb6-9"><a href="#cb6-9" tabindex="-1"></a>    <span class="at">max_count=</span><span class="dv">200</span></span>
+<span id="cb6-10"><a href="#cb6-10" tabindex="-1"></a>  )</span>
+<span id="cb6-11"><a href="#cb6-11" tabindex="-1"></a>)</span>
+<span id="cb6-12"><a href="#cb6-12" tabindex="-1"></a></span>
+<span id="cb6-13"><a href="#cb6-13" tabindex="-1"></a>simulated <span class="ot">&lt;-</span> <span class="fu">nm_simulate</span>(count_model, count_design, <span class="at">residual=</span><span class="cn">TRUE</span>, <span class="at">seed=</span><span class="dv">1</span>)</span>
+<span id="cb6-14"><a href="#cb6-14" tabindex="-1"></a>fit <span class="ot">&lt;-</span> <span class="fu">nm_est</span>(count_model, count_data, <span class="at">method=</span><span class="st">&quot;LAPLACE&quot;</span>)</span>
+<span id="cb6-15"><a href="#cb6-15" tabindex="-1"></a><span class="fu">nm_outcome_diagnostics</span>(fit)</span>
+<span id="cb6-16"><a href="#cb6-16" tabindex="-1"></a><span class="fu">nm_vpc_count</span>(fit)</span></code></pre></div>
+<p>Available families are normal, log-normal, fixed-df Student t,
+Bernoulli, categorical, ordinal, Poisson, negative binomial, binomial,
+zero-inflated and hurdle Poisson, first/recurrent event, competing
+risks, observed Markov, and an exact two-state continuous-time Markov
+model. <code>nm_irt_outcomes()</code> creates one ordinal outcome per
+item.</p>
+<p>Several endpoints can share structural parameters and ETAs in one
+compiled likelihood. Give every declaration a unique <code>dvid</code>
+and combine them:</p>
+<div class="sourceCode" id="cb7"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb7-1"><a href="#cb7-1" tabindex="-1"></a>joint <span class="ot">&lt;-</span> <span class="fu">nm_outcomes</span>(</span>
+<span id="cb7-2"><a href="#cb7-2" tabindex="-1"></a>  <span class="fu">nm_outcome</span>(<span class="st">&quot;normal&quot;</span>, <span class="at">name=</span><span class="st">&quot;concentration&quot;</span>, <span class="at">dvid=</span><span class="dv">1</span>,</span>
+<span id="cb7-3"><a href="#cb7-3" tabindex="-1"></a>             <span class="at">prediction=</span><span class="st">&quot;CP&quot;</span>, <span class="at">scale=</span><span class="st">&quot;SIGMA(1)&quot;</span>),</span>
+<span id="cb7-4"><a href="#cb7-4" tabindex="-1"></a>  <span class="fu">nm_outcome</span>(<span class="st">&quot;bernoulli&quot;</span>, <span class="at">name=</span><span class="st">&quot;response&quot;</span>, <span class="at">dvid=</span><span class="dv">2</span>,</span>
+<span id="cb7-5"><a href="#cb7-5" tabindex="-1"></a>             <span class="at">prediction=</span><span class="st">&quot;PRESPONSE&quot;</span>)</span>
+<span id="cb7-6"><a href="#cb7-6" tabindex="-1"></a>)</span></code></pre></div>
+<p>The count <code>max_count</code> determines how far exact
+factorial/rising-factorial terms are unrolled on the AD tape. Data
+validation rejects a larger observed count. For event families, each
+observation row represents an at-risk interval and <code>DT</code>
+supplies its duration. Use <code>nm_vpc_tte()</code>,
+<code>nm_vpc_recurrent()</code>, or <code>nm_vpc_competing()</code> as
+appropriate.</p>
+</div>
+<div id="advanced-editable-structural-templates" class="section level2">
+<h2>Advanced editable structural templates</h2>
+<p><code>nm_model_template()</code> creates complete ADVAN13
+<code>$PK/$PRED</code> and <code>$DES</code> starts for nonlinear
+elimination, transit or dual absorption, parent-metabolite,
+effect-compartment, indirect-response, tumour-growth, and TMDD systems.
+Every line remains editable and uses the normal ODE/AD engine. Templates
+that need a non-zero physiological baseline identify the required
+initial-state event in <code>attr(model, &quot;template_notes&quot;)</code>.</p>
+<div class="sourceCode" id="cb8"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb8-1"><a href="#cb8-1" tabindex="-1"></a>tmdd <span class="ot">&lt;-</span> <span class="fu">nm_model_template</span>(<span class="st">&quot;tmdd&quot;</span>)</span>
+<span id="cb8-2"><a href="#cb8-2" tabindex="-1"></a>transit <span class="ot">&lt;-</span> <span class="fu">nm_model_template</span>(<span class="st">&quot;transit_absorption&quot;</span>, <span class="at">n_transit=</span><span class="dv">5</span>)</span>
+<span id="cb8-3"><a href="#cb8-3" tabindex="-1"></a></span>
+<span id="cb8-4"><a href="#cb8-4" tabindex="-1"></a>hazard <span class="ot">&lt;-</span> <span class="fu">nm_piecewise</span>(<span class="st">&quot;TIME&quot;</span>, <span class="fu">c</span>(<span class="dv">24</span>, <span class="dv">72</span>), <span class="fu">c</span>(<span class="st">&quot;H1&quot;</span>, <span class="st">&quot;H2&quot;</span>, <span class="st">&quot;H3&quot;</span>))</span>
+<span id="cb8-5"><a href="#cb8-5" tabindex="-1"></a>trend <span class="ot">&lt;-</span> <span class="fu">nm_spline</span>(<span class="st">&quot;TIME&quot;</span>, <span class="fu">c</span>(<span class="dv">0</span>, <span class="dv">12</span>, <span class="dv">48</span>, <span class="dv">96</span>),</span>
+<span id="cb8-6"><a href="#cb8-6" tabindex="-1"></a>                   <span class="fu">c</span>(<span class="st">&quot;B1&quot;</span>, <span class="st">&quot;B2&quot;</span>, <span class="st">&quot;B3&quot;</span>), <span class="at">intercept=</span><span class="st">&quot;B0&quot;</span>)</span></code></pre></div>
+</div>
+<div id="user-defined-and-markov-likelihoods" class="section level2">
+<h2>User-defined and Markov likelihoods</h2>
+<p>For categorical, count, survival, Markov, or other non-Gaussian
+outcomes, <code>$ERROR</code> can provide the observation likelihood
+directly. Assign either <code>LIK</code>, containing a positive
+probability or density, or <code>LOGLIK</code>, containing its
+logarithm. LibeRation compiles the block to C++ expression IR and
+records it on the same CppAD tape as prediction, ADVAN/ODE propagation,
+random effects, and the population objective.</p>
+<p>The following first-order binary Markov model estimates an initial
+probability and the 0-to-1 and 1-to-1 transition probabilities. The
+probabilities are defined in <code>$PK/$PRED</code>, while
+<code>$ERROR</code> selects the contribution associated with the
+observed transition.</p>
+<div class="sourceCode" id="cb9"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb9-1"><a href="#cb9-1" tabindex="-1"></a>markov <span class="ot">&lt;-</span> <span class="fu">nm_model</span>(</span>
+<span id="cb9-2"><a href="#cb9-2" tabindex="-1"></a>  <span class="at">INPUT =</span> <span class="fu">c</span>(<span class="st">&quot;ID&quot;</span>, <span class="st">&quot;TIME&quot;</span>, <span class="st">&quot;DV&quot;</span>, <span class="st">&quot;MDV&quot;</span>),</span>
+<span id="cb9-3"><a href="#cb9-3" tabindex="-1"></a>  <span class="at">ADVAN =</span> <span class="dv">1</span>,</span>
+<span id="cb9-4"><a href="#cb9-4" tabindex="-1"></a>  <span class="at">PRED =</span> <span class="st">&quot;</span></span>
+<span id="cb9-5"><a href="#cb9-5" tabindex="-1"></a><span class="st">    PBASE = 1 / (1 + exp(-THETA(1)))</span></span>
+<span id="cb9-6"><a href="#cb9-6" tabindex="-1"></a><span class="st">    P01 = 1 / (1 + exp(-(THETA(2) + ETA(1))))</span></span>
+<span id="cb9-7"><a href="#cb9-7" tabindex="-1"></a><span class="st">    P11 = 1 / (1 + exp(-(THETA(3) + ETA(1))))</span></span>
+<span id="cb9-8"><a href="#cb9-8" tabindex="-1"></a><span class="st">    CL = 1; V = 1; S1 = V; F = PBASE</span></span>
+<span id="cb9-9"><a href="#cb9-9" tabindex="-1"></a><span class="st">  &quot;</span>,</span>
+<span id="cb9-10"><a href="#cb9-10" tabindex="-1"></a>  <span class="at">ERROR =</span> <span class="st">&quot;</span></span>
+<span id="cb9-11"><a href="#cb9-11" tabindex="-1"></a><span class="st">    PCURRENT = ifelse(</span></span>
+<span id="cb9-12"><a href="#cb9-12" tabindex="-1"></a><span class="st">      FIRST == 1,</span></span>
+<span id="cb9-13"><a href="#cb9-13" tabindex="-1"></a><span class="st">      ifelse(DV == 1, PBASE, 1 - PBASE),</span></span>
+<span id="cb9-14"><a href="#cb9-14" tabindex="-1"></a><span class="st">      ifelse(</span></span>
+<span id="cb9-15"><a href="#cb9-15" tabindex="-1"></a><span class="st">        PREV_DV == 0,</span></span>
+<span id="cb9-16"><a href="#cb9-16" tabindex="-1"></a><span class="st">        ifelse(DV == 1, P01, 1 - P01),</span></span>
+<span id="cb9-17"><a href="#cb9-17" tabindex="-1"></a><span class="st">        ifelse(DV == 1, P11, 1 - P11)</span></span>
+<span id="cb9-18"><a href="#cb9-18" tabindex="-1"></a><span class="st">      )</span></span>
+<span id="cb9-19"><a href="#cb9-19" tabindex="-1"></a><span class="st">    )</span></span>
+<span id="cb9-20"><a href="#cb9-20" tabindex="-1"></a><span class="st">    LOGLIK = log(pmax(PCURRENT, 1e-12))</span></span>
+<span id="cb9-21"><a href="#cb9-21" tabindex="-1"></a><span class="st">  &quot;</span>,</span>
+<span id="cb9-22"><a href="#cb9-22" tabindex="-1"></a>  <span class="at">THETAS =</span> <span class="fu">data.frame</span>(</span>
+<span id="cb9-23"><a href="#cb9-23" tabindex="-1"></a>    <span class="at">THETA =</span> <span class="dv">1</span><span class="sc">:</span><span class="dv">3</span>, <span class="at">Value =</span> <span class="fu">qlogis</span>(<span class="fu">c</span>(<span class="fl">0.3</span>, <span class="fl">0.2</span>, <span class="fl">0.8</span>)),</span>
+<span id="cb9-24"><a href="#cb9-24" tabindex="-1"></a>    <span class="at">LOWER =</span> <span class="sc">-</span><span class="dv">10</span>, <span class="at">UPPER =</span> <span class="dv">10</span></span>
+<span id="cb9-25"><a href="#cb9-25" tabindex="-1"></a>  ),</span>
+<span id="cb9-26"><a href="#cb9-26" tabindex="-1"></a>  <span class="at">OMEGAS =</span> <span class="fu">data.frame</span>(<span class="at">OMEGA =</span> <span class="dv">1</span>, <span class="at">Value =</span> <span class="fl">0.2</span>),</span>
+<span id="cb9-27"><a href="#cb9-27" tabindex="-1"></a>  <span class="at">OUTPUT =</span> <span class="fu">c</span>(<span class="st">&quot;PBASE&quot;</span>, <span class="st">&quot;P01&quot;</span>, <span class="st">&quot;P11&quot;</span>)</span>
+<span id="cb9-28"><a href="#cb9-28" tabindex="-1"></a>)</span>
+<span id="cb9-29"><a href="#cb9-29" tabindex="-1"></a></span>
+<span id="cb9-30"><a href="#cb9-30" tabindex="-1"></a>fit <span class="ot">&lt;-</span> <span class="fu">nm_est</span>(markov, transitions, <span class="at">method =</span> <span class="st">&quot;LAPLACE&quot;</span>)</span></code></pre></div>
+<p><code>PREV_DV</code>, <code>PREV_TIME</code>, <code>DT</code>, and
+<code>FIRST</code> are maintained independently for each subject and
+<code>DVID</code>. A finite outcome on an <code>MDV = 1</code> record
+contributes no likelihood but still seeds the previous state; this is
+useful for conditioning on a known baseline state. <code>FIRST</code> is
+one only when no previous finite outcome exists in that subject/response
+sequence.</p>
+<p><code>LIK</code>/<code>LOGLIK</code> can also use <code>DV</code>,
+<code>F</code>/<code>PRED</code>/<code>IPRED</code>, any assignment
+created in <code>$PK/$PRED</code>, <code>THETA()</code>,
+<code>ETA()</code>, <code>SIGMA()</code>, and numeric input columns. Do
+not include constants that do not affect estimation unless an absolute
+normalized likelihood is required for model comparison. Protect
+probabilities before taking logarithms, for example with
+<code>pmax(probability, 1e-12)</code>.</p>
+<p>Use <code>LAPLACE</code> for the closest NONMEM-style conditional
+likelihood analysis. FO, FOCE, and FOCEI are deliberately unavailable
+because their current implementations assume a Gaussian residual
+linearization. ITS, GQ, IMP, SAEM, Bayesian, HMC/NUTS, and nonparametric
+methods use the compiled joint likelihood path. Gaussian
+WRES/IWRES/CWRES are not defined; use outcome-appropriate diagnostics.
+Because a likelihood does not uniquely define an outcome generator,
+stochastic simulation must explicitly draw outcomes from the saved
+probability outputs.</p>
+</div>
+<div id="hidden-markov-models" class="section level2">
+<h2>Hidden Markov models</h2>
+<p>For latent-state models, <code>nm_hmm_config()</code> connects named
+<code>$ERROR</code> assignments to a finite-state hidden Markov model.
+LibeRation evaluates the initial distribution, transition matrix, and
+state-conditional emissions for each record, then combines them with a
+numerically scaled forward algorithm in C++. The entire marginal
+likelihood remains differentiable; hidden state sequences are not
+treated as observed outcomes or sampled during deterministic
+estimation.</p>
+<p>This two-state example models binary observations whose distribution
+depends on an unobserved <code>controlled</code> or <code>active</code>
+state:</p>
+<div class="sourceCode" id="cb10"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb10-1"><a href="#cb10-1" tabindex="-1"></a>hmm <span class="ot">&lt;-</span> <span class="fu">nm_model</span>(</span>
+<span id="cb10-2"><a href="#cb10-2" tabindex="-1"></a>  <span class="at">INPUT =</span> <span class="fu">c</span>(<span class="st">&quot;ID&quot;</span>, <span class="st">&quot;TIME&quot;</span>, <span class="st">&quot;DV&quot;</span>, <span class="st">&quot;MDV&quot;</span>),</span>
+<span id="cb10-3"><a href="#cb10-3" tabindex="-1"></a>  <span class="at">ADVAN =</span> <span class="dv">1</span>,</span>
+<span id="cb10-4"><a href="#cb10-4" tabindex="-1"></a>  <span class="at">PRED =</span> <span class="st">&quot;CL = 1; V = 1; S1 = V; F = 0&quot;</span>,</span>
+<span id="cb10-5"><a href="#cb10-5" tabindex="-1"></a>  <span class="at">ERROR =</span> <span class="st">&quot;</span></span>
+<span id="cb10-6"><a href="#cb10-6" tabindex="-1"></a><span class="st">    PI_C = 1 / (1 + exp(-THETA(1)))</span></span>
+<span id="cb10-7"><a href="#cb10-7" tabindex="-1"></a><span class="st">    PI_A = 1 - PI_C</span></span>
+<span id="cb10-8"><a href="#cb10-8" tabindex="-1"></a><span class="st">    P_CC = 1 / (1 + exp(-THETA(2)))</span></span>
+<span id="cb10-9"><a href="#cb10-9" tabindex="-1"></a><span class="st">    P_CA = 1 - P_CC</span></span>
+<span id="cb10-10"><a href="#cb10-10" tabindex="-1"></a><span class="st">    P_AC = 1 / (1 + exp(-THETA(3)))</span></span>
+<span id="cb10-11"><a href="#cb10-11" tabindex="-1"></a><span class="st">    P_AA = 1 - P_AC</span></span>
+<span id="cb10-12"><a href="#cb10-12" tabindex="-1"></a><span class="st">    EMIT_C = ifelse(DV == 0, 1 - THETA(4), THETA(4))</span></span>
+<span id="cb10-13"><a href="#cb10-13" tabindex="-1"></a><span class="st">    EMIT_A = ifelse(DV == 0, 1 - THETA(5), THETA(5))</span></span>
+<span id="cb10-14"><a href="#cb10-14" tabindex="-1"></a><span class="st">  &quot;</span>,</span>
+<span id="cb10-15"><a href="#cb10-15" tabindex="-1"></a>  <span class="at">THETAS =</span> <span class="fu">data.frame</span>(</span>
+<span id="cb10-16"><a href="#cb10-16" tabindex="-1"></a>    <span class="at">THETA =</span> <span class="dv">1</span><span class="sc">:</span><span class="dv">5</span>,</span>
+<span id="cb10-17"><a href="#cb10-17" tabindex="-1"></a>    <span class="at">Value =</span> <span class="fu">c</span>(<span class="fu">qlogis</span>(<span class="fl">0.8</span>), <span class="fu">qlogis</span>(<span class="fl">0.9</span>), <span class="fu">qlogis</span>(<span class="fl">0.3</span>), <span class="fl">0.1</span>, <span class="fl">0.8</span>),</span>
+<span id="cb10-18"><a href="#cb10-18" tabindex="-1"></a>    <span class="at">LOWER =</span> <span class="fu">c</span>(<span class="fu">rep</span>(<span class="sc">-</span><span class="dv">10</span>, <span class="dv">3</span>), <span class="fl">1e-6</span>, <span class="fl">1e-6</span>),</span>
+<span id="cb10-19"><a href="#cb10-19" tabindex="-1"></a>    <span class="at">UPPER =</span> <span class="fu">c</span>(<span class="fu">rep</span>(<span class="dv">10</span>, <span class="dv">3</span>), <span class="dv">1</span> <span class="sc">-</span> <span class="fl">1e-6</span>, <span class="dv">1</span> <span class="sc">-</span> <span class="fl">1e-6</span>)</span>
+<span id="cb10-20"><a href="#cb10-20" tabindex="-1"></a>  ),</span>
+<span id="cb10-21"><a href="#cb10-21" tabindex="-1"></a>  <span class="at">HMM_CONFIG =</span> <span class="fu">nm_hmm_config</span>(</span>
+<span id="cb10-22"><a href="#cb10-22" tabindex="-1"></a>    <span class="at">states =</span> <span class="fu">c</span>(<span class="st">&quot;controlled&quot;</span>, <span class="st">&quot;active&quot;</span>),</span>
+<span id="cb10-23"><a href="#cb10-23" tabindex="-1"></a>    <span class="at">initial =</span> <span class="fu">c</span>(<span class="st">&quot;PI_C&quot;</span>, <span class="st">&quot;PI_A&quot;</span>),</span>
+<span id="cb10-24"><a href="#cb10-24" tabindex="-1"></a>    <span class="at">transition =</span> <span class="fu">matrix</span>(</span>
+<span id="cb10-25"><a href="#cb10-25" tabindex="-1"></a>      <span class="fu">c</span>(<span class="st">&quot;P_CC&quot;</span>, <span class="st">&quot;P_CA&quot;</span>, <span class="st">&quot;P_AC&quot;</span>, <span class="st">&quot;P_AA&quot;</span>), <span class="dv">2</span>, <span class="dv">2</span>, <span class="at">byrow =</span> <span class="cn">TRUE</span></span>
+<span id="cb10-26"><a href="#cb10-26" tabindex="-1"></a>    ),</span>
+<span id="cb10-27"><a href="#cb10-27" tabindex="-1"></a>    <span class="at">emission =</span> <span class="fu">c</span>(<span class="st">&quot;EMIT_C&quot;</span>, <span class="st">&quot;EMIT_A&quot;</span>)</span>
+<span id="cb10-28"><a href="#cb10-28" tabindex="-1"></a>  )</span>
+<span id="cb10-29"><a href="#cb10-29" tabindex="-1"></a>)</span>
+<span id="cb10-30"><a href="#cb10-30" tabindex="-1"></a></span>
+<span id="cb10-31"><a href="#cb10-31" tabindex="-1"></a>fit <span class="ot">&lt;-</span> <span class="fu">nm_est</span>(hmm, observations, <span class="at">method =</span> <span class="st">&quot;LAPLACE&quot;</span>)</span>
+<span id="cb10-32"><a href="#cb10-32" tabindex="-1"></a>states <span class="ot">&lt;-</span> <span class="fu">nm_hmm_decode</span>(fit, <span class="at">method =</span> <span class="st">&quot;all&quot;</span>)</span>
+<span id="cb10-33"><a href="#cb10-33" tabindex="-1"></a>gof <span class="ot">&lt;-</span> <span class="fu">nm_gof</span>(fit) <span class="co"># includes HMM_STATE and HMM_PROB_* columns</span></span></code></pre></div>
+<p>Rows of <code>transition</code> are the state before the transition
+and columns are the state after it. Probability-scale initial and
+transition values are normalized internally, so they may be
+probabilities or non-negative weights; setting
+<code>initial_scale = &quot;log&quot;</code> or
+<code>transition_scale = &quot;log&quot;</code> uses a stable softmax. Emissions
+can be positive probabilities/densities or log likelihoods. By default
+each <code>DVID</code> forms an independent hidden-state sequence within
+subject; set <code>by_dvid = FALSE</code> to use one sequence.
+<code>MDV = 1</code> records do not emit an observation or advance the
+hidden state.</p>
+<p>All assignments are evaluated at the current record and may depend on
+<code>TIME</code>, <code>DT</code>, numeric input covariates,
+<code>F</code>, <code>THETA()</code>, <code>ETA()</code>, and
+<code>SIGMA()</code>. The transition matrix can therefore be
+time-inhomogeneous or use a continuous-time intensity model converted to
+interval transition probabilities using <code>DT</code>.</p>
+<p><code>nm_hmm_decode()</code> supports
+<code>method = &quot;filtered&quot;</code>, <code>&quot;smoothed&quot;</code>,
+<code>&quot;viterbi&quot;</code>, or <code>&quot;all&quot;</code>. Filtering uses
+observations up to the current record. The scaled forward-backward
+smoother revises each state probability using the complete sequence,
+while the log-domain Viterbi decoder returns the single most probable
+joint path. <code>method = &quot;all&quot;</code> uses explicit
+<code>HMM_FILTER_*</code>, <code>HMM_SMOOTH_*</code>, and
+<code>HMM_VITERBI_*</code> columns; the per-sequence log likelihood,
+Viterbi joint log likelihood, and Viterbi log-posterior probability are
+stored in <code>attr(states, &quot;sequence_summary&quot;)</code>. These
+probabilities condition on the selected parameter estimates and
+individual or population ETAs; they do not integrate parameter
+uncertainty.</p>
+<p>For fitted HMM runs, the workbench adds an <strong>HMM</strong> tab
+on demand. Its decoder selector switches among filtered, retrospectively
+smoothed, Viterbi, and combined views; subject/sequence and state
+selectors drive probability and classified-path plots plus the
+per-sequence likelihood summary. Decoding rows are generated only when
+this tab is first opened for the selected run and are then cached in the
+GUI session.</p>
+<p>LAPLACE is the recommended deterministic method when random effects
+are present; GQ, IMP, SAEM, HMC/NUTS, BAYES, ITS, NPML, and NPAG also
+use the compiled HMM likelihood. FO/FOCE/FOCEI remain unavailable
+because those algorithms assume a Gaussian residual linearization.
+Automatic NONMEM control-stream export rejects an HMM explicitly because
+NONMEM has no single general control-stream representation for recursive
+latent-state likelihoods.</p>
+<div id="continuous-time-and-observed-multi-state-models" class="section level3">
+<h3>Continuous-time and observed multi-state models</h3>
+<p><code>nm_cthmm_config()</code> replaces a discrete transition matrix
+with an arbitrary generator. Only off-diagonal rate assignments are
+supplied; LibeRation creates each diagonal as the negative row sum and
+evaluates <code>exp(Q * DT)</code> inside the CppAD objective. The same
+<code>nm_hmm_decode()</code> call then provides filtering, smoothing,
+and Viterbi paths for irregularly timed observations. Set
+<code>rate_scale = &quot;log&quot;</code> when the named <code>$ERROR</code>
+assignments are unconstrained log rates.</p>
+<p>An observed multi-state outcome uses
+<code>nm_outcome(&quot;continuous_time_markov&quot;, ...)</code> with matching
+<code>initial</code>, <code>categories</code>, and a square off-diagonal
+<code>rates</code> matrix. Two-state declarations retain their
+analytical closed form; larger models are automatically compiled through
+the general matrix-exponential sequence engine and support outcome
+simulation.</p>
+</div>
+<div id="hidden-semi-markov-models" class="section level3">
+<h3>Hidden semi-Markov models</h3>
+<p><code>nm_hsmm_config()</code> adds an explicit dwell-time
+distribution to each hidden state. Rows of its <code>dwell</code> matrix
+are states and columns are durations measured in observation steps.
+LibeRation expands this declaration to a sparse state-duration HMM
+internally, so the existing exact forward likelihood, retrospective
+smoother, Viterbi decoder, and CppAD gradients are reused.
+<code>nm_hmm_decode()</code> aggregates the expanded representation back
+to the original state labels.</p>
+<div class="sourceCode" id="cb11"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb11-1"><a href="#cb11-1" tabindex="-1"></a>semi_markov <span class="ot">&lt;-</span> <span class="fu">nm_hsmm_config</span>(</span>
+<span id="cb11-2"><a href="#cb11-2" tabindex="-1"></a>  <span class="at">states =</span> <span class="fu">c</span>(<span class="st">&quot;controlled&quot;</span>, <span class="st">&quot;active&quot;</span>),</span>
+<span id="cb11-3"><a href="#cb11-3" tabindex="-1"></a>  <span class="at">initial =</span> <span class="fu">c</span>(<span class="st">&quot;PI_C&quot;</span>, <span class="st">&quot;PI_A&quot;</span>),</span>
+<span id="cb11-4"><a href="#cb11-4" tabindex="-1"></a>  <span class="at">transition =</span> <span class="fu">matrix</span>(<span class="fu">c</span>(<span class="st">&quot;P_CC&quot;</span>, <span class="st">&quot;P_CA&quot;</span>, <span class="st">&quot;P_AC&quot;</span>, <span class="st">&quot;P_AA&quot;</span>), <span class="dv">2</span>, <span class="dv">2</span>,</span>
+<span id="cb11-5"><a href="#cb11-5" tabindex="-1"></a>                      <span class="at">byrow =</span> <span class="cn">TRUE</span>),</span>
+<span id="cb11-6"><a href="#cb11-6" tabindex="-1"></a>  <span class="at">dwell =</span> <span class="fu">matrix</span>(<span class="fu">c</span>(<span class="st">&quot;D_C1&quot;</span>, <span class="st">&quot;D_C2&quot;</span>, <span class="st">&quot;D_C3&quot;</span>,</span>
+<span id="cb11-7"><a href="#cb11-7" tabindex="-1"></a>                   <span class="st">&quot;D_A1&quot;</span>, <span class="st">&quot;D_A2&quot;</span>, <span class="st">&quot;D_A3&quot;</span>), <span class="dv">2</span>, <span class="dv">3</span>, <span class="at">byrow =</span> <span class="cn">TRUE</span>),</span>
+<span id="cb11-8"><a href="#cb11-8" tabindex="-1"></a>  <span class="at">emission =</span> <span class="fu">c</span>(<span class="st">&quot;EMIT_C&quot;</span>, <span class="st">&quot;EMIT_A&quot;</span>)</span>
+<span id="cb11-9"><a href="#cb11-9" tabindex="-1"></a>)</span></code></pre></div>
+</div>
+</div>
+<div id="residual-covariance" class="section level2">
+<h2>Residual covariance</h2>
+<p><code>nm_lik_config()</code> accepts an estimated AR(1) coefficient
+through, for example, <code>ar1_parameter = &quot;THETA(5)&quot;</code>. The
+default <code>tanh</code> transform keeps the resulting correlation
+strictly between minus one and one. Interleaved DVID observations retain
+separate residual histories.</p>
+<p>Use <code>nm_residual_group()</code> when endpoints observed at the
+same subject and time have correlated residuals. Marginal variances
+continue to come from SIGMA; the declaration supplies a full DVID
+correlation matrix. Entries may be fixed correlations or transformed
+<code>THETA(i)</code>/<code>SIGMA(i)</code> references. The exact
+conditional likelihood, FO marginal covariance, and stochastic simulator
+all use the same block.</p>
+<p><code>nm_arma_config()</code> generates an exact linear state-space
+representation for an ARMA(p,q) residual process around the structural
+prediction. AR/MA coefficients and innovation variance remain ordinary
+THETA/SIGMA expressions. The generated <code>$ERROR</code> assignments
+are inserted automatically when <code>ERROR</code> is omitted.</p>
+</div>
+<div id="nested-and-crossed-random-effects" class="section level2">
+<h2>Nested and crossed random effects</h2>
+<p><code>nm_re_config()</code> maps each ETA block to any dataset
+grouping column. Blocks may be nested (study/site/subject) or crossed
+(subject/reader/device). When no top-level <code>cluster</code> is
+supplied, LibeRation constructs independent connected components from
+all memberships and optimizes the exact joint conditional mode for each
+component. Structural PK states still propagate per patient.</p>
+<div class="sourceCode" id="cb12"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb12-1"><a href="#cb12-1" tabindex="-1"></a>design <span class="ot">&lt;-</span> <span class="fu">nm_re_config</span>(</span>
+<span id="cb12-2"><a href="#cb12-2" tabindex="-1"></a>  <span class="fu">nm_re_block</span>(<span class="st">&quot;site&quot;</span>, <span class="st">&quot;SITE&quot;</span>, <span class="dv">1</span>),</span>
+<span id="cb12-3"><a href="#cb12-3" tabindex="-1"></a>  <span class="fu">nm_re_block</span>(<span class="st">&quot;patient&quot;</span>, <span class="st">&quot;ID&quot;</span>, <span class="dv">2</span><span class="sc">:</span><span class="dv">3</span>),</span>
+<span id="cb12-4"><a href="#cb12-4" tabindex="-1"></a>  <span class="fu">nm_re_block</span>(<span class="st">&quot;reader&quot;</span>, <span class="st">&quot;READER&quot;</span>, <span class="dv">4</span>)</span>
+<span id="cb12-5"><a href="#cb12-5" tabindex="-1"></a>)</span>
+<span id="cb12-6"><a href="#cb12-6" tabindex="-1"></a></span>
+<span id="cb12-7"><a href="#cb12-7" tabindex="-1"></a>model <span class="ot">&lt;-</span> <span class="fu">nm_model</span>(</span>
+<span id="cb12-8"><a href="#cb12-8" tabindex="-1"></a>  <span class="co"># ordinary INPUT/PRED/ERROR/parameter declarations ...</span></span>
+<span id="cb12-9"><a href="#cb12-9" tabindex="-1"></a>  <span class="at">RE_CONFIG =</span> design</span>
+<span id="cb12-10"><a href="#cb12-10" tabindex="-1"></a>)</span></code></pre></div>
+<p>Every ETA must belong to exactly one block. OMEGA correlation is
+permitted within a block but not between blocks. A highly connected
+crossed design can produce one large conditional mode; supplying a valid
+independent <code>cluster</code> column limits its dimension.</p>
+</div>
+<div id="gaussian-and-nonlinear-state-space-models" class="section level2">
+<h2>Gaussian and nonlinear state-space models</h2>
+<p><code>nm_kalman_config()</code> connects named <code>$ERROR</code>
+assignments to initial state, transition, process covariance,
+observation loading, and observation variance components. Assignments
+may use <code>DT</code>, covariates, THETA/ETA/SIGMA, or generated model
+variables. The compiled Kalman filter contributes its exact marginal
+likelihood to estimation; it does not turn latent process states into
+ETAs.</p>
+<div class="sourceCode" id="cb13"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb13-1"><a href="#cb13-1" tabindex="-1"></a>ou <span class="ot">&lt;-</span> <span class="fu">nm_model</span>(</span>
+<span id="cb13-2"><a href="#cb13-2" tabindex="-1"></a>  <span class="at">INPUT =</span> <span class="fu">c</span>(<span class="st">&quot;ID&quot;</span>, <span class="st">&quot;TIME&quot;</span>, <span class="st">&quot;DV&quot;</span>, <span class="st">&quot;MDV&quot;</span>), <span class="at">ADVAN =</span> <span class="dv">1</span>,</span>
+<span id="cb13-3"><a href="#cb13-3" tabindex="-1"></a>  <span class="at">PRED =</span> <span class="st">&quot;CL=1; V=1; S1=V; F=0&quot;</span>,</span>
+<span id="cb13-4"><a href="#cb13-4" tabindex="-1"></a>  <span class="at">ERROR =</span> <span class="st">&quot;</span></span>
+<span id="cb13-5"><a href="#cb13-5" tabindex="-1"></a><span class="st">    M0=0; P0=THETA(2)</span></span>
+<span id="cb13-6"><a href="#cb13-6" tabindex="-1"></a><span class="st">    A11=exp(-THETA(1)*DT)</span></span>
+<span id="cb13-7"><a href="#cb13-7" tabindex="-1"></a><span class="st">    Q11=THETA(2)*(1-exp(-2*THETA(1)*DT))</span></span>
+<span id="cb13-8"><a href="#cb13-8" tabindex="-1"></a><span class="st">    H1=1; R1=THETA(3)*THETA(3)</span></span>
+<span id="cb13-9"><a href="#cb13-9" tabindex="-1"></a><span class="st">  &quot;</span>,</span>
+<span id="cb13-10"><a href="#cb13-10" tabindex="-1"></a>  <span class="at">THETAS =</span> <span class="fu">data.frame</span>(<span class="at">THETA=</span><span class="dv">1</span><span class="sc">:</span><span class="dv">3</span>, <span class="at">Value=</span><span class="fu">c</span>(<span class="fl">0.3</span>, <span class="fl">0.8</span>, <span class="fl">0.2</span>)),</span>
+<span id="cb13-11"><a href="#cb13-11" tabindex="-1"></a>  <span class="at">KALMAN_CONFIG =</span> <span class="fu">nm_kalman_config</span>(</span>
+<span id="cb13-12"><a href="#cb13-12" tabindex="-1"></a>    <span class="at">states =</span> <span class="st">&quot;deviation&quot;</span>, <span class="at">initial_mean =</span> <span class="st">&quot;M0&quot;</span>,</span>
+<span id="cb13-13"><a href="#cb13-13" tabindex="-1"></a>    <span class="at">initial_covariance =</span> <span class="fu">matrix</span>(<span class="st">&quot;P0&quot;</span>, <span class="dv">1</span>),</span>
+<span id="cb13-14"><a href="#cb13-14" tabindex="-1"></a>    <span class="at">transition =</span> <span class="fu">matrix</span>(<span class="st">&quot;A11&quot;</span>, <span class="dv">1</span>),</span>
+<span id="cb13-15"><a href="#cb13-15" tabindex="-1"></a>    <span class="at">process_covariance =</span> <span class="fu">matrix</span>(<span class="st">&quot;Q11&quot;</span>, <span class="dv">1</span>),</span>
+<span id="cb13-16"><a href="#cb13-16" tabindex="-1"></a>    <span class="at">observation =</span> <span class="st">&quot;H1&quot;</span>, <span class="at">observation_variance =</span> <span class="st">&quot;R1&quot;</span>,</span>
+<span id="cb13-17"><a href="#cb13-17" tabindex="-1"></a>    <span class="at">by_dvid =</span> <span class="cn">FALSE</span></span>
+<span id="cb13-18"><a href="#cb13-18" tabindex="-1"></a>  )</span>
+<span id="cb13-19"><a href="#cb13-19" tabindex="-1"></a>)</span>
+<span id="cb13-20"><a href="#cb13-20" tabindex="-1"></a></span>
+<span id="cb13-21"><a href="#cb13-21" tabindex="-1"></a>fit <span class="ot">&lt;-</span> <span class="fu">nm_est</span>(ou, observations, <span class="at">method =</span> <span class="st">&quot;LAPLACE&quot;</span>)</span>
+<span id="cb13-22"><a href="#cb13-22" tabindex="-1"></a>states <span class="ot">&lt;-</span> <span class="fu">nm_kalman_decode</span>(fit)</span>
+<span id="cb13-23"><a href="#cb13-23" tabindex="-1"></a>simulated <span class="ot">&lt;-</span> <span class="fu">nm_simulate</span>(ou, schedule, <span class="at">residual =</span> <span class="cn">TRUE</span>, <span class="at">nsim =</span> <span class="dv">100</span>)</span></code></pre></div>
+<p>The measurement equation defaults to
+<code>DV = F + H x + epsilon</code>; use <code>baseline = &quot;zero&quot;</code>
+for <code>DV = H x + epsilon</code>. <code>nm_kalman_decode()</code>
+reports one-step predictions, filtered states, innovations, and
+retrospective Rauch–Tung–Striebel smoothed states.</p>
+<p>For nonlinear dynamics, set <code>filter = &quot;ekf&quot;</code>,
+<code>&quot;ukf&quot;</code>, or <code>&quot;particle&quot;</code> and name one next-state
+assignment per latent state plus a scalar nonlinear observation
+assignment. EKF and UKF decoding use a retrospective RTS-style smoother.
+The bootstrap particle filter uses saved common random numbers for a
+reproducible particle likelihood and returns genealogically smoothed
+states; <code>particles</code>, <code>ess_threshold</code>, and
+<code>seed</code> control its approximation.</p>
+<p>Continuous-discrete Itô models use <code>nm_sde_config()</code>. Its
+<code>drift</code> vector and diffusion-loading matrix are
+<code>$ERROR</code> assignments evaluated at fixed substeps.
+Euler–Maruyama supports general diffusion; Milstein is available for
+diagonal diffusion. EKF/UKF use propagated moments, while the particle
+filter propagates stochastic paths directly.</p>
+<div class="sourceCode" id="cb14"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb14-1"><a href="#cb14-1" tabindex="-1"></a>sde <span class="ot">&lt;-</span> <span class="fu">nm_sde_config</span>(</span>
+<span id="cb14-2"><a href="#cb14-2" tabindex="-1"></a>  <span class="at">states =</span> <span class="st">&quot;deviation&quot;</span>, <span class="at">initial_mean =</span> <span class="st">&quot;M0&quot;</span>,</span>
+<span id="cb14-3"><a href="#cb14-3" tabindex="-1"></a>  <span class="at">initial_covariance =</span> <span class="fu">matrix</span>(<span class="st">&quot;P0&quot;</span>, <span class="dv">1</span>),</span>
+<span id="cb14-4"><a href="#cb14-4" tabindex="-1"></a>  <span class="at">drift =</span> <span class="st">&quot;DRIFT&quot;</span>, <span class="at">diffusion =</span> <span class="fu">matrix</span>(<span class="st">&quot;G&quot;</span>, <span class="dv">1</span>),</span>
+<span id="cb14-5"><a href="#cb14-5" tabindex="-1"></a>  <span class="at">observation =</span> <span class="st">&quot;HX&quot;</span>, <span class="at">observation_variance =</span> <span class="st">&quot;R&quot;</span>,</span>
+<span id="cb14-6"><a href="#cb14-6" tabindex="-1"></a>  <span class="at">filter =</span> <span class="st">&quot;ukf&quot;</span>, <span class="at">method =</span> <span class="st">&quot;euler&quot;</span>, <span class="at">substeps =</span> <span class="dv">8</span></span>
+<span id="cb14-7"><a href="#cb14-7" tabindex="-1"></a>)</span></code></pre></div>
+<p>For inter-occasion variability, trailing ETAs are treated as
+occasion-specific and the event data must contain the configured
+occasion column. Mixture models can refer to <code>MIXNUM</code> in
+<code>PRED</code>.</p>
+</div>
+<div id="infusion-and-steady-state" class="section level2">
+<h2>Infusion and steady state</h2>
+<p>Event records support <code>RATE</code>, <code>DUR</code>,
+<code>II</code>, <code>ADDL</code>, and <code>SS</code>. Analytical
+ADVAN models use closed-form periodic steady-state propagation. ODE
+models use a periodic shooting/convergence path. Always validate the
+event sequence and inspect solver telemetry when combining infusion,
+steady state, and stiff systems.</p>
+</div>
+<div id="restricted-c-model-text" class="section level2">
+<h2>Restricted C++ model text</h2>
+<p><code>nm_model_cpp()</code> accepts scalar C++-style assignment
+expressions with the same indexed-parameter calls. It deliberately
+rejects headers, allocation, I/O, side effects, and arbitrary compiled
+extensions.</p>
+<div class="sourceCode" id="cb15"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb15-1"><a href="#cb15-1" tabindex="-1"></a>cpp_model <span class="ot">&lt;-</span> <span class="fu">nm_model_cpp</span>(</span>
+<span id="cb15-2"><a href="#cb15-2" tabindex="-1"></a>  <span class="at">CPP =</span> <span class="st">&quot;CL = THETA(1) * exp(ETA(1)); V = THETA(2); S1 = V;&quot;</span>,</span>
+<span id="cb15-3"><a href="#cb15-3" tabindex="-1"></a>  <span class="at">INPUT =</span> <span class="fu">c</span>(<span class="st">&quot;ID&quot;</span>, <span class="st">&quot;TIME&quot;</span>, <span class="st">&quot;EVID&quot;</span>, <span class="st">&quot;AMT&quot;</span>, <span class="st">&quot;CMT&quot;</span>, <span class="st">&quot;DV&quot;</span>, <span class="st">&quot;MDV&quot;</span>),</span>
+<span id="cb15-4"><a href="#cb15-4" tabindex="-1"></a>  <span class="at">ADVAN =</span> <span class="dv">1</span>,</span>
+<span id="cb15-5"><a href="#cb15-5" tabindex="-1"></a>  <span class="at">ERROR =</span> <span class="st">&quot;Y = F * (1 + ERR(1))&quot;</span>,</span>
+<span id="cb15-6"><a href="#cb15-6" tabindex="-1"></a>  <span class="at">THETAS =</span> theta,</span>
+<span id="cb15-7"><a href="#cb15-7" tabindex="-1"></a>  <span class="at">OMEGAS =</span> <span class="fu">data.frame</span>(<span class="at">OMEGA =</span> <span class="dv">1</span>, <span class="at">Value =</span> <span class="fl">0.1</span>),</span>
+<span id="cb15-8"><a href="#cb15-8" tabindex="-1"></a>  <span class="at">SIGMAS =</span> <span class="fu">data.frame</span>(<span class="at">SIGMA =</span> <span class="dv">1</span>, <span class="at">Value =</span> <span class="fl">0.1</span>)</span>
+<span id="cb15-9"><a href="#cb15-9" tabindex="-1"></a>)</span></code></pre></div>
+<p>Use <code>nm_support_matrix()</code> to query implemented feature
+support in the running package version.</p>
+</div>
+
+
+
+<!-- code folding -->
+
+
+<!-- dynamically load mathjax for compatibility with self-contained -->
+<script>
+  (function () {
+    var script = document.createElement("script");
+    script.type = "text/javascript";
+    script.src  = "https://mathjax.rstudio.com/latest/MathJax.js?config=TeX-AMS-MML_HTMLorMML";
+    document.getElementsByTagName("head")[0].appendChild(script);
+  })();
+</script>
+
+</body>
+</html>

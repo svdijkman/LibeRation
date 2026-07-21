@@ -98,6 +98,53 @@ BEGIN_RCPP
     return rcpp_result_gen;
 END_RCPP
 }
+// liberation_engine_hmm_filter
+Rcpp::List liberation_engine_hmm_filter(SEXP engine_pointer, const Rcpp::DataFrame& data, const Rcpp::NumericVector& theta, const Rcpp::NumericMatrix& eta, const Rcpp::NumericVector& sigma);
+RcppExport SEXP _LibeRation_liberation_engine_hmm_filter(SEXP engine_pointerSEXP, SEXP dataSEXP, SEXP thetaSEXP, SEXP etaSEXP, SEXP sigmaSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< SEXP >::type engine_pointer(engine_pointerSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::DataFrame& >::type data(dataSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::NumericVector& >::type theta(thetaSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::NumericMatrix& >::type eta(etaSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::NumericVector& >::type sigma(sigmaSEXP);
+    rcpp_result_gen = Rcpp::wrap(liberation_engine_hmm_filter(engine_pointer, data, theta, eta, sigma));
+    return rcpp_result_gen;
+END_RCPP
+}
+// liberation_engine_kalman_filter
+Rcpp::List liberation_engine_kalman_filter(SEXP engine_pointer, const Rcpp::DataFrame& data, const Rcpp::NumericVector& theta, const Rcpp::NumericMatrix& eta, const Rcpp::NumericVector& sigma);
+RcppExport SEXP _LibeRation_liberation_engine_kalman_filter(SEXP engine_pointerSEXP, SEXP dataSEXP, SEXP thetaSEXP, SEXP etaSEXP, SEXP sigmaSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< SEXP >::type engine_pointer(engine_pointerSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::DataFrame& >::type data(dataSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::NumericVector& >::type theta(thetaSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::NumericMatrix& >::type eta(etaSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::NumericVector& >::type sigma(sigmaSEXP);
+    rcpp_result_gen = Rcpp::wrap(liberation_engine_kalman_filter(engine_pointer, data, theta, eta, sigma));
+    return rcpp_result_gen;
+END_RCPP
+}
+// liberation_engine_kalman_simulate
+Rcpp::NumericVector liberation_engine_kalman_simulate(SEXP engine_pointer, const Rcpp::DataFrame& data, const Rcpp::NumericVector& theta, const Rcpp::NumericMatrix& eta, const Rcpp::NumericVector& sigma, const Rcpp::NumericMatrix& process_normals, const Rcpp::NumericVector& observation_normals);
+RcppExport SEXP _LibeRation_liberation_engine_kalman_simulate(SEXP engine_pointerSEXP, SEXP dataSEXP, SEXP thetaSEXP, SEXP etaSEXP, SEXP sigmaSEXP, SEXP process_normalsSEXP, SEXP observation_normalsSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< SEXP >::type engine_pointer(engine_pointerSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::DataFrame& >::type data(dataSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::NumericVector& >::type theta(thetaSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::NumericMatrix& >::type eta(etaSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::NumericVector& >::type sigma(sigmaSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::NumericMatrix& >::type process_normals(process_normalsSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::NumericVector& >::type observation_normals(observation_normalsSEXP);
+    rcpp_result_gen = Rcpp::wrap(liberation_engine_kalman_simulate(engine_pointer, data, theta, eta, sigma, process_normals, observation_normals));
+    return rcpp_result_gen;
+END_RCPP
+}
 // liberation_engine_derivative
 Rcpp::NumericVector liberation_engine_derivative(SEXP engine_pointer, const Rcpp::DataFrame& data, int row, int subject, double time, const Rcpp::NumericVector& state, const Rcpp::NumericVector& theta, const Rcpp::NumericMatrix& eta, const Rcpp::NumericVector& sigma);
 RcppExport SEXP _LibeRation_liberation_engine_derivative(SEXP engine_pointerSEXP, SEXP dataSEXP, SEXP rowSEXP, SEXP subjectSEXP, SEXP timeSEXP, SEXP stateSEXP, SEXP thetaSEXP, SEXP etaSEXP, SEXP sigmaSEXP) {
@@ -459,6 +506,9 @@ static const R_CallMethodDef CallEntries[] = {
     {"_LibeRation_liberation_population_objective_telemetry", (DL_FUNC) &_LibeRation_liberation_population_objective_telemetry, 1},
     {"_LibeRation_liberation_engine_create", (DL_FUNC) &_LibeRation_liberation_engine_create, 1},
     {"_LibeRation_liberation_engine_simulate", (DL_FUNC) &_LibeRation_liberation_engine_simulate, 5},
+    {"_LibeRation_liberation_engine_hmm_filter", (DL_FUNC) &_LibeRation_liberation_engine_hmm_filter, 5},
+    {"_LibeRation_liberation_engine_kalman_filter", (DL_FUNC) &_LibeRation_liberation_engine_kalman_filter, 5},
+    {"_LibeRation_liberation_engine_kalman_simulate", (DL_FUNC) &_LibeRation_liberation_engine_kalman_simulate, 7},
     {"_LibeRation_liberation_engine_derivative", (DL_FUNC) &_LibeRation_liberation_engine_derivative, 9},
     {"_LibeRation_liberation_matrix_exp", (DL_FUNC) &_LibeRation_liberation_matrix_exp, 2},
     {"_LibeRation_liberation_advan_matrix", (DL_FUNC) &_LibeRation_liberation_advan_matrix, 2},

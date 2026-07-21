@@ -58,3 +58,42 @@ test_that("report workflows generate DOCX when Pandoc is available", {
   expect_true(file.exists(bundle$docx))
   expect_gt(file.info(bundle$docx)$size, 1000)
 })
+
+test_that("specialized outcome diagnostics are selectable report evidence", {
+  elements <- c("vpc_count", "vpc_competing", "vpc_recurrent")
+  block <- nm_report_block("run", run_ids = "run-1", elements = elements)
+  expect_equal(block$elements, elements)
+
+  fixtures <- list(
+    vpc_count = structure(list(
+      observed = data.frame(TIME = 0:1, MEAN = c(1, 2)),
+      simulated = data.frame(
+        TIME = 0:1, MEAN_lower = c(.5, 1), MEAN_median = c(1, 2),
+        MEAN_upper = c(1.5, 3)
+      )
+    ), class = "nm_vpc_count"),
+    vpc_competing = structure(list(
+      observed = data.frame(
+        TIME = rep(0:1, 2), CAUSE = rep(c("A", "B"), each = 2),
+        CIF = c(0, .2, 0, .1)
+      ),
+      simulated = data.frame(
+        TIME = rep(0:1, 2), CAUSE = rep(c("A", "B"), each = 2),
+        lower = c(0, .1, 0, .05), median = c(0, .2, 0, .1),
+        upper = c(0, .3, 0, .2)
+      )
+    ), class = "nm_vpc_competing"),
+    vpc_recurrent = structure(list(
+      observed = data.frame(TIME = 0:1, MEAN_CUMULATIVE = c(0, 1)),
+      simulated = data.frame(
+        TIME = 0:1, lower = c(0, .5), median = c(0, 1), upper = c(0, 1.5)
+      )
+    ), class = "nm_vpc_recurrent")
+  )
+  for (kind in names(fixtures)) {
+    file <- tempfile(fileext = ".png")
+    LibeRation:::.nm_report_plot_diagnostic(fixtures[[kind]], kind, file)
+    expect_true(file.exists(file))
+    expect_gt(file.info(file)$size, 1000)
+  }
+})

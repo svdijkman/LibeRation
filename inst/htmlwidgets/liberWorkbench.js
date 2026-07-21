@@ -14,12 +14,13 @@
     return n.toPrecision(6).replace(/\.?0+$/, "");
   }
   function emit(props, action, detail) {
-    if (!window.Shiny || !window.Shiny.setInputValue) return;
+    if (!window.Shiny || !window.Shiny.setInputValue) return false;
     window.Shiny.setInputValue(
       (props.inputId || "liber_workbench") + "_event",
       Object.assign({ action: action, nonce: Date.now() }, detail || {}),
       { priority: "event" }
     );
+    return true;
   }
   function cloneRows(rows) { return list(rows).map(function (row) { return Object.assign({}, row); }); }
   function useSynced(initial, dependency) {
@@ -28,7 +29,65 @@
     return state;
   }
 
-  var localAI = { worker:null, workerUrl:"", model:"", purpose:"", status:{stage:"idle",text:"Model not loaded",progress:0,locked:false,model:"",purpose:""}, listeners:[], pending:{} };
+  var localAIContextPresets=[1024,4096,6144,8192,12288,16384];
+  function localAIModelInfo(ai,model) {
+    return list(ai&&ai.models).filter(function(item){return item.id===model;})[0]||{};
+  }
+  function localAIAutoContextWindow(ai,model,purpose) {
+    if(/(?:^|-)1k(?:-|$)/i.test(String(model||"")))return 1024;
+    var memory=Number(localAIModelInfo(ai,model).vram_mb)||0;
+    if(memory>5500)return 4096;
+    if(memory>3000)return purpose==="report"?6144:6144;
+    return 8192;
+  }
+  function localAIContextWindow(ai,model,purpose,override) {
+    var configured=override;
+    if(configured===undefined||configured===null||configured==="")configured=purpose==="report"?ai&&ai.report_context:ai&&ai.help_context;
+    if(!configured||String(configured).toLowerCase()==="auto")return localAIAutoContextWindow(ai,model,purpose);
+    var numeric=Math.round(Number(configured));
+    return isFinite(numeric)?Math.max(1024,Math.min(16384,numeric)):localAIAutoContextWindow(ai,model,purpose);
+  }
+  function localAISettingsDetail(ai) {
+    return {activated:!!(ai&&ai.activated),consented:!!(ai&&ai.consented),help_model:value(ai&&ai.help_model,ai&&ai.model),report_model:value(ai&&ai.report_model,"same_as_help"),help_context:value(ai&&ai.help_context,"auto"),report_context:value(ai&&ai.report_context,"auto")};
+  }
+  function localAIClip(text, limit) {
+    text=String(text||"");limit=Math.max(80,Number(limit)||80);
+    if(text.length<=limit)return text;
+    var marker="\n[... context shortened by LibeRation ...]\n",available=Math.max(20,limit-marker.length);
+    var head=Math.ceil(available*.72),tail=Math.max(0,available-head);
+    return text.slice(0,head)+marker+(tail?text.slice(-tail):"");
+  }
+  function localAIBudgetMessages(messages, model, requestedMaxTokens, contextWindow) {
+    contextWindow=Math.max(1024,Number(contextWindow)||4096);
+    var outputCeiling=contextWindow<=1024?256:Math.max(512,Math.floor(contextWindow*.25));
+    var maxTokens=Math.max(64,Math.min(Number(requestedMaxTokens)||800,outputCeiling,2200));
+    var safety=contextWindow<=1024?128:512;
+    var inputTokenBudget=Math.max(256,contextWindow-maxTokens-safety);
+    var inputBudget=Math.max(720,Math.floor(inputTokenBudget*3));
+    var source=list(messages).map(function(item){return {role:String(item&&item.role||"user"),content:String(item&&item.content||"")};});
+    var originalChars=source.reduce(function(total,item){return total+item.content.length;},0),originalCount=source.length;
+    if(!source.length)return {messages:source,max_tokens:maxTokens,context_window_size:contextWindow,input_char_budget:inputBudget,prompt_tokens_estimated:0,original_message_count:0,retained_message_count:0,compacted:false};
+    if(originalChars<=inputBudget)return {messages:source,max_tokens:maxTokens,context_window_size:contextWindow,input_char_budget:inputBudget,prompt_tokens_estimated:Math.ceil(originalChars/3),original_message_count:originalCount,retained_message_count:originalCount,compacted:false};
+    var first=source[0].role==="system"?source.shift():null,last=source.length?source.pop():null;
+    var reservedLast=last?Math.min(last.content.length,Math.max(480,Math.floor(inputBudget*.16))):0;
+    var reservedFirst=first?Math.min(first.content.length,Math.max(900,Math.floor(inputBudget*.46))):0;
+    if(first&&reservedFirst+reservedLast>inputBudget){reservedFirst=Math.max(300,inputBudget-reservedLast);}
+    var output=[],used=0;
+    if(first){first.content=localAIClip(first.content,reservedFirst);output.push(first);used+=first.content.length;}
+    var middleBudget=Math.max(0,inputBudget-used-reservedLast),kept=[];
+    for(var index=source.length-1;index>=0&&middleBudget>80;index--){
+      var item=source[index],content=localAIClip(item.content,Math.min(4200,middleBudget));
+      if(content.length>middleBudget)content=localAIClip(content,middleBudget);
+      kept.unshift({role:item.role,content:content});middleBudget-=content.length;
+    }
+    if(kept.length&&kept[0].role==="assistant")kept.shift();
+    output=output.concat(kept);
+    if(last){last.content=localAIClip(last.content,Math.max(120,inputBudget-output.reduce(function(total,item){return total+item.content.length;},0)));output.push(last);}
+    var retainedChars=output.reduce(function(total,item){return total+item.content.length;},0);
+    return {messages:output,max_tokens:maxTokens,context_window_size:contextWindow,input_char_budget:inputBudget,prompt_tokens_estimated:Math.ceil(retainedChars/3),original_message_count:originalCount,retained_message_count:output.length,compacted:retainedChars<originalChars||output.length<originalCount};
+  }
+
+  var localAI = { worker:null, workerUrl:"", model:"", contextWindow:0, purpose:"", status:{stage:"idle",text:"Model not loaded",progress:0,locked:false,model:"",purpose:"",budget:null}, listeners:[], pending:{}, cooldownUntil:0 };
   function localAINotify() { localAI.listeners.slice().forEach(function (listener) { listener(Object.assign({}, localAI.status)); }); }
   function localAISetStatus(next) { localAI.status=Object.assign({},localAI.status,next);localAINotify(); }
   function localAIRejectPending(reason) {
@@ -38,13 +97,80 @@
   function localAIHasPendingPurpose(purpose) {
     return Object.keys(localAI.pending).some(function(id){return localAI.pending[id].purpose===purpose;});
   }
-  function localAIShutdown(reason) {
-    if (localAI.worker) { try { localAI.worker.terminate(); } catch (error) {} }
-    localAIRejectPending(reason instanceof Error?reason:new Error("Local AI was stopped."));
-    localAI.worker=null;localAI.pending={};localAI.model="";localAI.purpose="";localAISetStatus({stage:"idle",text:"Model not loaded",progress:0,locked:false,model:"",purpose:""});
+  function localAIRecoverableGPUFailure(reason) {
+    var message=reason&&reason.message?reason.message:String(reason||"");
+    return /already been disposed|disposed object|device (?:was )?lost|DXGI_ERROR_DEVICE_(?:REMOVED|HUNG|RESET)|requestDevice|create command queue failed|GPUAdapter/i.test(message);
   }
-  function localAIWorker(ai,model,purpose) {
-    if (localAI.worker && localAI.workerUrl===ai.worker_url && localAI.model===model) {
+  function localAIUnavailableGPUFailure(reason) {
+    var message=reason&&reason.message?reason.message:String(reason||"");
+    return /unable to find a compatible GPU|no (?:usable|compatible) WebGPU adapter|WebGPU is unavailable|browser does not expose WebGPU/i.test(message);
+  }
+  function localAIGPUFailure(reason) {
+    return localAIRecoverableGPUFailure(reason)||localAIUnavailableGPUFailure(reason);
+  }
+  function localAIFriendlyGPUFailure(reason) {
+    var detail=reason&&reason.message?reason.message:String(reason||"WebGPU device failure");
+    if(localAIUnavailableGPUFailure(reason))return new Error("No usable WebGPU adapter is available in this browser session. LibeRation remains fully usable with local AI switched off. If this followed a graphics-driver reset, fully exit every browser window and reopen the browser; if it persists, enable browser hardware acceleration and update the graphics driver. Technical detail: "+detail);
+    return new Error("The browser's WebGPU device was reset and LibeRation could not recover it automatically. Close other GPU-heavy applications or tabs and try again; if it repeats, reload LibeRation or restart the browser. Technical detail: "+detail);
+  }
+  function localAICancelPurpose(purpose,reason) {
+    var ids=Object.keys(localAI.pending).filter(function(id){return localAI.pending[id].purpose===purpose;});
+    if(!ids.length)return;
+    try{if(localAI.worker)localAI.worker.postMessage({type:"interrupt"});}catch(error){}
+    localAI.cooldownUntil=Date.now()+600;
+    ids.forEach(function(id){var pending=localAI.pending[id];delete localAI.pending[id];pending.reject(reason instanceof Error?reason:new Error("Local AI generation was stopped."));});
+    localAISetStatus({stage:"ready",text:(purpose==="report"?"Report":"Help")+" model ready - local inference only",purpose:purpose});
+  }
+  function localAIShutdown(reason) {
+    var worker=localAI.worker;
+    if(worker){
+      try{worker.postMessage({type:"dispose"});}catch(error){}
+      setTimeout(function(){try{worker.terminate();}catch(error){}},750);
+    }
+    localAIRejectPending(reason instanceof Error?reason:new Error("Local AI was stopped."));
+    localAI.worker=null;localAI.pending={};localAI.model="";localAI.contextWindow=0;localAI.purpose="";localAI.cooldownUntil=Date.now()+800;localAISetStatus({stage:"idle",text:"Model not loaded",progress:0,locked:false,model:"",purpose:"",budget:null});
+  }
+  function localAIFailPending(id,reason) {
+    var pending=localAI.pending[id];if(!pending)return;
+    delete localAI.pending[id];
+    var gpuFailure=localAIGPUFailure(reason),failure=gpuFailure?localAIFriendlyGPUFailure(reason):(reason instanceof Error?reason:new Error(String(reason||"Local AI failed")));
+    if(gpuFailure&&localAI.worker){try{localAI.worker.terminate();}catch(error){}localAI.worker=null;localAI.model="";localAI.contextWindow=0;localAI.purpose="";}
+    localAISetStatus({stage:"error",text:failure.message,progress:0});pending.reject(failure);
+  }
+  function localAIPostPending(id,worker) {
+    var pending=localAI.pending[id];if(!pending)return;
+    var send=function(){
+      if(!localAI.pending[id]||localAI.worker!==worker)return;
+      try{localAISetStatus({stage:"generating",text:"Generating locally",purpose:pending.purpose});worker.postMessage(pending.request);}
+      catch(error){localAIFailPending(id,error);}
+    };
+    var delay=Math.max(0,localAI.cooldownUntil-Date.now());
+    if(delay)setTimeout(send,delay);else send();
+  }
+  function localAIRetryPending(id,reason,worker) {
+    var pending=localAI.pending[id];
+    if(!pending||pending.emitted||pending.retries>=2||!localAIRecoverableGPUFailure(reason))return false;
+    var current=Number(pending.request.context_window_size)||4096,next=current;
+    if(current>12288)next=12288;else if(current>8192)next=8192;else if(current>6144)next=6144;else if(current>4096)next=4096;
+    pending.retries+=1;
+    if(next<current){
+      var rebudgeted=localAIBudgetMessages(pending.originalMessages,pending.request.model,pending.requestedMaxTokens,next);
+      pending.request.messages=rebudgeted.messages;pending.request.max_tokens=rebudgeted.max_tokens;pending.request.context_window_size=next;pending.request.input_char_budget=rebudgeted.input_char_budget;
+      pending.budget=rebudgeted;
+    }
+    localAISetStatus({stage:"recovering",text:"Restarting the local WebGPU session"+(next<current?" with a smaller "+Math.round(next/1024)+"K context":" after a graphics-device reset"),progress:0,purpose:pending.purpose,budget:pending.budget});
+    try{if(worker)worker.terminate();}catch(error){}
+    if(localAI.worker===worker){localAI.worker=null;localAI.model="";localAI.contextWindow=0;localAI.purpose="";}
+    setTimeout(function(){
+      if(!localAI.pending[id])return;
+      try{var replacement=localAIWorker(pending.ai,pending.request.model,pending.purpose,pending.request.context_window_size);localAIPostPending(id,replacement);}
+      catch(error){localAIFailPending(id,error);}
+    },800);
+    return true;
+  }
+  function localAIWorker(ai,model,purpose,contextWindow) {
+    contextWindow=Math.max(1024,Number(contextWindow)||4096);
+    if (localAI.worker && localAI.workerUrl===ai.worker_url && localAI.model===model && localAI.contextWindow===contextWindow) {
       localAI.purpose=purpose;
       if(localAI.status.stage==="ready")localAISetStatus({text:(purpose==="report"?"Report":"Help")+" model ready - local inference only",purpose:purpose});
       return localAI.worker;
@@ -52,23 +178,31 @@
     if (localAI.worker && Object.keys(localAI.pending).length) throw new Error("Wait for the current local AI response before switching models.");
     if (localAI.worker) localAIShutdown();
     if (!ai.worker_url) throw new Error("The LibeRation AI worker is unavailable in this installation.");
-    var worker=new Worker(ai.worker_url,{type:"module"});localAI.worker=worker;localAI.workerUrl=ai.worker_url;localAI.model=model;localAI.purpose=purpose;
-    localAISetStatus({stage:"starting",text:"Starting "+(purpose==="report"?"Report":"Help")+" model",progress:0,locked:false,model:model,purpose:purpose});
-    worker.onmessage=function(event){var message=event.data||{},pending=message.id&&localAI.pending[message.id];
+    var worker=new Worker(ai.worker_url,{type:"module"});localAI.worker=worker;localAI.workerUrl=ai.worker_url;localAI.model=model;localAI.contextWindow=contextWindow;localAI.purpose=purpose;
+    localAISetStatus({stage:"starting",text:"Starting "+(purpose==="report"?"Report":"Help")+" model with "+(contextWindow/1024).toFixed(contextWindow%1024?1:0)+"K context",progress:0,locked:false,model:model,purpose:purpose});
+    worker.onmessage=function(event){if(localAI.worker!==worker)return;var message=event.data||{},pending=message.id&&localAI.pending[message.id];
       if(message.type==="progress")localAISetStatus({stage:"loading",text:value(message.text,"Downloading model"),progress:Number(message.progress)||0});
       else if(message.type==="status")localAISetStatus({stage:value(message.stage,"loading"),text:value(message.text,"Preparing model")});
       else if(message.type==="network_locked")localAISetStatus({locked:true});
+      else if(message.type==="context_fallback"){
+        localAI.contextWindow=Number(message.context_window_size)||localAI.contextWindow;
+        if(pending){pending.request.context_window_size=localAI.contextWindow;pending.budget.context_window_size=localAI.contextWindow;pending.budget.compacted=true;}
+        localAISetStatus({stage:"loading",text:"Using "+(localAI.contextWindow/1024).toFixed(localAI.contextWindow%1024?1:0)+"K context after a memory fallback",budget:pending&&pending.budget});
+      }
       else if(message.type==="ready")localAISetStatus({stage:"ready",text:(localAI.purpose==="report"?"Report":"Help")+" model ready - local inference only",progress:1,locked:!!message.network_locked,model:localAI.model,purpose:localAI.purpose});
-      else if(message.type==="token"&&pending){pending.onToken(message.token||"");}
-      else if(message.type==="complete"&&pending){delete localAI.pending[message.id];pending.resolve(message.text||"");}
-      else if(message.type==="error"&&pending){delete localAI.pending[message.id];localAISetStatus({stage:"error",text:message.message||"Local AI failed"});pending.reject(new Error(message.message||"Local AI failed"));}
+      else if(message.type==="token"&&pending){pending.emitted=true;pending.onToken(message.token||"");}
+      else if(message.type==="complete"&&pending){delete localAI.pending[message.id];localAISetStatus({stage:"ready",text:(pending.purpose==="report"?"Report":"Help")+" model ready - local inference only",progress:1,purpose:pending.purpose});pending.resolve(message.text||"");}
+      else if(message.type==="error"&&pending){var reason=new Error(message.message||"Local AI failed");if(!localAIRetryPending(message.id,reason,worker))localAIFailPending(message.id,reason);}
     };
     function workerFailure(event){
       if(localAI.worker!==worker)return;
       var reason=new Error(event&&event.message?event.message:"The local AI worker stopped unexpectedly.");
+      var pendingId=Object.keys(localAI.pending)[0];
+      if(pendingId&&localAIRetryPending(pendingId,reason,worker))return;
       try{worker.terminate();}catch(error){}
-      localAI.worker=null;localAI.model="";localAI.purpose="";localAIRejectPending(reason);
-      localAISetStatus({stage:"error",text:reason.message,progress:0,locked:false,model:"",purpose:""});
+      var failure=localAIGPUFailure(reason)?localAIFriendlyGPUFailure(reason):reason;
+      localAI.worker=null;localAI.model="";localAI.contextWindow=0;localAI.purpose="";localAIRejectPending(failure);
+      localAISetStatus({stage:"error",text:failure.message,progress:0,locked:false,model:"",purpose:""});
     }
     worker.onerror=workerFailure;
     worker.onmessageerror=workerFailure;
@@ -81,10 +215,14 @@
       if(!model)model=purpose==="report"?ai.report_model:ai.help_model;
       if(model==="same_as_help"||!model)model=ai.help_model||ai.model;
       if(!model){reject(new Error("No local AI model is configured for this function."));return;}
-      var worker;try{worker=localAIWorker(ai,model,purpose);}catch(error){reject(error);return;}
-      var id="ai-"+Date.now()+"-"+Math.random().toString(16).slice(2);localAI.pending[id]={resolve:resolve,reject:reject,onToken:onToken||function(){},purpose:purpose};
-      try{worker.postMessage({type:"generate",id:id,model:model,messages:messages,temperature:options&&options.temperature,top_p:options&&options.top_p,max_tokens:options&&options.max_tokens});}
-      catch(error){delete localAI.pending[id];localAIShutdown(error);reject(error);}
+      var contextWindow=localAIContextWindow(ai,model,purpose,options&&options.context_window_size);
+      if(localAI.worker&&localAI.model===model&&localAI.contextWindow&&localAI.contextWindow<contextWindow)contextWindow=localAI.contextWindow;
+      var budgeted=localAIBudgetMessages(messages,model,options&&options.max_tokens,contextWindow);
+      var worker;try{worker=localAIWorker(ai,model,purpose,contextWindow);}catch(error){reject(error);return;}
+      var id="ai-"+Date.now()+"-"+Math.random().toString(16).slice(2),request={type:"generate",id:id,model:model,messages:budgeted.messages,temperature:options&&options.temperature,top_p:options&&options.top_p,max_tokens:budgeted.max_tokens,context_window_size:budgeted.context_window_size,input_char_budget:budgeted.input_char_budget};
+      localAI.pending[id]={resolve:resolve,reject:reject,onToken:onToken||function(){},purpose:purpose,request:request,ai:ai,retries:0,emitted:false,originalMessages:messages,requestedMaxTokens:options&&options.max_tokens,budget:budgeted};
+      localAISetStatus({budget:budgeted});
+      localAIPostPending(id,worker);
     });
   }
   function useLocalAIStatus(){
@@ -98,7 +236,7 @@
   }
   function highlightCode(source) {
     var text = String(source || ""), output = "", cursor = 0;
-    var pattern = /(#.*$|\/\/.*$|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|\b(?:THETA|ETA|OMEGA|SIGMA|ERR|EPS)(?:_\d+|\s*\(\s*\d+(?:\s*,\s*\d+)?\s*\))|\$[A-Z][A-Z0-9_]*|\b(?:if|else|for|while|return|TRUE|FALSE|NA|NULL)\b|\b\d+(?:\.\d+)?(?:[eE][+-]?\d+)?\b|\b(?:exp|log|sqrt|sin|cos|tan|tanh|abs|expm1|log1p|ifelse|min|max|pow)\b(?=\s*\()|\b[A-Za-z_][A-Za-z0-9_.]*\b(?=\s*=)|\b(?:A|DADT)\s*\(\s*\d+\s*\)|\b(?:S\d+|F|Y|IPRED|PRED|TIME|T|AMT|RATE|CMT|EVID|MDV|II|SS|DV|DVID|LLOQ|BLQ|CENS|MIXNUM)\b)/gm;
+    var pattern = /(#.*$|\/\/.*$|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|\b(?:THETA|ETA|OMEGA|SIGMA|ERR|EPS)(?:_\d+|\s*\(\s*\d+(?:\s*,\s*\d+)?\s*\))|\$[A-Z][A-Z0-9_]*|\b(?:if|else|for|while|return|TRUE|FALSE|NA|NULL)\b|\b\d+(?:\.\d+)?(?:[eE][+-]?\d+)?\b|\b(?:exp|log|sqrt|sin|cos|tan|tanh|abs|expm1|log1p|ifelse|min|max|pow)\b(?=\s*\()|\b[A-Za-z_][A-Za-z0-9_.]*\b(?=\s*=)|\b(?:A|DADT)\s*\(\s*\d+\s*\)|\b(?:S\d+|F|Y|LIK|LOGLIK|IPRED|PRED|TIME|T|AMT|RATE|CMT|EVID|MDV|II|SS|DV|PREV_DV|PREV_TIME|DT|FIRST|DVID|LLOQ|BLQ|CENS|MIXNUM)\b)/gm;
     text.replace(pattern, function (token, match, offset) {
       output += escapeCode(text.slice(cursor, offset));
       var kind = /^#|^\/\//.test(token) ? "comment" :
@@ -380,7 +518,7 @@
 
   function ModelEditor(props) {
     var model = props.model || {};
-    var sourceState = useSynced({ pred: value(model.pred, ""), des: value(model.des, ""), error: value(model.error, "Y=F") }, [model.pred, model.des, model.error]);
+    var sourceState = useSynced({ pred: value(model.pred, ""), des: value(model.des, ""), alg: value(model.alg, ""), error: value(model.error, "Y=F") }, [model.pred, model.des, model.alg, model.error]);
     var source = sourceState[0], setSource = sourceState[1];
     var parameterState = useSynced({ theta: cloneRows(model.theta), omega: cloneRows(model.omega), sigma: cloneRows(model.sigma) }, [model.theta, model.omega, model.sigma]);
     var parameters = parameterState[0], setParameters = parameterState[1];
@@ -393,7 +531,7 @@
     var inputState = useSynced(list(model.input), [model.input]), selectedInput = inputState[0], setSelectedInput = inputState[1];
     var outputState = useSynced(list(model.output), [model.output]), selectedOutput = outputState[0], setSelectedOutput = outputState[1];
     var columnModal = React.useState(false), transHelp = React.useState(false);
-    var dirty = source.pred !== value(model.pred, "") || source.des !== value(model.des, "") || source.error !== value(model.error, "Y=F") || advanState[0] !== String(value(model.advan, 4)) || transState[0] !== String(value(model.trans, 2)) || problemState[0] !== value(model.name, "Untitled model") || JSON.stringify(parameters) !== JSON.stringify({ theta: cloneRows(model.theta), omega: cloneRows(model.omega), sigma: cloneRows(model.sigma) }) || JSON.stringify(priors) !== JSON.stringify(cloneRows(model.priors)) || omegaStructure !== value(model.omega_structure,"diagonal") || JSON.stringify(selectedInput) !== JSON.stringify(list(model.input)) || JSON.stringify(selectedOutput) !== JSON.stringify(list(model.output));
+    var dirty = source.pred !== value(model.pred, "") || source.des !== value(model.des, "") || source.alg !== value(model.alg, "") || source.error !== value(model.error, "Y=F") || advanState[0] !== String(value(model.advan, 4)) || transState[0] !== String(value(model.trans, 2)) || problemState[0] !== value(model.name, "Untitled model") || JSON.stringify(parameters) !== JSON.stringify({ theta: cloneRows(model.theta), omega: cloneRows(model.omega), sigma: cloneRows(model.sigma) }) || JSON.stringify(priors) !== JSON.stringify(cloneRows(model.priors)) || omegaStructure !== value(model.omega_structure,"diagonal") || JSON.stringify(selectedInput) !== JSON.stringify(list(model.input)) || JSON.stringify(selectedOutput) !== JSON.stringify(list(model.output));
     function updateParameter(kind, index, field, nextValue) {
       var next = Object.assign({}, parameters); next[kind] = cloneRows(parameters[kind]); next[kind][index][field] = nextValue; setParameters(next);
     }
@@ -411,7 +549,7 @@
     var priorParameterNames = parameters.theta.map(function(_,i){return "THETA"+(i+1);}).concat(parameters.sigma.map(function(_,i){return "SIGMA"+(i+1);})).concat(parameters.omega.map(function(_,i){return "OMEGA"+(i+1);}));
     function draftPayload(mode) {
       return {
-        pred: source.pred, des: source.des, error: source.error, advan: Number(advanState[0]), trans: Number(transState[0]),
+        pred: source.pred, des: source.des, alg: source.alg, error: source.error, advan: Number(advanState[0]), trans: Number(transState[0]),
         n_state: Number(nState[0]), problem: problemState[0], theta: parameters.theta, omega: parameters.omega, sigma: parameters.sigma,
         omega_structure: omegaStructure, priors: priors, input: selectedInput, output: selectedOutput, save_mode: mode
       };
@@ -421,6 +559,30 @@
     }
     return e("div", { className: "lw-code-workspace" },
       dirty ? e("div", { className: "lw-dirty-banner" }, "Unsaved editor changes — apply changes before saving or running the model.") : null,
+      model.experimental ? e("div",{className:"lw-info-banner lw-outcome-banner"},
+        e("strong",null,"Experimental engine"+(model.experimental.strict?" · strict":"")),
+        e("span",null,list(model.experimental.features).join(" · ")),
+        e("small",null,value(model.experimental.label,"This model records experimental solver provenance with every run."))) : null,
+      model.dde ? e("div",{className:"lw-info-banner lw-outcome-banner"},e("strong",null,"Delay differential equations"),e("span",null,value(model.dde.lag_count,0)+" lag(s) · step "+value(model.dde.step,"-")+" · "+list(model.dde.delays).join(", ")),e("small",null,"Fixed-step method-of-steps with differentiable linear history interpolation.")) : null,
+      model.dae ? e("div",{className:"lw-info-banner lw-outcome-banner"},e("strong",null,"Index-1 DAE"+(model.dae.sparse?" · block sparse":"")),e("span",null,list(model.dae.variables).join(" · ")),e("small",null,"Algebraic residuals are edited in $ALG and solved inside C++/CppAD.")) : null,
+      model.qsp ? e("div",{className:"lw-info-banner lw-outcome-banner"},e("strong",null,"QSP reaction network"),e("span",null,list(model.qsp.species).join(" · ")),e("small",null,value(model.qsp.reactions,0)+" stoichiometric reaction(s) compiled into $DES.")) : null,
+      list(model.components).length ? e("div",{className:"lw-info-banner lw-outcome-banner"},e("strong",null,"Offline hybrid components"),e("span",null,list(model.components).map(function(item){return item.name+" ["+item.type+" / "+item.scope+"]";}).join(" · ")),e("small",null,"Immutable hashed payloads run within the differentiable C++ objective.")) : null,
+      list(model.outcomes).length ? e("div",{className:"lw-info-banner lw-outcome-banner"},
+        e("strong",null,"First-class outcomes"),
+        e("span",null,list(model.outcomes).map(function(item){return item.name+" ["+item.family.replace(/_/g," ")+"]"+(item.dvid===null||item.dvid===undefined?"":" · DVID "+item.dvid);}).join("; ")),
+        e("small",null,"The editable $ERROR likelihood, stochastic outcome generator and family-specific diagnostics share this declaration.")) : null,
+      model.hmm ? e("div",{className:"lw-info-banner lw-outcome-banner"},
+        e("strong",null,value(model.hmm.model_type,"Hidden Markov")+" model"),
+        e("span",null,list(model.hmm.states).join(" · ")),
+        e("small",null,"Filtering, retrospective smoothing and Viterbi decoding use the compiled sequence likelihood.")) : null,
+      model.kalman ? e("div",{className:"lw-info-banner lw-outcome-banner"},
+        e("strong",null,String(value(model.kalman.filter,"linear")).toUpperCase()+" "+value(model.kalman.model_type,"state-space")+" model"),
+        e("span",null,list(model.kalman.states).join(" · ")+" · "+value(model.kalman.dynamics,"discrete")+" dynamics"+(list(model.kalman.regimes).length?" · regimes: "+list(model.kalman.regimes).join(", "):"")),
+        e("small",null,"State likelihood, filtering, smoothing and stochastic simulation run in the C++ engine.")) : null,
+      model.random_effects ? e("div",{className:"lw-info-banner lw-outcome-banner"},
+        e("strong",null,"Generalized random-effect design"),
+        e("span",null,list(model.random_effects.blocks).map(function(block){return block.name+" ["+block.column+" → ETA("+list(block.etas).join(",")+")]";}).join(" · ")),
+        e("small",null,"Independent objective clusters: "+value(model.random_effects.cluster,"automatic connected components"))) : null,
       e("div", { className: "lw-control-row" },
         e(Field, { label: "$PROBLEM", className: "lw-grow" }, e("input", { value: problemState[0], onChange: function (event) { problemState[1](event.target.value); } })),
         e(Field, { label: "ADVAN" }, e("select", { value: advanState[0], onChange: function (event) { advanState[1](event.target.value); } }, [1,2,3,4,6,11,12,13].map(function (x) { return e("option", { key: x, value: x }, x); }))),
@@ -429,9 +591,10 @@
         Number(advanState[0]) === 6 || Number(advanState[0]) === 13 ? null : e(Button, { className: "lw-button-link lw-help-button", onClick: function () { transHelp[1](true); } }, "?"),
         e(Field, { label: "Dataset" }, e("select", { value: props.dataset.loaded ? "current" : "" }, e("option", { value: props.dataset.loaded ? "current" : "" }, props.dataset.loaded ? value(props.dataset.name, "Current dataset") : "No dataset"))),
         e(Button, { className: "lw-button-quiet lw-columns-button", onClick: function () { columnModal[1](true); } }, "Columns...")),
-      e("div", { className: "lw-editor-grid " + ((Number(advanState[0]) === 6 || Number(advanState[0]) === 13) ? "lw-editor-grid-three" : "") },
+      e("div", { className: "lw-editor-grid " + (model.dae ? "lw-editor-grid-four" : ((Number(advanState[0]) === 6 || Number(advanState[0]) === 13) ? "lw-editor-grid-three" : "")) },
         e("div", { className: "lw-editor-box" }, e("h5", null, "$PK / $PRED"), e(CodeEditor,{label:"PK or PRED model code",value:source.pred,onValue:function(next){setSource(Object.assign({},source,{pred:next}));}})),
         Number(advanState[0]) === 6 || Number(advanState[0]) === 13 ? e("div", { className: "lw-editor-box" }, e("h5", null, "$DES"), e(CodeEditor,{label:"DES differential equation code",value:source.des,onValue:function(next){setSource(Object.assign({},source,{des:next}));}})) : null,
+        model.dae ? e("div", { className: "lw-editor-box" }, e("h5", null, "$ALG"), e(CodeEditor,{label:"Algebraic residual equation code",value:source.alg,onValue:function(next){setSource(Object.assign({},source,{alg:next}));}})) : null,
         e("div", { className: "lw-editor-box" }, e("h5", null, "$ERROR"), e(CodeEditor,{label:"ERROR model code",value:source.error,onValue:function(next){setSource(Object.assign({},source,{error:next}));}}))),
       e("div", { className: "lw-parameter-grid" },
         e(ParameterGrid, { title: "THETA", bounds:true, prefix: "THETA", indexName: "THETA", rows: parameters.theta, onChange: function (i,f,v) { updateParameter("theta",i,f,v); } }),
@@ -494,12 +657,24 @@
         e("details", { className:"lw-vpc-table" }, e("summary", null, "Overall simulation interval table"), e(SimpleTable, { rows: result.simulated })));
     }
     if (tab === "vpc_categorical") {
-      var categoricalRows=list(result.simulated).map(function(row){return {TIME:row.TIME,Y:row.median,LOWER:row.lower,UPPER:row.upper};});
-      return e("div",{className:"lw-diagnostic-grid"},e(ScatterPlot,{rows:categoricalRows,x:"TIME",y:"Y",lines:true,intervals:true,intervalShade:0.25,overlayRows:result.observed,overlayX:"TIME",overlayY:"PROPORTION",overlayColor:"#17202a",title:"Categorical VPC: observed proportion",xLabel:"Time",yLabel:"Proportion"}),e(SimpleTable,{rows:result.simulated}));
+      var categoricalRows=list(result.simulated).map(function(row){return {TIME:row.TIME,Y:row.median,LOWER:row.lower,UPPER:row.upper,CATEGORY:row.CATEGORY};});
+      return e("div",{className:"lw-diagnostic-grid"},e(ScatterPlot,{rows:categoricalRows,x:"TIME",y:"Y",group:"CATEGORY",lineGroup:"CATEGORY",lines:true,intervals:true,intervalShade:0.18,overlayRows:result.observed,overlayX:"TIME",overlayY:"PROPORTION",overlayColor:"#17202a",title:"Categorical VPC: observed proportions",xLabel:"Time",yLabel:"Proportion"}),e(SimpleTable,{rows:result.simulated}));
+    }
+    if (tab === "vpc_count") {
+      var countRows=list(result.simulated).map(function(row){return {TIME:row.TIME,Y:row.MEAN_median,LOWER:row.MEAN_lower,UPPER:row.MEAN_upper};});
+      return e("div",{className:"lw-diagnostic-grid"},e(ScatterPlot,{rows:countRows,x:"TIME",y:"Y",lines:true,intervals:true,intervalShade:0.25,overlayRows:result.observed,overlayX:"TIME",overlayY:"MEAN",overlayLines:true,overlayColor:"#17202a",title:"Count VPC: mean response",xLabel:"Time",yLabel:"Mean count"}),e(SimpleTable,{rows:result.simulated}));
     }
     if (tab === "vpc_tte") {
       var tteRows=list(result.simulated).map(function(row){return {TIME:row.TIME,Y:row.median,LOWER:row.lower,UPPER:row.upper};});
       return e("div",{className:"lw-diagnostic-grid"},e(ScatterPlot,{rows:tteRows,x:"TIME",y:"Y",lines:true,intervalShade:0.28,overlayRows:result.observed,overlayX:"TIME",overlayY:"SURVIVAL",overlayLines:true,overlayColor:"#17202a",hidePoints:true,title:"Time-to-event VPC",xLabel:"Time",yLabel:"Event-free survival"}),e(SimpleTable,{rows:result.simulated}));
+    }
+    if (tab === "vpc_competing") {
+      var competingRows=list(result.simulated).map(function(row){return {TIME:row.TIME,Y:row.median,LOWER:row.lower,UPPER:row.upper,CAUSE:row.CAUSE};});
+      return e("div",{className:"lw-diagnostic-grid"},e(ScatterPlot,{rows:competingRows,x:"TIME",y:"Y",group:"CAUSE",lineGroup:"CAUSE",lines:true,intervalShade:0.18,overlayRows:result.observed,overlayX:"TIME",overlayY:"CIF",overlayLines:true,overlayColor:"#17202a",hidePoints:true,title:"Competing-risk VPC",xLabel:"Time",yLabel:"Cumulative incidence"}),e(SimpleTable,{rows:result.simulated}));
+    }
+    if (tab === "vpc_recurrent") {
+      var recurrentRows=list(result.simulated).map(function(row){return {TIME:row.TIME,Y:row.median,LOWER:row.lower,UPPER:row.upper};});
+      return e("div",{className:"lw-diagnostic-grid"},e(ScatterPlot,{rows:recurrentRows,x:"TIME",y:"Y",lines:true,intervalShade:0.28,overlayRows:result.observed,overlayX:"TIME",overlayY:"MEAN_CUMULATIVE",overlayLines:true,overlayColor:"#17202a",hidePoints:true,title:"Recurrent-event VPC",xLabel:"Time",yLabel:"Mean cumulative events"}),e(SimpleTable,{rows:result.simulated}));
     }
     if (tab === "bootstrap") return e("div",{className:"lw-diagnostic-run"},e("p",null,value(result.successful,0)+" of "+value(result.n,0)+" bootstrap fits completed."),e(SimpleTable,{rows:result.summary}));
     if (tab === "profile") return e("div",{className:"lw-diagnostic-run"},e(SimpleTable,{rows:result.intervals}),e(ScatterPlot,{rows:result.grid,x:"value",y:"delta",group:"parameter",lines:true,title:"Profile likelihood",xLabel:"Fixed parameter value",yLabel:"Objective difference"}));
@@ -513,6 +688,93 @@
     }
     return signature(previous)===signature(next);
   });
+
+  function HmmPane(props) {
+    var hmm=props.hmm||{},rows=list(hmm.rows),states=list(hmm.states),summaries=list(hmm.sequence_summary);
+    var decoderState=React.useState("smoothed"),subjectState=React.useState(""),sequenceState=React.useState(""),hiddenState=React.useState("");
+    if (!hmm.loaded) return e(Empty,{title:"Loading HMM results",detail:"Filtering, retrospective smoothing and Viterbi decoding are calculated once for the selected fitted run."});
+    if (!rows.length) return e(Empty,{title:"No HMM observations",detail:"The fitted run did not contain decodable observation records."});
+    function uniqueFor(source,key){var seen={},output=[];source.forEach(function(row){var item=String(value(row[key],""));if(item&&!seen[item]){seen[item]=true;output.push(item);}});return output;}
+    var subjects=uniqueFor(rows,"SUBJECT"),selectedSubject=subjects.indexOf(subjectState[0])>=0?subjectState[0]:subjects[0];
+    var subjectRows=rows.filter(function(row){return String(value(row.SUBJECT,""))===selectedSubject;});
+    var sequences=uniqueFor(subjectRows,"SEQUENCE"),selectedSequence=sequences.indexOf(sequenceState[0])>=0?sequenceState[0]:sequences[0];
+    var selectedRows=subjectRows.filter(function(row){return String(value(row.SEQUENCE,""))===selectedSequence;});
+    var stateKeys=states.map(function(item){return String(item.key);}),selectedStateKey=stateKeys.indexOf(hiddenState[0])>=0?hiddenState[0]:stateKeys[0];
+    var stateInfo=states.filter(function(item){return String(item.key)===selectedStateKey;})[0]||states[0]||{label:"state",key:"",index:1};
+    var decoder=decoderState[0],probabilityRows=[],pathRows=[];
+    selectedRows.forEach(function(row){
+      if(decoder==="combined"){
+        probabilityRows.push({TIME:row.TIME,VALUE:row["HMM_FILTER_PROB_"+stateInfo.key],METHOD:"Filtered"});
+        probabilityRows.push({TIME:row.TIME,VALUE:row["HMM_SMOOTH_PROB_"+stateInfo.key],METHOD:"Smoothed"});
+        pathRows.push({TIME:row.TIME,VALUE:row.HMM_FILTER_STATE_INDEX,METHOD:"Filtered"});
+        pathRows.push({TIME:row.TIME,VALUE:row.HMM_SMOOTH_STATE_INDEX,METHOD:"Smoothed"});
+        pathRows.push({TIME:row.TIME,VALUE:row.HMM_VITERBI_STATE_INDEX,METHOD:"Viterbi"});
+      }else{
+        var prefix=decoder==="filtered"?"FILTER":decoder==="smoothed"?"SMOOTH":"VITERBI";
+        if(decoder!=="viterbi")probabilityRows.push({TIME:row.TIME,VALUE:row["HMM_"+prefix+"_PROB_"+stateInfo.key],METHOD:decoder.charAt(0).toUpperCase()+decoder.slice(1)});
+        pathRows.push({TIME:row.TIME,VALUE:row["HMM_"+prefix+"_STATE_INDEX"],METHOD:decoder.charAt(0).toUpperCase()+decoder.slice(1)});
+      }
+    });
+    var summaryRows=summaries.filter(function(row){return String(value(row.SUBJECT,""))===selectedSubject&&String(value(row.SEQUENCE,""))===selectedSequence;});
+    var probabilityColumns=["SUBJECT","SEQUENCE","TIME","HMM_FILTER_STATE","HMM_SMOOTH_STATE","HMM_VITERBI_STATE","HMM_ROW_NLL"];
+    if(decoder==="filtered"||decoder==="combined")probabilityColumns.push("HMM_FILTER_PROB_"+stateInfo.key);
+    if(decoder==="smoothed"||decoder==="combined")probabilityColumns.push("HMM_SMOOTH_PROB_"+stateInfo.key);
+    return e("div",{className:"lw-hmm-view"},
+      e("div",{className:"lw-hmm-controls"},
+        e(Field,{label:"Decoder"},e("select",{value:decoder,onChange:function(event){decoderState[1](event.target.value);}},
+          e("option",{value:"filtered"},"Filtered"),e("option",{value:"smoothed"},"Retrospective smoothed"),e("option",{value:"viterbi"},"Viterbi path"),e("option",{value:"combined"},"Combined"))),
+        e(Field,{label:"Subject"},e("select",{value:selectedSubject,onChange:function(event){subjectState[1](event.target.value);sequenceState[1]("");}},subjects.map(function(item){return e("option",{key:item,value:item},item);}))),
+        sequences.length>1?e(Field,{label:"Sequence / DVID"},e("select",{value:selectedSequence,onChange:function(event){sequenceState[1](event.target.value);}},sequences.map(function(item){return e("option",{key:item,value:item},item);}))) : null,
+        e(Field,{label:"State probability"},e("select",{value:stateInfo.key,onChange:function(event){hiddenState[1](event.target.value);}},states.map(function(item){return e("option",{key:item.key,value:item.key},item.label);})))),
+      e("div",{className:"lw-hmm-meta"},
+        e("span",null,"Log likelihood ",e("strong",null,formatNumber(hmm.log_likelihood))),
+        e("span",null,value(hmm.observations,0)+" observations"),e("span",null,value(hmm.sequences,0)+" sequences"),
+        e("span",null,"ETA: "+value(hmm.eta_type,"individual")),hmm.truncated?e("strong",{className:"lw-warning-text"},"Display limited to the first 50,000 observations") : null),
+      e("div",{className:"lw-hmm-state-key"},states.map(function(item){return e("span",{key:item.key},item.index+" = "+item.label);})),
+      e("div",{className:"lw-diagnostic-grid lw-hmm-grid"},
+        decoder==="viterbi"?e(Empty,{title:"Viterbi has no marginal state probability",detail:"Select Filtered, Retrospective smoothed, or Combined to inspect uncertainty for a state."}):
+          e(ScatterPlot,{rows:probabilityRows,x:"TIME",y:"VALUE",group:"METHOD",lines:true,yRange:[0,1],title:(decoder==="combined"?"Filtered and smoothed probability of ":"State probability: ")+stateInfo.label,xLabel:"Time",yLabel:"Probability"}),
+        e(ScatterPlot,{rows:pathRows,x:"TIME",y:"VALUE",group:"METHOD",lines:true,yRange:[0.5,Math.max(1.5,states.length+0.5)],title:decoder==="viterbi"?"Most probable Viterbi path":"Decoded state over time",xLabel:"Time",yLabel:"State index"})),
+      e("section",{className:"lw-hmm-summary"},e("h4",null,"Sequence likelihood and Viterbi path evidence"),e(SimpleTable,{rows:summaryRows})),
+      e("details",{className:"lw-hmm-table"},e("summary",null,"Observation-level decoded values"),e(SimpleTable,{rows:selectedRows.slice(0,500),columns:probabilityColumns}),selectedRows.length>500?e("p",{className:"lw-muted"},"Showing the first 500 rows for this sequence."):null));
+  }
+
+  function KalmanPane(props) {
+    var kalman=props.kalman||{},rows=list(kalman.rows),states=list(kalman.states);
+    var estimateState=React.useState("combined"),subjectState=React.useState(""),sequenceState=React.useState(""),latentState=React.useState("");
+    if (!kalman.loaded) return e(Empty,{title:"Loading state estimates",detail:"Kalman filtering and retrospective smoothing are calculated once for the selected fitted run."});
+    if (!rows.length) return e(Empty,{title:"No state-space observations",detail:"The fitted run did not contain filterable observation records."});
+    function uniqueFor(source,key){var seen={},output=[];source.forEach(function(row){var item=String(value(row[key],""));if(item&&!seen[item]){seen[item]=true;output.push(item);}});return output;}
+    var subjects=uniqueFor(rows,"SUBJECT"),selectedSubject=subjects.indexOf(subjectState[0])>=0?subjectState[0]:subjects[0];
+    var subjectRows=rows.filter(function(row){return String(value(row.SUBJECT,""))===selectedSubject;});
+    var sequences=uniqueFor(subjectRows,"SEQUENCE"),selectedSequence=sequences.indexOf(sequenceState[0])>=0?sequenceState[0]:sequences[0];
+    var selectedRows=subjectRows.filter(function(row){return String(value(row.SEQUENCE,""))===selectedSequence;});
+    var stateKeys=states.map(function(item){return String(item.key);}),selectedStateKey=stateKeys.indexOf(latentState[0])>=0?latentState[0]:stateKeys[0];
+    var stateInfo=states.filter(function(item){return String(item.key)===selectedStateKey;})[0]||states[0]||{label:"state",key:"",index:1};
+    var estimate=estimateState[0],stateRows=[];
+    selectedRows.forEach(function(row){
+      function add(method,prefix,sdPrefix){
+        var mean=Number(row[prefix+stateInfo.key]),sd=Number(row[sdPrefix+stateInfo.key]);
+        if(Number.isFinite(mean))stateRows.push({TIME:row.TIME,Y:mean,LOWER:Number.isFinite(sd)?mean-1.96*sd:null,UPPER:Number.isFinite(sd)?mean+1.96*sd:null,METHOD:method});
+      }
+      if(estimate==="filtered"||estimate==="combined")add("Filtered","KF_FILTER_","KF_FILTER_SD_");
+      if(estimate==="smoothed"||estimate==="combined")add("Smoothed","KF_SMOOTH_","KF_SMOOTH_SD_");
+    });
+    var innovationRows=selectedRows.map(function(row){return {TIME:row.TIME,VALUE:row.KF_STANDARDIZED_INNOVATION,METHOD:"Standardized innovation"};});
+    var tableColumns=["SUBJECT","SEQUENCE","TIME","DV","KF_PRED_"+stateInfo.key,"KF_FILTER_"+stateInfo.key,"KF_FILTER_SD_"+stateInfo.key,"KF_SMOOTH_"+stateInfo.key,"KF_SMOOTH_SD_"+stateInfo.key,"KF_STANDARDIZED_INNOVATION","KF_ROW_NLL"];
+    return e("div",{className:"lw-hmm-view"},
+      e("div",{className:"lw-hmm-controls"},
+        e(Field,{label:"Estimate"},e("select",{value:estimate,onChange:function(event){estimateState[1](event.target.value);}},e("option",{value:"filtered"},"Filtered"),e("option",{value:"smoothed"},"Retrospective smoothed"),e("option",{value:"combined"},"Combined"))),
+        e(Field,{label:"Subject"},e("select",{value:selectedSubject,onChange:function(event){subjectState[1](event.target.value);sequenceState[1]("");}},subjects.map(function(item){return e("option",{key:item,value:item},item);}))),
+        sequences.length>1?e(Field,{label:"Sequence / DVID"},e("select",{value:selectedSequence,onChange:function(event){sequenceState[1](event.target.value);}},sequences.map(function(item){return e("option",{key:item,value:item},item);}))) : null,
+        e(Field,{label:"Latent state"},e("select",{value:stateInfo.key,onChange:function(event){latentState[1](event.target.value);}},states.map(function(item){return e("option",{key:item.key,value:item.key},item.label);})))),
+      e("div",{className:"lw-hmm-meta"},e("span",null,"Log likelihood ",e("strong",null,formatNumber(kalman.log_likelihood))),e("span",null,value(kalman.observations,0)+" observations"),e("span",null,value(kalman.sequences,0)+" sequences"),e("span",null,"Filter: "+String(value(kalman.filter,"linear")).toUpperCase()),e("span",null,"Smoother: "+value(kalman.smoother,"RTS")),e("span",null,"ETA: "+value(kalman.eta_type,"individual")),kalman.truncated?e("strong",{className:"lw-warning-text"},"Display limited to the first 50,000 observations") : null),
+      e("div",{className:"lw-hmm-state-key"},states.map(function(item){return e("span",{key:item.key},item.index+" = "+item.label);})),
+      e("div",{className:"lw-diagnostic-grid lw-hmm-grid"},
+        e(ScatterPlot,{rows:stateRows,x:"TIME",y:"Y",group:"METHOD",lineGroup:"METHOD",lines:true,intervals:true,intervalShade:0.16,title:(estimate==="combined"?"Filtered and smoothed ":estimate.charAt(0).toUpperCase()+estimate.slice(1)+" ")+stateInfo.label,xLabel:"Time",yLabel:"Latent state"}),
+        e(ScatterPlot,{rows:innovationRows,x:"TIME",y:"VALUE",group:"METHOD",lines:false,yRange:[-5,5],title:"Standardized innovations",xLabel:"Time",yLabel:"Innovation / SD"})),
+      e("details",{className:"lw-hmm-table"},e("summary",null,"Observation-level state estimates"),e(SimpleTable,{rows:selectedRows.slice(0,500),columns:tableColumns}),selectedRows.length>500?e("p",{className:"lw-muted"},"Showing the first 500 rows for this sequence."):null));
+  }
 
   function defaultTemplateTrans(advan) { return [3,4,11,12].indexOf(Number(advan)) >= 0 ? "4" : Number(advan) === 6 || Number(advan) === 13 ? "1" : "2"; }
   function TemplateFields(props) {
@@ -552,13 +814,13 @@
     var projectAdvan = React.useState("2"), projectTrans = React.useState("2"), projectNState = React.useState(2), projectLabel = React.useState(""), projectProblem = React.useState("Synthetic demo");
     var comparison = React.useState([]), templateModal = React.useState(false), copyModal = React.useState(false), copyUpdateInits = React.useState(true), deleteModal = React.useState(null), deleteConfirmation = React.useState("");
     var expandedVersions = React.useState({});
-    var templateAdvan = React.useState("4"), templateTrans = React.useState("4"), templateNState = React.useState(2), templateLabel = React.useState(""), templateProblem = React.useState("Template model");
+    var templateAdvan = React.useState("4"), templateTrans = React.useState("4"), templateNState = React.useState(2), templateStructural = React.useState("standard"), templateLabel = React.useState(""), templateProblem = React.useState("Template model");
     var estimationModal = React.useState(false), estimationMethod = React.useState("FOCEI"), estimationLabel = React.useState(""), estimationMaxit = React.useState(200), etaMaxit = React.useState(100), tolerance = React.useState(0.000001), estimationCores = React.useState(1), printEvery = React.useState(0), methodSeed = React.useState(20260713), nImp = React.useState(200), gqOrder = React.useState(5), gqGrid = React.useState("auto"), gqLevel = React.useState(3), gqAdaptive = React.useState(true), gqMaxPoints = React.useState(100000), nIter = React.useState(200), burn = React.useState(60), mcmcSteps = React.useState(2), nBurn = React.useState(500), nSample = React.useState(1000), nThin = React.useState(1), nChains = React.useState(4), targetAcceptance = React.useState(0.8), maxTreeDepth = React.useState(10), nLeapfrog = React.useState(10), npPoints = React.useState(25), npCycles = React.useState(3), npMaxSupport = React.useState(100), npGridStep = React.useState(1);
     var estimationPreStages = React.useState([]);
     var covarianceStep = React.useState(false), covarianceType = React.useState("hessian"), covarianceTolerance = React.useState(0.00000001), covarianceSamples = React.useState(200);
     var simulationModal = React.useState(false), simulationLabel = React.useState("Simulation"), simulationSeed = React.useState(Math.floor(Math.random() * 99999) + 1), simulationCores = React.useState(1);
     var simulationSubjects = React.useState(value(props.dataset.subjects, 10)), simulationReplicates = React.useState(1), simulationDays = React.useState(1), simulationUseDesign = React.useState(false);
-    var diagnosticModal = React.useState(false), diagnosticVpc = React.useState(true), diagnosticNpc = React.useState(false), diagnosticNpde = React.useState(false), diagnosticCategorical = React.useState(false), diagnosticTte = React.useState(false), diagnosticOutcome = React.useState("DV"), diagnosticEvent = React.useState("DV"), diagnosticNsim = React.useState(200), diagnosticSeed = React.useState(20260713), diagnosticPc = React.useState(false), diagnosticStratify = React.useState("");
+    var diagnosticModal = React.useState(false), diagnosticVpc = React.useState(true), diagnosticNpc = React.useState(false), diagnosticNpde = React.useState(false), diagnosticCategorical = React.useState(false), diagnosticCount = React.useState(false), diagnosticTte = React.useState(false), diagnosticCompeting = React.useState(false), diagnosticRecurrent = React.useState(false), diagnosticOutcome = React.useState("DV"), diagnosticEvent = React.useState("DV"), diagnosticDvid = React.useState(""), diagnosticNsim = React.useState(200), diagnosticSeed = React.useState(20260713), diagnosticPc = React.useState(false), diagnosticStratify = React.useState("");
     var uncertaintyModal = React.useState(false), uncertaintyBootstrap = React.useState(true), uncertaintyProfile = React.useState(false), uncertaintyReplicates = React.useState(100), uncertaintyPoints = React.useState(9), uncertaintySpan = React.useState(3), uncertaintyLevel = React.useState(0.95), uncertaintyParameters = React.useState(""), uncertaintyMaxit = React.useState(100);
     var scmModal = React.useState(false), scmCandidates = React.useState("CL,WT,power\nV,WT,power"), scmDirection = React.useState("both"), scmForward = React.useState(0.05), scmBackward = React.useState(0.01), scmMaxSteps = React.useState(20), scmMaxit = React.useState(100), scmLabel = React.useState("SCM model");
     var controlModal = React.useState(false), controlFile = React.useState(null), controlData = React.useState(null), controlNewProject = React.useState(!workspace.current), controlProjectName = React.useState("NONMEM import"), controlLabel = React.useState("NONMEM import"), exportModal = React.useState(false), exportName = React.useState("model.ctl"), exportDataPath = React.useState("data.csv");
@@ -566,20 +828,25 @@
     var libraryInfo=props.library||{},libraryEntries=list(libraryInfo.entries),libraryNeedle=libraryQuery[0].trim().toLowerCase();
     var libraryFiltered=libraryEntries.filter(function(item){return !libraryNeedle||[item.library_id,item.title,item.compound,item.population,item.status,"ADVAN"+value(item.advan,"")].join(" ").toLowerCase().indexOf(libraryNeedle)>=0;});
     var doseMode = React.useState("single"), doseAmount = React.useState(320), doseCmt = React.useState(1), doseN = React.useState(3), doseII = React.useState(12), doseTable = React.useState("0 320"), obsPerDay = React.useState(8), simulationUseFit = React.useState(true);
+    var userLikelihood = value(props.model.likelihood_type, "none") === "likelihood";
+    var outcomeFamilies=list(props.model.outcomes).map(function(item){return item.family;}),outcomeDvids=list(props.model.outcomes).filter(function(item){return item.dvid!==null&&item.dvid!==undefined;});
+    var estimationMethods = ["FO","FOCE","FOCEI","LAPLACE","ITS","GQ","IMP","SAEM","BAYES","HMC","NUTS","NPML","NPAG"].filter(function(method){return !userLikelihood||["FO","FOCE","FOCEI"].indexOf(method)<0;});
+    var sequenceMethods = ["FO","FOCE","FOCEI","LAPLACE","ITS","GQ","IMP","SAEM"].filter(function(method){return !userLikelihood||["FO","FOCE","FOCEI"].indexOf(method)<0;});
     React.useEffect(function(){if(workspace.current_version){var next=Object.assign({},expandedVersions[0]);next[workspace.current_version]=true;expandedVersions[1](next);}},[workspace.current_version]);
+    React.useEffect(function(){if(userLikelihood){if(["FO","FOCE","FOCEI"].indexOf(estimationMethod[0])>=0)estimationMethod[1]("LAPLACE");estimationPreStages[1](function(stages){return stages.filter(function(stage){return ["FO","FOCE","FOCEI"].indexOf(stage.method)<0;});});}},[userLikelihood,estimationMethod[0]]);
     function toggleExpanded(id) { var next=Object.assign({},expandedVersions[0]);next[id]=!next[id];expandedVersions[1](next); }
     function toggleComparison(id, checked) { var next=comparison[0].filter(function(item){return item!==id;});if(checked)next=next.concat([id]).slice(-2);comparison[1](next); }
     function readProjectDataset(event) { var file=event.target.files&&event.target.files[0];if(!file){projectFile[1](null);return;}var reader=new FileReader();reader.onload=function(){projectFile[1]({name:file.name,text:String(reader.result||"")});};reader.readAsText(file); }
     function readControlFile(event) { var file=event.target.files&&event.target.files[0];if(!file){controlFile[1](null);return;}var reader=new FileReader();reader.onload=function(){controlFile[1]({name:file.name,text:String(reader.result||"")});};reader.readAsText(file); }
     function readControlData(event) { var file=event.target.files&&event.target.files[0];if(!file){controlData[1](null);return;}var reader=new FileReader();reader.onload=function(){controlData[1]({name:file.name,text:String(reader.result||"")});};reader.readAsText(file); }
     function submitNewProject() { emit(props,"project_create",{name:projectName[0],description:projectDescription[0],mode:projectMode[0],dataSource:projectDataSource[0],example:projectExample[0],nSubjects:Number(projectSubjects[0]),fileName:projectFile[0]&&projectFile[0].name,text:projectFile[0]&&projectFile[0].text,advan:Number(projectAdvan[0]),trans:Number(projectTrans[0]),nState:Number(projectNState[0]),label:projectLabel[0],problem:projectProblem[0]});newProject[1](false); }
-    function submitTemplate() { emit(props,"model_template",{advan:Number(templateAdvan[0]),trans:Number(templateTrans[0]),nState:Number(templateNState[0]),label:templateLabel[0],problem:templateProblem[0]});templateModal[1](false); }
+    function submitTemplate() { emit(props,"model_template",{advan:Number(templateAdvan[0]),trans:Number(templateTrans[0]),nState:Number(templateNState[0]),structuralTemplate:templateStructural[0],label:templateLabel[0],problem:templateProblem[0]});templateModal[1](false); }
     var covarianceSupported = ["FO","FOCE","FOCEI","LAPLACE","ITS","GQ","IMP","SAEM"].indexOf(estimationMethod[0]) >= 0;
     function updatePreStage(index,field,nextValue){var next=estimationPreStages[0].map(function(stage){return Object.assign({},stage);});next[index][field]=nextValue;estimationPreStages[1](next);}
     function movePreStage(index,direction){var next=estimationPreStages[0].slice(),target=index+direction;if(target<0||target>=next.length)return;var item=next[index];next[index]=next[target];next[target]=item;estimationPreStages[1](next);}
     function submitEstimate() { var covType=estimationMethod[0]==="FO"?"hessian":covarianceType[0],covSamples=estimationMethod[0]==="IMP"?Number(nImp[0]):Number(covarianceSamples[0]);var payload={label:estimationLabel[0],method:estimationMethod[0],maxit:Number(estimationMaxit[0]),etaMaxit:Number(etaMaxit[0]),tolerance:Number(tolerance[0]),nCores:Number(estimationCores[0]),printEvery:Number(printEvery[0]),methodSeed:Number(methodSeed[0]),nImp:Number(nImp[0]),gqOrder:Number(gqOrder[0]),gqGrid:gqGrid[0],gqLevel:Number(gqLevel[0]),gqAdaptive:!!gqAdaptive[0],gqMaxPoints:Number(gqMaxPoints[0]),nIter:Number(nIter[0]),burn:Number(burn[0]),mcmcSteps:Number(mcmcSteps[0]),nBurn:Number(nBurn[0]),nSample:Number(nSample[0]),nThin:Number(nThin[0]),nChains:Number(nChains[0]),targetAcceptance:Number(targetAcceptance[0]),maxTreeDepth:Number(maxTreeDepth[0]),nLeapfrog:Number(nLeapfrog[0]),npPoints:Number(npPoints[0]),npCycles:Number(npCycles[0]),npMaxSupport:Number(npMaxSupport[0]),npGridStep:Number(npGridStep[0]),covariance:covarianceStep[0]&&covarianceSupported,covarianceType:covType,covarianceTolerance:Number(covarianceTolerance[0]),covarianceSamples:covSamples,covarianceSeed:Number(methodSeed[0])};payload.stages=estimationPreStages[0].map(function(stage){return {method:stage.method,maxit:Number(stage.maxit),etaMaxit:Number(stage.etaMaxit),tolerance:Number(tolerance[0]),nCores:Number(estimationCores[0]),printEvery:Number(printEvery[0])};}).concat([Object.assign({},payload)]);emit(props,"estimate",payload);estimationModal[1](false); }
     function submitSimulation() { emit(props,"simulate",{label:simulationLabel[0],seed:Number(simulationSeed[0]),nCores:Number(simulationCores[0]),nSubjects:Number(simulationSubjects[0]),replicates:Number(simulationReplicates[0]),days:Number(simulationDays[0]),useDesign:simulationUseDesign[0],doseMode:doseMode[0],doseAmt:Number(doseAmount[0]),doseCmt:Number(doseCmt[0]),doseN:Number(doseN[0]),doseII:Number(doseII[0]),doseTable:doseTable[0],obsPerDay:Number(obsPerDay[0]),useFit:simulationUseFit[0]});simulationModal[1](false); }
-    function submitDiagnostic() { var types=[];if(diagnosticVpc[0])types.push("vpc");if(diagnosticNpc[0])types.push("npc");if(diagnosticNpde[0])types.push("npde");if(diagnosticCategorical[0])types.push("vpc_categorical");if(diagnosticTte[0])types.push("vpc_tte");emit(props,"run_diagnostic",{types:types,nsim:Number(diagnosticNsim[0]),seed:Number(diagnosticSeed[0]),pcCorrect:diagnosticPc[0],stratify:diagnosticVpc[0]&&diagnosticStratify[0]?diagnosticStratify[0]:null,categoricalOutcome:diagnosticOutcome[0],tteEvent:diagnosticEvent[0]});diagnosticModal[1](false); }
+    function submitDiagnostic() { var types=[];if(diagnosticVpc[0])types.push("vpc");if(diagnosticNpc[0])types.push("npc");if(diagnosticNpde[0])types.push("npde");if(diagnosticCategorical[0])types.push("vpc_categorical");if(diagnosticCount[0])types.push("vpc_count");if(diagnosticTte[0])types.push("vpc_tte");if(diagnosticCompeting[0])types.push("vpc_competing");if(diagnosticRecurrent[0])types.push("vpc_recurrent");emit(props,"run_diagnostic",{types:types,nsim:Number(diagnosticNsim[0]),seed:Number(diagnosticSeed[0]),pcCorrect:diagnosticPc[0],stratify:diagnosticVpc[0]&&diagnosticStratify[0]?diagnosticStratify[0]:null,categoricalOutcome:diagnosticOutcome[0],countOutcome:diagnosticOutcome[0],countDvid:diagnosticDvid[0],tteEvent:diagnosticEvent[0],competingDvid:diagnosticDvid[0],recurrentDvid:diagnosticDvid[0]});diagnosticModal[1](false); }
     function submitUncertainty() { var types=[];if(uncertaintyBootstrap[0])types.push("bootstrap");if(uncertaintyProfile[0])types.push("profile");emit(props,"run_uncertainty",{types:types,replicates:Number(uncertaintyReplicates[0]),points:Number(uncertaintyPoints[0]),span:Number(uncertaintySpan[0]),level:Number(uncertaintyLevel[0]),parameters:uncertaintyParameters[0],maxit:Number(uncertaintyMaxit[0]),seed:Number(diagnosticSeed[0])});uncertaintyModal[1](false); }
     var projectUploadMissing=projectMode[0]==="template"&&projectDataSource[0]==="upload"&&!projectFile[0];
     return e("div", { className:"lw-project-sidebar" },
@@ -610,11 +877,11 @@
 
       e(Modal,{open:copyModal[0],onClose:function(){copyModal[1](false);},title:"Copy to new model version",footer:e(React.Fragment,null,e(Button,{className:"lw-button-quiet",onClick:function(){copyModal[1](false);}},"Cancel"),e(Button,{className:"lw-button-primary",onClick:function(){emit(props,"project_copy",{id:workspace.current,snapshot:workspace.current_snapshot,updateInits:copyUpdateInits[0]});copyModal[1](false);}},"Copy"))},e("p",{className:"lw-help-text"},props.fit.available?"A fitted run is loaded; its final estimates can become the new version's initial values.":"No fitted run is loaded, so initials will match the source version."),e("label",{className:"lw-check"},e("input",{type:"checkbox",disabled:!props.fit.available,checked:copyUpdateInits[0]&&props.fit.available,onChange:function(event){copyUpdateInits[1](event.target.checked);}})," Update THETA / OMEGA / SIGMA initials from current fit")),
 
-      e(Modal,{open:templateModal[0],onClose:function(){templateModal[1](false);},title:"New version from template",footer:e(React.Fragment,null,e(Button,{className:"lw-button-quiet",onClick:function(){templateModal[1](false);}},"Cancel"),e(Button,{className:"lw-button-primary",disabled:!props.dataset.loaded,onClick:submitTemplate},"Create version"))},e(Field,{label:"Dataset"},e("select",{disabled:!props.dataset.loaded,value:props.dataset.loaded?"current":""},e("option",{value:props.dataset.loaded?"current":""},props.dataset.loaded?value(props.dataset.name,"Current dataset"):"No dataset loaded"))),e(TemplateFields,{advan:templateAdvan,trans:templateTrans,nState:templateNState,label:templateLabel,problem:templateProblem})),
+      e(Modal,{open:templateModal[0],onClose:function(){templateModal[1](false);},title:"New version from template",footer:e(React.Fragment,null,e(Button,{className:"lw-button-quiet",onClick:function(){templateModal[1](false);}},"Cancel"),e(Button,{className:"lw-button-primary",disabled:!props.dataset.loaded,onClick:submitTemplate},"Create version"))},e(Field,{label:"Dataset"},e("select",{disabled:!props.dataset.loaded,value:props.dataset.loaded?"current":""},e("option",{value:props.dataset.loaded?"current":""},props.dataset.loaded?value(props.dataset.name,"Current dataset"):"No dataset loaded"))),e(Field,{label:"Model family"},e("select",{value:templateStructural[0],onChange:function(event){templateStructural[1](event.target.value);}},e("option",{value:"standard"},"Standard ADVAN template"),[["nonlinear_elimination","Nonlinear elimination"],["transit_absorption","Transit absorption"],["dual_absorption","Dual absorption"],["parent_metabolite","Parent–metabolite"],["effect_compartment","Effect compartment"],["indirect_response","Indirect response"],["tumour_growth","Tumour growth"],["tmdd","Target-mediated disposition"]].map(function(item){return e("option",{key:item[0],value:item[0]},item[1]);}))),templateStructural[0]==="standard"?e(TemplateFields,{advan:templateAdvan,trans:templateTrans,nState:templateNState,label:templateLabel,problem:templateProblem}):e("div",{className:"lw-modal-section lw-modal-section-tinted"},e("p",{className:"lw-help-text"},"Creates a complete editable ADVAN13 $PK/$PRED and $DES model. Initial-state requirements are documented with the template."),e("div",{className:"lw-form-grid lw-form-grid-two"},e(Field,{label:"Version label (optional)"},e("input",{value:templateLabel[0],onChange:function(event){templateLabel[1](event.target.value);}})),e(Field,{label:"Problem statement"},e("input",{value:templateProblem[0],onChange:function(event){templateProblem[1](event.target.value);}}))))),
 
       e(Modal,{open:estimationModal[0],className:"lw-modal-wide",onClose:function(){estimationModal[1](false);},title:"Run estimation",footer:e(React.Fragment,null,e(Button,{className:"lw-button-quiet",onClick:function(){estimationModal[1](false);}},"Cancel"),e(Button,{className:"lw-button-primary",onClick:submitEstimate},"Submit estimation"))},
-        e("div",{className:"lw-modal-section"},e("div",{className:"lw-form-grid"},e(Field,{label:"Run on"},e("select",{value:value(props.server.queue_id,"local"),onChange:function(event){emit(props,"queue_select",{id:event.target.value});}},list(props.server.queues).map(function(queue){return e("option",{key:queue.id,value:queue.id},queue.name);}))),e(Field,{label:"Method"},e("select",{value:estimationMethod[0],onChange:function(event){estimationMethod[1](event.target.value);}},["FO","FOCE","FOCEI","LAPLACE","ITS","GQ","IMP","SAEM","BAYES","HMC","NUTS","NPML","NPAG"].map(function(method){var label=method==="GQ"?"GQ (adaptive Gauss-Hermite)":method==="NPML"?"NPML (fixed support)":method==="NPAG"?"NPAG (adaptive grid)":method;return e("option",{key:method,value:method},label);}))),e(Field,{label:"Job label (optional)"},e("input",{value:estimationLabel[0],onChange:function(event){estimationLabel[1](event.target.value);}}))),e("div",{className:"lw-form-grid"},["HMC","NUTS"].indexOf(estimationMethod[0])<0?e(Field,{label:"Outer iterations"},e("input",{type:"number",min:1,value:estimationMaxit[0],onChange:function(event){estimationMaxit[1](Number(event.target.value));}})):null,["BAYES","HMC","NUTS"].indexOf(estimationMethod[0])<0?e(Field,{label:"ETA iterations"},e("input",{type:"number",min:1,value:etaMaxit[0],onChange:function(event){etaMaxit[1](Number(event.target.value));}})):null,e(Field,{label:"Tolerance"},e("input",{type:"number",min:1e-12,step:"any",value:tolerance[0],onChange:function(event){tolerance[1](Number(event.target.value));}})),["HMC","NUTS","NPML","NPAG"].indexOf(estimationMethod[0])<0?e(Field,{label:"Parallel cores"},e("input",{type:"number",min:1,max:64,value:estimationCores[0],onChange:function(event){estimationCores[1](Number(event.target.value));}})):null,e(Field,{label:"Print gradients every N (0 = off)"},e("input",{type:"number",min:0,value:printEvery[0],onChange:function(event){printEvery[1](Number(event.target.value));}})))),
-        e("div",{className:"lw-modal-section lw-modal-section-tinted lw-estimation-sequence"},e("div",{className:"lw-prior-heading"},e("div",null,e("h4",null,"Sequential estimation"),e("small",null,"Completed steps pass THETA, OMEGA, SIGMA and compatible ETA starts to the next step.")),e(Button,{className:"lw-button-quiet",onClick:function(){estimationPreStages[1](estimationPreStages[0].concat([{method:"FOCE",maxit:100,etaMaxit:100}]));}},"+ Add preceding step")),estimationPreStages[0].map(function(stage,index){return e("div",{className:"lw-sequence-row",key:index},e("strong",null,"Step "+(index+1)),e("select",{value:stage.method,onChange:function(event){updatePreStage(index,"method",event.target.value);}},["FO","FOCE","FOCEI","LAPLACE","ITS","GQ","IMP","SAEM"].map(function(method){return e("option",{key:method,value:method},method);})),e("label",null,"Iterations",e("input",{type:"number",min:1,value:stage.maxit,onChange:function(event){updatePreStage(index,"maxit",Number(event.target.value));}})),e("label",null,"ETA iterations",e("input",{type:"number",min:1,value:stage.etaMaxit,onChange:function(event){updatePreStage(index,"etaMaxit",Number(event.target.value));}})),e(Button,{className:"lw-button-link",disabled:index===0,onClick:function(){movePreStage(index,-1);}},"Up"),e(Button,{className:"lw-button-link",disabled:index===estimationPreStages[0].length-1,onClick:function(){movePreStage(index,1);}},"Down"),e(Button,{className:"lw-button-link",onClick:function(){estimationPreStages[1](estimationPreStages[0].filter(function(_,item){return item!==index;}));}},"Remove"));}),e("div",{className:"lw-sequence-final"},e("strong",null,"Final step "+(estimationPreStages[0].length+1)),e("span",null,estimationMethod[0]),e("small",null,"The method-specific controls below apply to this final step."))),
+        e("div",{className:"lw-modal-section"},userLikelihood?e("div",{className:"lw-info-banner"},"User-defined likelihood detected. LAPLACE is the NONMEM-like default; Gaussian FO/FOCE/FOCEI linearizations are not applicable."):null,e("div",{className:"lw-form-grid"},e(Field,{label:"Run on"},e("select",{value:value(props.server.queue_id,"local"),onChange:function(event){emit(props,"queue_select",{id:event.target.value});}},list(props.server.queues).map(function(queue){return e("option",{key:queue.id,value:queue.id},queue.name);}))),e(Field,{label:"Method"},e("select",{value:estimationMethod[0],onChange:function(event){estimationMethod[1](event.target.value);}},estimationMethods.map(function(method){var label=method==="GQ"?"GQ (adaptive Gauss-Hermite)":method==="NPML"?"NPML (fixed support)":method==="NPAG"?"NPAG (adaptive grid)":method;return e("option",{key:method,value:method},label);}))),e(Field,{label:"Job label (optional)"},e("input",{value:estimationLabel[0],onChange:function(event){estimationLabel[1](event.target.value);}}))),e("div",{className:"lw-form-grid"},["HMC","NUTS"].indexOf(estimationMethod[0])<0?e(Field,{label:"Outer iterations"},e("input",{type:"number",min:1,value:estimationMaxit[0],onChange:function(event){estimationMaxit[1](Number(event.target.value));}})):null,["BAYES","HMC","NUTS"].indexOf(estimationMethod[0])<0?e(Field,{label:"ETA iterations"},e("input",{type:"number",min:1,value:etaMaxit[0],onChange:function(event){etaMaxit[1](Number(event.target.value));}})):null,e(Field,{label:"Tolerance"},e("input",{type:"number",min:1e-12,step:"any",value:tolerance[0],onChange:function(event){tolerance[1](Number(event.target.value));}})),["HMC","NUTS","NPML","NPAG"].indexOf(estimationMethod[0])<0?e(Field,{label:"Parallel cores"},e("input",{type:"number",min:1,max:64,value:estimationCores[0],onChange:function(event){estimationCores[1](Number(event.target.value));}})):null,e(Field,{label:"Print gradients every N (0 = off)"},e("input",{type:"number",min:0,value:printEvery[0],onChange:function(event){printEvery[1](Number(event.target.value));}})))),
+        e("div",{className:"lw-modal-section lw-modal-section-tinted lw-estimation-sequence"},e("div",{className:"lw-prior-heading"},e("div",null,e("h4",null,"Sequential estimation"),e("small",null,"Completed steps pass THETA, OMEGA, SIGMA and compatible ETA starts to the next step.")),e(Button,{className:"lw-button-quiet",onClick:function(){estimationPreStages[1](estimationPreStages[0].concat([{method:userLikelihood?"LAPLACE":"FOCE",maxit:100,etaMaxit:100}]));}},"+ Add preceding step")),estimationPreStages[0].map(function(stage,index){return e("div",{className:"lw-sequence-row",key:index},e("strong",null,"Step "+(index+1)),e("select",{value:stage.method,onChange:function(event){updatePreStage(index,"method",event.target.value);}},sequenceMethods.map(function(method){return e("option",{key:method,value:method},method);})),e("label",null,"Iterations",e("input",{type:"number",min:1,value:stage.maxit,onChange:function(event){updatePreStage(index,"maxit",Number(event.target.value));}})),e("label",null,"ETA iterations",e("input",{type:"number",min:1,value:stage.etaMaxit,onChange:function(event){updatePreStage(index,"etaMaxit",Number(event.target.value));}})),e(Button,{className:"lw-button-link",disabled:index===0,onClick:function(){movePreStage(index,-1);}},"Up"),e(Button,{className:"lw-button-link",disabled:index===estimationPreStages[0].length-1,onClick:function(){movePreStage(index,1);}},"Down"),e(Button,{className:"lw-button-link",onClick:function(){estimationPreStages[1](estimationPreStages[0].filter(function(_,item){return item!==index;}));}},"Remove"));}),e("div",{className:"lw-sequence-final"},e("strong",null,"Final step "+(estimationPreStages[0].length+1)),e("span",null,estimationMethod[0]),e("small",null,"The method-specific controls below apply to this final step."))),
         estimationMethod[0]==="GQ"?e("div",{className:"lw-modal-section lw-modal-section-tinted"},e("h4",null,"Gaussian quadrature"),e("div",{className:"lw-form-grid"},e(Field,{label:"Grid strategy"},e("select",{value:gqGrid[0],onChange:function(event){gqGrid[1](event.target.value);}},e("option",{value:"auto"},"Automatic"),e("option",{value:"tensor"},"Tensor product"),e("option",{value:"smolyak"},"Smolyak sparse grid"))),gqGrid[0]!=="smolyak"?e(Field,{label:"Tensor nodes / ETA"},e("input",{type:"number",min:1,max:50,value:gqOrder[0],onChange:function(event){gqOrder[1](Number(event.target.value));}})):null,gqGrid[0]!=="tensor"?e(Field,{label:"Smolyak level"},e("input",{type:"number",min:1,max:25,value:gqLevel[0],onChange:function(event){gqLevel[1](Number(event.target.value));}})):null,e(Field,{label:"Maximum total grid points"},e("input",{type:"number",min:1,value:gqMaxPoints[0],onChange:function(event){gqMaxPoints[1](Number(event.target.value));}}))),e("label",{className:"lw-check"},e("input",{type:"checkbox",checked:gqAdaptive[0],onChange:function(event){gqAdaptive[1](event.target.checked);}})," Adapt nodes to each subject's conditional ETA mode and curvature"),e("p",{className:"lw-help-text"},gqGrid[0]==="auto"?"Automatic uses the tensor rule for up to three ETAs and a Smolyak sparse grid above that. Tensor order 5 and sparse level 3 are practical starting points.":gqGrid[0]==="smolyak"?"Smolyak grids retain low-order interactions while avoiding order^ETAs growth. Increase the level to assess quadrature convergence.":"The tensor grid uses order^number-of-ETAs points per subject and is most effective for low-dimensional ETA models.")):null,
         estimationMethod[0]==="IMP"?e("div",{className:"lw-modal-section lw-modal-section-tinted"},e("h4",null,"Importance sampling"),e("div",{className:"lw-form-grid lw-form-grid-two"},e(Field,{label:"Importance samples"},e("input",{type:"number",min:5,value:nImp[0],onChange:function(event){nImp[1](Number(event.target.value));}})),e(Field,{label:"Random seed"},e("input",{type:"number",min:1,value:methodSeed[0],onChange:function(event){methodSeed[1](Number(event.target.value));}})))):null,
         estimationMethod[0]==="SAEM"?e("div",{className:"lw-modal-section lw-modal-section-tinted"},e("h4",null,"SAEM controls"),e("div",{className:"lw-form-grid"},e(Field,{label:"SAEM iterations"},e("input",{type:"number",min:2,value:nIter[0],onChange:function(event){nIter[1](Number(event.target.value));}})),e(Field,{label:"Burn-in"},e("input",{type:"number",min:0,value:burn[0],onChange:function(event){burn[1](Number(event.target.value));}})),e(Field,{label:"MCMC steps / subject"},e("input",{type:"number",min:1,value:mcmcSteps[0],onChange:function(event){mcmcSteps[1](Number(event.target.value));}})),e(Field,{label:"Random seed"},e("input",{type:"number",min:1,value:methodSeed[0],onChange:function(event){methodSeed[1](Number(event.target.value));}})))):null,
@@ -631,17 +898,21 @@
         e("label",{className:"lw-check lw-design-toggle"},e("input",{type:"checkbox",checked:simulationUseDesign[0],onChange:function(event){simulationUseDesign[1](event.target.checked);}})," Custom dosing / sampling design"),
         simulationUseDesign[0]?e("div",{className:"lw-modal-section lw-simulation-design"},e("h4",null,"Dosing and sampling design"),e("div",{className:"lw-form-grid"},e(Field,{label:"Dosing"},e("select",{value:doseMode[0],onChange:function(event){doseMode[1](event.target.value);}},e("option",{value:"single"},"Single dose"),e("option",{value:"repeat"},"Repeat doses"),e("option",{value:"steady_state"},"Steady state"))),e(Field,{label:"Default dose amount"},e("input",{type:"number",min:0,value:doseAmount[0],onChange:function(event){doseAmount[1](Number(event.target.value));}})),e(Field,{label:"Dose CMT"},e("input",{type:"number",min:1,value:doseCmt[0],onChange:function(event){doseCmt[1](Number(event.target.value));}})),doseMode[0]==="repeat"?e(Field,{label:"Number of doses"},e("input",{type:"number",min:1,max:100,value:doseN[0],onChange:function(event){doseN[1](Number(event.target.value));}})):null,doseMode[0]!=="single"?e(Field,{label:"Dosing interval (h)"},e("input",{type:"number",min:.1,step:.5,value:doseII[0],onChange:function(event){doseII[1](Number(event.target.value));}})):null,e(Field,{label:"Observations / day"},e("input",{type:"number",min:3,max:48,value:obsPerDay[0],onChange:function(event){obsPerDay[1](Number(event.target.value));}}))),e(Field,{label:"Dose amounts (TIME AMT per line, or AMT only)"},e("textarea",{rows:3,value:doseTable[0],placeholder:"0 320\n12 320",onChange:function(event){doseTable[1](event.target.value);}}))):e("p",{className:"lw-help-text"},"The linked dataset structure is retained and resampled to the requested number of individuals.")),
 
-      e(Modal,{open:diagnosticModal[0],className:"lw-modal-wide",onClose:function(){diagnosticModal[1](false);},title:"Run diagnostic",footer:e(React.Fragment,null,e(Button,{className:"lw-button-quiet",onClick:function(){diagnosticModal[1](false);}},"Cancel"),e(Button,{className:"lw-button-primary",disabled:!diagnosticVpc[0]&&!diagnosticNpc[0]&&!diagnosticNpde[0]&&!diagnosticCategorical[0]&&!diagnosticTte[0],onClick:submitDiagnostic},"Run selected"))},
+      e(Modal,{open:diagnosticModal[0],className:"lw-modal-wide",onClose:function(){diagnosticModal[1](false);},title:"Run diagnostic",footer:e(React.Fragment,null,e(Button,{className:"lw-button-quiet",onClick:function(){diagnosticModal[1](false);}},"Cancel"),e(Button,{className:"lw-button-primary",disabled:!diagnosticVpc[0]&&!diagnosticNpc[0]&&!diagnosticNpde[0]&&!diagnosticCategorical[0]&&!diagnosticCount[0]&&!diagnosticTte[0]&&!diagnosticCompeting[0]&&!diagnosticRecurrent[0],onClick:submitDiagnostic},"Run selected"))},
         e("p",{className:"lw-help-text"},"Diagnostics are calculated for the selected estimation run and saved with it."),
         e("div",{className:"lw-choice-row"},
           e("label",{className:"lw-check"},e("input",{type:"checkbox",checked:diagnosticVpc[0],onChange:function(event){diagnosticVpc[1](event.target.checked);}})," Continuous VPC"),
           e("label",{className:"lw-check"},e("input",{type:"checkbox",checked:diagnosticCategorical[0],onChange:function(event){diagnosticCategorical[1](event.target.checked);}})," Categorical VPC"),
+          outcomeFamilies.some(function(item){return ["poisson","negative_binomial","binomial","zero_inflated_poisson","hurdle_poisson"].indexOf(item)>=0;})?e("label",{className:"lw-check"},e("input",{type:"checkbox",checked:diagnosticCount[0],onChange:function(event){diagnosticCount[1](event.target.checked);}})," Count VPC"):null,
           e("label",{className:"lw-check"},e("input",{type:"checkbox",checked:diagnosticTte[0],onChange:function(event){diagnosticTte[1](event.target.checked);}})," Time-to-event VPC"),
+          outcomeFamilies.indexOf("competing_risks")>=0?e("label",{className:"lw-check"},e("input",{type:"checkbox",checked:diagnosticCompeting[0],onChange:function(event){diagnosticCompeting[1](event.target.checked);}})," Competing-risk VPC"):null,
+          outcomeFamilies.indexOf("recurrent_event")>=0?e("label",{className:"lw-check"},e("input",{type:"checkbox",checked:diagnosticRecurrent[0],onChange:function(event){diagnosticRecurrent[1](event.target.checked);}})," Recurrent-event VPC"):null,
           e("label",{className:"lw-check"},e("input",{type:"checkbox",checked:diagnosticNpde[0],onChange:function(event){diagnosticNpde[1](event.target.checked);}})," NPDE"),
           e("label",{className:"lw-check"},e("input",{type:"checkbox",checked:diagnosticNpc[0],onChange:function(event){diagnosticNpc[1](event.target.checked);}})," NPC")),
         e("div",{className:"lw-form-grid"},e(Field,{label:"Simulations"},e("input",{type:"number",min:20,max:10000,value:diagnosticNsim[0],onChange:function(event){diagnosticNsim[1](Number(event.target.value));}})),e(Field,{label:"Random seed"},e("input",{type:"number",min:1,value:diagnosticSeed[0],onChange:function(event){diagnosticSeed[1](Number(event.target.value));}}))),
         diagnosticVpc[0]?e("div",{className:"lw-modal-section lw-modal-section-tinted"},e("h4",null,"Continuous VPC options"),e("label",{className:"lw-check"},e("input",{type:"checkbox",checked:diagnosticPc[0],onChange:function(event){diagnosticPc[1](event.target.checked);}})," Prediction-corrected VPC (DV x PRED / IPRED)"),e(Field,{label:"Stratify by"},e("select",{value:diagnosticStratify[0],onChange:function(event){diagnosticStratify[1](event.target.value);}},[e("option",{key:"none",value:""},"(no stratification)")].concat(list(props.dataset.columns).map(function(column){return e("option",{key:column,value:column},column);})))),e("p",{className:"lw-help-text"},"The VPC tab retains the overall population plot and adds one saved plot per stratum.")):null,
-        diagnosticCategorical[0]?e("div",{className:"lw-modal-section lw-modal-section-tinted"},e("h4",null,"Categorical VPC options"),e(Field,{label:"Binary outcome column"},e("select",{value:diagnosticOutcome[0],onChange:function(event){diagnosticOutcome[1](event.target.value);}},list(props.dataset.columns).map(function(column){return e("option",{key:column,value:column},column);}))),e("p",{className:"lw-help-text"},"F/IPRED must be the conditional probability of the non-reference category.")):null,
+        diagnosticCategorical[0]?e("div",{className:"lw-modal-section lw-modal-section-tinted"},e("h4",null,"Categorical VPC options"),e(Field,{label:"Outcome column"},e("select",{value:diagnosticOutcome[0],onChange:function(event){diagnosticOutcome[1](event.target.value);}},list(props.dataset.columns).map(function(column){return e("option",{key:column,value:column},column);}))),e("p",{className:"lw-help-text"},outcomeFamilies.some(function(item){return ["categorical","ordinal","markov"].indexOf(item)>=0;})?"Declared probability vectors are used for every category.":"Legacy binary models interpret F/IPRED as the non-reference probability.")):null,
+        (diagnosticCount[0]||diagnosticCompeting[0]||diagnosticRecurrent[0])&&outcomeDvids.length>1?e(Field,{label:"Endpoint (DVID)"},e("select",{value:diagnosticDvid[0],onChange:function(event){diagnosticDvid[1](event.target.value);}},e("option",{value:""},"Select endpoint"),outcomeDvids.map(function(item){return e("option",{key:item.dvid,value:item.dvid},item.name+" (DVID "+item.dvid+")");}))):null,
         diagnosticTte[0]?e("div",{className:"lw-modal-section lw-modal-section-tinted"},e("h4",null,"Time-to-event VPC options"),e(Field,{label:"Event indicator column"},e("select",{value:diagnosticEvent[0],onChange:function(event){diagnosticEvent[1](event.target.value);}},list(props.dataset.columns).map(function(column){return e("option",{key:column,value:column},column);}))),e("p",{className:"lw-help-text"},"F/IPRED is interpreted as a non-negative hazard on the observation-time grid.")):null),
 
       e(Modal,{open:uncertaintyModal[0],className:"lw-modal-wide",onClose:function(){uncertaintyModal[1](false);},title:"Parameter uncertainty",footer:e(React.Fragment,null,e(Button,{className:"lw-button-quiet",onClick:function(){uncertaintyModal[1](false);}},"Cancel"),e(Button,{className:"lw-button-primary",disabled:!uncertaintyBootstrap[0]&&!uncertaintyProfile[0],onClick:submitUncertainty},"Run selected"))},
@@ -666,17 +937,19 @@
   }
 
   function AIStatusLine(props) {
-    var status=useLocalAIStatus(),percent=Math.round((Number(status.progress)||0)*100);
+    var status=useLocalAIStatus(),percent=Math.round((Number(status.progress)||0)*100),budget=status.budget;
     return e("div",{className:"lw-ai-status lw-ai-status-"+status.stage},
       e("div",null,e("span",null,status.text),status.locked?e("strong",null,"Network locked"):null),
-      status.stage==="loading"?e("progress",{max:100,value:percent},percent+"%"):null);
+      budget?e("small",{className:budget.compacted?"lw-ai-budget-compact":""},"Approx. "+Number(budget.prompt_tokens_estimated||0).toLocaleString()+" prompt tokens / "+Number(budget.context_window_size||0).toLocaleString()+" context; "+budget.retained_message_count+" of "+budget.original_message_count+" messages retained; "+Number(budget.max_tokens||0).toLocaleString()+" output tokens reserved"+(budget.compacted?" (context compacted)":"")):null,
+      status.stage==="loading"?e("progress",{max:100,value:percent},percent+"%"):null,
+      status.stage==="error"?e(Button,{className:"lw-button-quiet",onClick:function(){localAIShutdown();}},"Reset local AI"):null);
   }
 
   function AIModelSelect(props) {
     var ai=props.ai||{},models=list(ai.models),className=value(props.className,""),purpose=props.purpose==="report"?"report":"help";
     var configured=purpose==="report"?value(ai.report_model,"same_as_help"):value(ai.help_model,ai.model),resolved=configured==="same_as_help"?value(ai.help_model,ai.model):configured;
     var selected=models.filter(function(model){return model.id===resolved;})[0];
-    function setModel(event){var detail={activated:!!ai.activated,consented:!!ai.consented,help_model:value(ai.help_model,ai.model),report_model:value(ai.report_model,"same_as_help")};detail[purpose+"_model"]=event.target.value;localAIShutdown();emit(props,"ai_settings",detail);}
+    function setModel(event){var detail=localAISettingsDetail(ai);detail[purpose+"_model"]=event.target.value;localAIShutdown();emit(props,"ai_settings",detail);}
     if(!models.length)return null;
     var options=models.map(function(model){return e("option",{key:model.id,value:model.id},model.label);});
     if(purpose==="report")options=[e("option",{key:"same_as_help",value:"same_as_help"},"Same as Help model")].concat(options);
@@ -687,6 +960,46 @@
       description&&className==="lw-ai-model-panel"?e("small",null,description):null);
   }
 
+  function AIContextSelect(props) {
+    var ai=props.ai||{},purpose=props.purpose==="report"?"report":"help",model=purpose==="report"?value(ai.report_model,"same_as_help"):value(ai.help_model,ai.model);
+    if(model==="same_as_help")model=value(ai.help_model,ai.model);
+    var configured=String(value(ai[purpose+"_context"],"auto")),presetStrings=localAIContextPresets.map(String),isPreset=configured==="auto"||presetStrings.indexOf(configured)>=0;
+    var mode=useSynced(isPreset?configured:"custom",[configured]),custom=useSynced(isPreset?8192:Number(configured)||8192,[configured]);
+    var resolved=localAIContextWindow(ai,model,purpose),className=value(props.className,"");
+    function commit(next){var detail=localAISettingsDetail(ai);detail[purpose+"_context"]=String(next);localAIShutdown();emit(props,"ai_settings",detail);}
+    function change(event){var next=event.target.value;mode[1](next);if(next!=="custom")commit(next);}
+    function commitCustom(){var next=Math.max(1024,Math.min(16384,Math.round((Number(custom[0])||8192)/512)*512));custom[1](next);commit(next);}
+    var warning=resolved>8192?"Larger contexts use substantially more GPU memory and may be unstable on an 8 GB GPU.":"Changing context reloads the model lazily on its next use.";
+    return e("label",{className:"lw-ai-context-select "+className,title:warning},e("span",null,props.label||((purpose==="report"?"Report":"Help")+" context")),e("div",null,e("select",{value:mode[0],onChange:change,"aria-label":purpose+" AI context window"},e("option",{value:"auto"},"Auto ("+(resolved/1024).toFixed(resolved%1024?1:0)+"K)"),localAIContextPresets.map(function(size){return e("option",{key:size,value:String(size)},(size/1024).toFixed(size%1024?1:0)+"K"+(size>8192?" - higher memory":""));}),e("option",{value:"custom"},"Custom")),mode[0]==="custom"?e("input",{type:"number",min:1024,max:16384,step:512,value:custom[0],"aria-label":purpose+" custom context tokens",onChange:function(event){custom[1](event.target.value);},onBlur:commitCustom,onKeyDown:function(event){if(event.key==="Enter"){event.preventDefault();commitCustom();}}}):null),className==="lw-ai-context-panel"?e("small",null,warning):null);
+  }
+
+  function helpQuestionScope(question) {
+    var text=String(question||"").toLowerCase();
+    var results=/(?:estimate|result|objective|\bofv\b|converg|covariance|\bse\b|\brse\b|\bgof\b|\bvpc\b|\bnpde\b|\bnpc\b|cwres|residual|diagnostic|compare|difference|best run|successful|failed|timing|iteration|posthoc|posterior|support point)/.test(text);
+    var model=/(?:\$(?:pk|pred|des|error)|\bcode\b|equation|advan|trans|compartment|\btheta\b|\bomega\b|\bsigma\b|\beta\b|structural model|error model|parameter definition)/.test(text);
+    return results&&model?"full":results?"results":model?"model":"overview";
+  }
+  function helpRunLine(run, detailed) {
+    var parts=[value(run.model_version,"Model"),value(run.label,run.id||"Run")].join(" / ");
+    var facts=[value(run.result_type,"run")];
+    if(run.method)facts.push("method="+run.method);
+    if(run.objective!==null&&run.objective!==undefined)facts.push("OFV="+formatNumber(run.objective));
+    if(run.convergence!==null&&run.convergence!==undefined)facts.push("convergence="+run.convergence);
+    if(run.iterations!==null&&run.iterations!==undefined&&!isNaN(Number(run.iterations)))facts.push("iterations="+run.iterations);
+    var diagnostics=Object.keys(run.diagnostics||{}).filter(function(name){return !!run.diagnostics[name];});
+    if(diagnostics.length)facts.push("diagnostics="+diagnostics.join(","));
+    if(detailed&&list(run.parameters).length){
+      facts.push("parameters="+list(run.parameters).map(function(parameter){return value(parameter.name,"parameter")+"="+formatNumber(parameter.estimate);}).join(","));
+    }
+    return "- "+parts+" ("+facts.join("; ")+")";
+  }
+  function helpProjectEvidence(projectEvidence, detailed) {
+    if(!projectEvidence)return "Saved project evidence: unavailable in this view.";
+    var heading="Saved project evidence: "+value(projectEvidence.project_name,projectEvidence.project||"project")+" has "+value(projectEvidence.run_count,0)+" completed run(s). "+value(projectEvidence.included_runs,0)+" are represented"+(Number(projectEvidence.omitted_runs)>0?"; "+projectEvidence.omitted_runs+" older run(s) are omitted.":".");
+    var rows=list(projectEvidence.runs).map(function(run){return helpRunLine(run,detailed);});
+    return heading+(rows.length?"\n"+rows.join("\n"):" "+value(projectEvidence.message,"No completed run summaries are available."));
+  }
+
   function AIHelpPanel(props) {
     var ai=props.ai||{},welcome={role:"assistant",content:"Ask me about the current model, estimation workflow, or diagnostics. I run locally in this browser."};
     var messages=React.useState([welcome]),prompt=React.useState(""),busy=React.useState(false),error=React.useState("");
@@ -694,59 +1007,137 @@
     var project=list(workspace.projects).filter(function(item){return String(item.id)===String(projectId);})[0];
     var version=list(workspace.versions).filter(function(item){return String(item.id)===String(versionId);})[0];
     var run=version?list(version.runs).filter(function(item){return String(item.id)===String(runId);})[0]:null;
-    var contextKey=[projectId,versionId,runId].join("|");
-    var contextRef=React.useRef(contextKey);
+    var aiContext=props.ai_context||{},contextKey=[projectId,versionId,runId].join("|");
+    var contextRef=React.useRef(contextKey),pendingContext=React.useRef(null);
     React.useEffect(function(){
       contextRef.current=contextKey;
-      if(localAIHasPendingPurpose("help"))localAIShutdown(new Error("The Help request was stopped because the selected project context changed."));
+      pendingContext.current=null;
+      if(localAIHasPendingPurpose("help"))localAICancelPurpose("help",new Error("The Help request was stopped because the selected project context changed."));
       messages[1]([welcome]);prompt[1]("");busy[1](false);error[1]("");
     },[contextKey]);
-    function send(){var question=prompt[0].trim();if(!question||busy[0]||!ai.activated)return;
-      var sentContext=contextKey;
-      var conversation=messages[0].concat([{role:"user",content:question},{role:"assistant",content:""}]);messages[1](conversation);prompt[1]("");busy[1](true);error[1]("");
+    React.useEffect(function(){
+      var waiting=pendingContext.current,requestId=String(aiContext.request_id||"");
+      if(!waiting||!requestId||requestId!==waiting.requestId)return;
+      pendingContext.current=null;
+      if(contextRef.current!==waiting.sentContext)return;
+      runGeneration(waiting.question,waiting.history,waiting.sentContext,aiContext);
+    },[String(aiContext.request_id||"")]);
+    function runGeneration(question,history,sentContext,projectEvidence){
+      var scope=helpQuestionScope(question),needsResults=scope==="results"||scope==="full",needsModel=scope==="model"||scope==="full";
       var selection=projectId?["Selected project: "+value(project&&project.name,project&&project.label||projectId)+" ["+projectId+"]","Selected model version: "+value(version&&version.label,versionId||"none")+(versionId?" ["+versionId+"]":""),runId?"Selected model run: "+value(run&&run.label,runId)+" ["+runId+"]":"Selected model run: none"]:["Selected project: none. The displayed model is not currently associated with an opened project in this Help context.","Selected model version: none","Selected model run: none"];
       var dataset=props.dataset||{};
-      var context=["You are LibeRation's browser-local pharmacometric modelling assistant.","Evidence rules: use the supplied project context as the only source for claims about this model, dataset, run, or result. If a requested fact is absent, say exactly that it is not available in the supplied context. Never invent or approximate parameter values, run results, diagnostics, validation status, dataset characteristics, or code behaviour. Clearly label general PK/PD knowledge as general guidance rather than a fact about the current project. Quote the relevant field or short code expression when supporting a project-specific answer. State uncertainty and ask the user to verify consequential modelling decisions. You have no tools and no network access."].concat(selection,["Displayed model: "+value(props.model&&props.model.name,"none"),"ADVAN/TRANS: "+value(props.model&&props.model.advan,"-")+"/"+value(props.model&&props.model.trans,"-"),dataset.loaded?"Dataset: "+value(dataset.name,"Current dataset")+"; "+value(dataset.records,0)+" records, "+value(dataset.subjects,0)+" subjects, "+value(dataset.observations,0)+" observations; columns "+JSON.stringify(list(dataset.columns)):"Dataset: none loaded","THETA definitions: "+JSON.stringify(list(props.model&&props.model.theta)),"OMEGA definitions: "+JSON.stringify(list(props.model&&props.model.omega)),"SIGMA definitions: "+JSON.stringify(list(props.model&&props.model.sigma)),"$PK/$PRED:\n"+value(props.model&&props.model.pred,""),"$DES:\n"+value(props.model&&props.model.des,""),"$ERROR:\n"+value(props.model&&props.model.error,""),props.fit&&props.fit.available?"Current fit: "+props.fit.method+", objective "+formatNumber(props.fit.objective)+"\nEstimated parameters: "+JSON.stringify(props.fit.parameters):"No estimation result is loaded."]).join("\n\n");
-      var history=messages[0].slice(-8).map(function(item){return {role:item.role,content:item.content};});
-      localAIGenerate(ai,[{role:"system",content:context}].concat(history,[{role:"user",content:question}]),function(token){if(contextRef.current!==sentContext)return;messages[1](function(current){var next=current.slice(),last=Object.assign({},next[next.length-1]);last.content+=token;next[next.length-1]=last;return next;});},{purpose:"help",max_tokens:1200,temperature:.1,top_p:.8}).then(function(answer){if(contextRef.current!==sentContext)return;messages[1](function(current){var next=current.slice(),last=Object.assign({},next[next.length-1]);if(!last.content)last.content=answer||"No response was generated.";next[next.length-1]=last;return next;});busy[1](false);}).catch(function(reason){if(contextRef.current!==sentContext)return;messages[1](function(current){var next=current.slice(),last=Object.assign({},next[next.length-1]);if(!last.content)last.content="Generation stopped before a response was produced.";last.failed=true;next[next.length-1]=last;return next;});busy[1](false);error[1](reason.message);});
+      var compactProject=projectEvidence&&String(projectEvidence.project||"")===String(projectId)?{project_name:projectEvidence.project_name,run_count:projectEvidence.run_count,included_runs:projectEvidence.included_runs,omitted_runs:projectEvidence.omitted_runs,message:projectEvidence.message,runs:list(projectEvidence.runs)}:null;
+      var selectedFit=props.fit&&props.fit.available?{method:props.fit.method,method_sequence:props.fit.method_sequence,objective:props.fit.objective,convergence:props.fit.convergence,parameters:props.fit.parameters,covariance:props.fit.covariance,run_info:props.fit.run_info}:null;
+      var context=["You are LibeRation's browser-local pharmacometric modelling assistant.","Evidence rules: use the supplied project context as the only source for claims about this model, dataset, run, or result. If a requested fact is absent, say exactly that it is not available in the supplied context. Never invent or approximate parameter values, run results, diagnostics, validation status, dataset characteristics, or code behaviour. Clearly label general PK/PD knowledge as general guidance rather than a fact about the current project. State uncertainty and ask the user to verify consequential modelling decisions. You have no tools and no network access.","Evidence scope selected for this question: "+scope].concat(selection,["Displayed model: "+value(props.model&&props.model.name,"none")+"; ADVAN/TRANS "+value(props.model&&props.model.advan,"-")+"/"+value(props.model&&props.model.trans,"-"),dataset.loaded?"Dataset metadata: "+value(dataset.name,"Current dataset")+"; "+value(dataset.records,0)+" records, "+value(dataset.subjects,0)+" subjects, "+value(dataset.observations,0)+" observations; columns "+list(dataset.columns).join(", "):"Dataset metadata: none loaded",helpProjectEvidence(compactProject,needsResults)]);
+      if(needsResults)context.push(selectedFit?"Selected fit detail: "+localAIClip(JSON.stringify(selectedFit),1600):"Selected fit detail: no estimation run is selected.","Selected-run diagnostic availability: "+JSON.stringify(props.diagnostics&&props.diagnostics.available||{}));
+      if(needsModel)context=context.concat(["THETA definitions: "+localAIClip(JSON.stringify(list(props.model&&props.model.theta)),800),"OMEGA definitions: "+localAIClip(JSON.stringify(list(props.model&&props.model.omega)),800),"SIGMA definitions: "+localAIClip(JSON.stringify(list(props.model&&props.model.sigma)),600),"$PK/$PRED:\n"+localAIClip(value(props.model&&props.model.pred,""),1200),"$DES:\n"+localAIClip(value(props.model&&props.model.des,""),1200),"$ERROR:\n"+localAIClip(value(props.model&&props.model.error,""),800)]);
+      context=context.join("\n\n");
+      localAIGenerate(ai,[{role:"system",content:context}].concat(history,[{role:"user",content:question}]),function(token){if(contextRef.current!==sentContext)return;messages[1](function(current){var next=current.slice(),last=Object.assign({},next[next.length-1]);last.content+=token;next[next.length-1]=last;return next;});},{purpose:"help",max_tokens:1000,temperature:.1,top_p:.8}).then(function(answer){if(contextRef.current!==sentContext)return;messages[1](function(current){var next=current.slice(),last=Object.assign({},next[next.length-1]);if(!last.content)last.content=answer||"No response was generated.";next[next.length-1]=last;return next;});busy[1](false);}).catch(function(reason){if(contextRef.current!==sentContext)return;messages[1](function(current){var next=current.slice(),last=Object.assign({},next[next.length-1]);if(!last.content)last.content="Generation stopped before a response was produced.";last.failed=true;next[next.length-1]=last;return next;});busy[1](false);error[1](reason.message);});
+    }
+    function send(){var question=prompt[0].trim();if(!question||busy[0]||!ai.activated)return;
+      var sentContext=contextKey,scope=helpQuestionScope(question),projectScope=scope==="results"||scope==="full"?"results":"index",history=messages[0].filter(function(item,index){return index>0&&!item.failed;}).map(function(item){return {role:item.role,content:item.content};});
+      var conversation=messages[0].concat([{role:"user",content:question},{role:"assistant",content:""}]);messages[1](conversation);prompt[1]("");busy[1](true);error[1]("");
+      var contextReady=projectId&&String(aiContext.project||"")===String(projectId)&&!!aiContext.request_id&&(String(aiContext.scope||"results")===projectScope||String(aiContext.scope||"")==="results");
+      if(projectId&&!contextReady){
+        var requestId="ai-context-"+Date.now()+"-"+Math.random().toString(16).slice(2);
+        pendingContext.current={requestId:requestId,question:question,history:history,sentContext:sentContext};
+        if(emit(props,"ai_context_request",{project:projectId,requestId:requestId,scope:projectScope}))return;
+        pendingContext.current=null;
+      }
+      runGeneration(question,history,sentContext,contextReady?aiContext:null);
     }
     if(!ai.activated)return e(Empty,{title:"Local AI is off",detail:"Use Activate AI in the header to enable browser-local help."});
     return e("div",{className:"lw-ai-help"},
-      e("div",{className:"lw-ai-toolbar"},e(AIModelSelect,Object.assign({},props,{className:"lw-ai-model-panel",purpose:"help",label:"Help model"})),e(AIStatusLine,props)),
+      e("div",{className:"lw-ai-toolbar"},e("div",{className:"lw-ai-config-row"},e(AIModelSelect,Object.assign({},props,{className:"lw-ai-model-panel",purpose:"help",label:"Help model"})),e(AIContextSelect,Object.assign({},props,{className:"lw-ai-context-panel",purpose:"help",label:"Context"}))),e(AIStatusLine,props)),
       e("div",{className:"lw-ai-messages"},messages[0].map(function(item,index){return e("div",{key:index,className:"lw-ai-message lw-ai-"+item.role+(item.failed?" lw-ai-failed":"")},e("strong",null,item.role==="user"?"You":"Local AI"),e("div",null,item.content||e("span",{className:"lw-ai-cursor"},busy[0]&&index===messages[0].length-1?"Generating...":"No response was generated.")));})),
       error[0]?e("div",{className:"lw-destructive-note"},error[0]):null,
       e("div",{className:"lw-ai-compose"},e("textarea",{rows:3,value:prompt[0],placeholder:"Ask about the model or workflow...",onChange:function(event){prompt[1](event.target.value);},onKeyDown:function(event){if(event.key==="Enter"&&!event.shiftKey){event.preventDefault();send();}}}),e(Button,{className:"lw-button-primary",disabled:busy[0]||!prompt[0].trim(),onClick:send},busy[0]?"Working...":"Send")),
-      e("p",{className:"lw-help-text"},"Only the displayed project/model/run context is passed to the worker. It has no tools, DOM access, or network capability during inference."));
+      e("p",{className:"lw-help-text"},"Model details and compact saved-run summaries are loaded only when Help needs them. Row-level result data are excluded. The worker has no tools, DOM access, or network capability during inference."));
   }
 
   var reportBlockLabels={title:"Title",introduction:"Introduction",methods:"Methods",run:"Model run",comparison:"Model comparison",discussion:"Discussion",conclusion:"Conclusion",appendix:"Appendix",text:"Text",page_break:"Page break"};
   function reportBlock(type){return {id:"block-"+Date.now()+"-"+Math.random().toString(16).slice(2),type:type,title:reportBlockLabels[type],source:["run","comparison"].indexOf(type)>=0?"run":"user",text:"",run_ids:[],elements:["run","comparison"].indexOf(type)>=0?["summary","parameters","gof"]:[],options:{instruction:"",template:"",source_name:"",source_text:""}};}
   function reportRuns(workspace){var rows=[];list(workspace&&workspace.versions).forEach(function(version){list(version.runs).forEach(function(run){if(!run.queued_job)rows.push({id:run.id,label:value(run.label,run.id),version:value(version.label,version.id),type:run.result_type});});});return rows;}
+  function reportSelections(blocks){
+    var selected={};
+    list(blocks).forEach(function(block){
+      list(block.run_ids).forEach(function(id){
+        id=String(id);if(!selected[id])selected[id]={id:id,elements:[]};
+        list(block.elements).forEach(function(element){if(selected[id].elements.indexOf(element)<0)selected[id].elements.push(element);});
+      });
+    });
+    return Object.keys(selected).map(function(id){if(!selected[id].elements.length)selected[id].elements=["summary","parameters"];return selected[id];});
+  }
+  function reportSelectionKey(selections){return list(selections).map(function(item){return item.id+":"+list(item.elements).slice().sort().join(",");}).sort().join("|");}
+  function reportEvidenceText(context,selections){
+    if(!context||!context.available)return "Selected report-run evidence is unavailable: "+value(context&&context.message,"No saved runs were loaded.");
+    var selected={};list(selections).forEach(function(item){selected[item.id]=list(item.elements);});
+    var output=["Selected report evidence from "+value(context.project_name,context.project||"the project")+": "+list(context.runs).length+" completed run(s)."];
+    list(context.runs).forEach(function(run){
+      var elements=selected[String(run.id)]||["summary","parameters"],section=[helpRunLine(run,elements.indexOf("parameters")>=0)];
+      if(elements.indexOf("summary")>=0){
+        var model=run.model||{},data=run.data||{},timing=run.timing_seconds||{};
+        section.push("Model: "+value(model.name,"unnamed")+"; ADVAN/TRANS "+value(model.advan,"-")+"/"+value(model.trans,"-")+"; solver="+value(model.solver,"-")+"; language="+value(model.language,"-")+"; OMEGA structure="+value(model.omega_structure,"-")+".");
+        section.push("Data: "+value(data.records,0)+" records; "+value(data.subjects,0)+" subjects; "+value(data.observations,0)+" observations; columns="+list(data.columns).join(",")+".");
+        section.push("Timing (seconds): fit="+formatNumber(timing.model_fit)+", covariance="+formatNumber(timing.covariance)+", total="+formatNumber(timing.total)+".");
+      }
+      if(elements.indexOf("parameters")>=0||elements.indexOf("covariance")>=0){
+        section.push("Parameter estimates: "+list(run.parameters).map(function(parameter){var text=value(parameter.name,"parameter")+"="+formatNumber(parameter.estimate);if(parameter.se!==null&&parameter.se!==undefined)text+=" (SE "+formatNumber(parameter.se)+", RSE "+formatNumber(parameter.rse)+")";return text;}).join("; ")+". Covariance: "+JSON.stringify(run.covariance||{})+".");
+      }
+      if(elements.indexOf("gof")>=0)section.push("GOF summary: "+JSON.stringify(run.gof_summary||"not available")+".");
+      var diagnosticNames=["vpc","vpc_categorical","vpc_count","vpc_tte","vpc_competing","vpc_recurrent","npde","npc"];
+      diagnosticNames.forEach(function(name){if(elements.indexOf(name)>=0){var detail=list(run.diagnostic_details).filter(function(item){return item.type===name;})[0];section.push(name.toUpperCase()+": "+JSON.stringify(detail||"not available")+".");}});
+      if(elements.indexOf("run_info")>=0)section.push("Run information: iterations="+value(run.iterations,"not available")+", sequence="+list(run.method_sequence).join(" -> ")+".");
+      if(elements.indexOf("code")>=0){var modelCode=run.model||{};section.push("$PK/$PRED:\n"+localAIClip(modelCode.pred,900)+"\n$DES:\n"+localAIClip(modelCode.des,900)+"\n$ERROR:\n"+localAIClip(modelCode.error,600));}
+      output.push(section.join("\n"));
+    });
+    return output.join("\n\n");
+  }
 
   function ReportDesigner(props) {
     var open=props.open,onClose=props.onClose,initial=[reportBlock("introduction"),reportBlock("methods"),reportBlock("run"),reportBlock("discussion"),reportBlock("conclusion")];
-    var blocks=React.useState(initial),selected=React.useState(null),title=React.useState("LibeRation modelling report"),name=React.useState("liberation-report"),formats=React.useState({docx:true,pdf:true}),dragged=React.useRef(null),runs=reportRuns(props.workspace),ai=props.ai||{};
+    var blocks=React.useState(initial),selected=React.useState(null),title=React.useState("LibeRation modelling report"),name=React.useState("liberation-report"),directory=React.useState(value(props.report_directory,"")),formats=React.useState({docx:true,pdf:true}),dragged=React.useRef(null),runs=reportRuns(props.workspace),ai=props.ai||{},reportContext=props.report_ai_context||{},pendingDraft=React.useRef(null),drafting=React.useState("");
     function update(id,changes){blocks[1](function(current){return current.map(function(block){return block.id===id?Object.assign({},block,changes):block;});});}
     function drop(event,index){event.preventDefault();var type=event.dataTransfer.getData("liber/block-type"),id=event.dataTransfer.getData("liber/block-id"),next=blocks[0].slice();if(type){next.splice(index,0,reportBlock(type));}else if(id){var old=next.findIndex(function(block){return block.id===id;});if(old>=0){var item=next.splice(old,1)[0];if(old<index)index-=1;next.splice(index,0,item);}}blocks[1](next);}
-    function payload(){return {id:"report-main",title:title[0],name:name[0],formats:Object.keys(formats[0]).filter(function(key){return formats[0][key];}),blocks:blocks[0]};}
+    function payload(){return {id:"report-main",title:title[0],name:name[0],directory:directory[0],formats:Object.keys(formats[0]).filter(function(key){return formats[0][key];}),blocks:blocks[0]};}
     function readFile(block,event){var file=event.target.files&&event.target.files[0];if(!file)return;var ext=file.name.split(".").pop().toLowerCase();if(["txt","md","markdown","rmd"].indexOf(ext)>=0){var reader=new FileReader();reader.onload=function(){update(block.id,{text:String(reader.result||""),options:Object.assign({},block.options,{source_name:file.name,source_text:String(reader.result||"")})});};reader.readAsText(file);}else{var binary=new FileReader();binary.onload=function(){emit(props,"report_document",{blockId:block.id,name:file.name,data:String(binary.result||""),nonce:Date.now()});};binary.readAsDataURL(file);}}
     React.useEffect(function(){var handler=function(event){var result=event.detail||{};if(result.input_id&&result.input_id!==props.inputId)return;blocks[1](function(current){return current.map(function(block){return block.id===result.block_id?Object.assign({},block,{text:block.source==="user"?result.text:block.text,options:Object.assign({},block.options,{source_name:result.name,source_text:result.text})}):block;});});};window.addEventListener("liber-report-document",handler);return function(){window.removeEventListener("liber-report-document",handler);};},[props.inputId]);
-    React.useEffect(function(){var design=props.report_design;if(!design||!list(design.blocks).length)return;blocks[1](list(design.blocks).map(function(block){return Object.assign(reportBlock(block.type),block,{run_ids:list(block.run_ids),elements:list(block.elements),options:Object.assign({instruction:"",template:"",source_name:"",source_text:""},block.options||{})});}));title[1](value(design.title,"LibeRation modelling report"));name[1](value(design.name,"liberation-report"));var selectedFormats={docx:false,pdf:false};list(design.formats).forEach(function(format){selectedFormats[format]=true;});formats[1](selectedFormats);},[props.report_design&&props.report_design.updated]);
-    function draft(block){if(!ai.activated)return;var evidence=["Draft the report section titled: "+block.title,"Use only supplied evidence. Mark every missing fact explicitly; never fabricate, interpolate, or generalise model/run results. Keep general scientific background clearly separate from project-specific claims.","Instruction: "+value(block.options.instruction,"None"),"Template: "+value(block.options.template,"None"),"Source material: "+value(block.options.source_text,"None"),"Selected runs: "+block.run_ids.join(", "),props.fit&&props.fit.available?"Loaded fit: "+props.fit.method+", objective "+formatNumber(props.fit.objective)+"\nParameters: "+JSON.stringify(props.fit.parameters):"No selected run evidence is loaded in the panel.","Model code:\n"+value(props.model&&props.model.pred,"")+"\n"+value(props.model&&props.model.des,"")].join("\n\n");update(block.id,{text:""});localAIGenerate(ai,[{role:"system",content:"You draft concise pharmacometric report sections locally. Do not add any claim not directly supported by the supplied evidence. Say when evidence is unavailable."},{role:"user",content:evidence}],function(token){blocks[1](function(current){return current.map(function(item){return item.id===block.id?Object.assign({},item,{text:item.text+token}):item;});});},{purpose:"report",max_tokens:1600,temperature:.1,top_p:.8}).catch(function(error){update(block.id,{text:"[AI drafting failed: "+error.message+"]"});});}
+    React.useEffect(function(){var handler=function(event){directory[1](value(event&&event.detail&&event.detail.path,directory[0]));};window.addEventListener("liber-report-directory",handler);return function(){window.removeEventListener("liber-report-directory",handler);};},[]);
+    React.useEffect(function(){var design=props.report_design;if(!design||!list(design.blocks).length)return;blocks[1](list(design.blocks).map(function(block){return Object.assign(reportBlock(block.type),block,{run_ids:list(block.run_ids),elements:list(block.elements),options:Object.assign({instruction:"",template:"",source_name:"",source_text:""},block.options||{})});}));title[1](value(design.title,"LibeRation modelling report"));name[1](value(design.name,"liberation-report"));directory[1](value(design.directory,props.report_directory||""));var selectedFormats={docx:false,pdf:false};list(design.formats).forEach(function(format){selectedFormats[format]=true;});formats[1](selectedFormats);},[props.report_design&&props.report_design.updated]);
+    React.useEffect(function(){if(!(props.report_design&&props.report_design.directory))directory[1](value(props.report_directory,""));},[props.report_directory]);
+    React.useEffect(function(){var waiting=pendingDraft.current,requestId=String(reportContext.request_id||"");if(!waiting||!requestId||requestId!==waiting.requestId)return;pendingDraft.current=null;runDraft(waiting.block,waiting.selections,reportContext);},[String(reportContext.request_id||"")]);
+    function runDraft(block,selections,context){
+      if(list(selections).length&&!context.available){update(block.id,{text:"[AI drafting failed: "+value(context.message,"Selected run evidence could not be loaded.")+"]"});drafting[1]("");return;}
+      var fallback=props.fit&&props.fit.available?"Currently open fit (used only because the workflow has no selected runs): "+props.fit.method+", objective "+formatNumber(props.fit.objective)+"; parameters "+JSON.stringify(props.fit.parameters):"The workflow has no selected model runs.";
+      var evidence=["Draft the report section titled: "+block.title,"Synthesize a coherent account across every selected run. Compare methods, estimates, uncertainty and diagnostics where relevant to this section. Do not produce a generic checklist of missing facts. Mention an unavailable fact only when it is material to the requested section.","Report workflow: "+blocks[0].map(function(item){return item.title+" ["+item.type+"]";}).join(" -> "),"Instruction: "+value(block.options.instruction,"None"),"Template: "+value(block.options.template,"None"),"Source material: "+localAIClip(value(block.options.source_text,"None"),1200),list(selections).length?reportEvidenceText(context,selections):fallback].join("\n\n");
+      update(block.id,{text:""});
+      localAIGenerate(ai,[{role:"system",content:"You draft concise, connected pharmacometric report prose from the supplied evidence. Treat every listed saved run as available evidence. Integrate the evidence into a narrative; do not invent results and do not repeat a missing-information checklist unless explicitly requested."},{role:"user",content:evidence}],function(token){blocks[1](function(current){return current.map(function(item){return item.id===block.id?Object.assign({},item,{text:item.text+token}):item;});});},{purpose:"report",max_tokens:1800,temperature:.1,top_p:.8}).then(function(){drafting[1]("");}).catch(function(error){drafting[1]("");update(block.id,{text:"[AI drafting failed: "+error.message+"]"});});
+    }
+    function draft(block){
+      if(!ai.activated||drafting[0])return;
+      var selections=reportSelections(blocks[0]),runIds=selections.map(function(item){return item.id;}),projectId=String(props.workspace&&props.workspace.current||""),contextIds=list(reportContext.run_ids).map(String).slice().sort(),requestedIds=runIds.slice().sort();
+      drafting[1](block.id);
+      if(runIds.length&&(!reportContext.available||String(reportContext.project||"")!==projectId||contextIds.join("|")!==requestedIds.join("|"))){
+        var requestId="report-ai-context-"+Date.now()+"-"+Math.random().toString(16).slice(2);pendingDraft.current={requestId:requestId,block:block,selections:selections};
+        if(emit(props,"report_ai_context_request",{project:projectId,runs:runIds,requestId:requestId}))return;
+        pendingDraft.current=null;
+      }
+      runDraft(block,selections,runIds.length?reportContext:null);
+    }
     var current=blocks[0].filter(function(block){return block.id===selected[0];})[0],optionBody=null;
     if(current){
       var common=e(Field,{label:"Heading"},e("input",{value:current.title,onChange:function(event){update(current.id,{title:event.target.value});}}));
       if(["run","comparison"].indexOf(current.type)>=0){
-        optionBody=e("div",{className:"lw-form-stack"},common,e("strong",null,"Model runs"),runs.length?runs.map(function(run){return e("label",{className:"lw-check",key:run.id},e("input",{type:"checkbox",checked:current.run_ids.indexOf(run.id)>=0,onChange:function(event){var next=current.run_ids.filter(function(id){return id!==run.id;});if(event.target.checked)next.push(run.id);update(current.id,{run_ids:next});}})," "+run.version+" / "+run.label);}):e("p",{className:"lw-help-text"},"No completed runs are available."),e("strong",null,"Evidence"),["summary","parameters","code","gof","vpc","vpc_categorical","vpc_tte","npde","npc","covariance","run_info"].map(function(item){return e("label",{className:"lw-check",key:item},e("input",{type:"checkbox",checked:current.elements.indexOf(item)>=0,onChange:function(event){var next=current.elements.filter(function(value){return value!==item;});if(event.target.checked)next.push(item);update(current.id,{elements:next});}})," "+item.replace(/_/g," "));}));
+        optionBody=e("div",{className:"lw-form-stack"},common,e("strong",null,"Model runs"),runs.length?runs.map(function(run){return e("label",{className:"lw-check",key:run.id},e("input",{type:"checkbox",checked:current.run_ids.indexOf(run.id)>=0,onChange:function(event){var next=current.run_ids.filter(function(id){return id!==run.id;});if(event.target.checked)next.push(run.id);update(current.id,{run_ids:next});}})," "+run.version+" / "+run.label);}):e("p",{className:"lw-help-text"},"No completed runs are available."),e("strong",null,"Evidence"),["summary","parameters","code","gof","vpc","vpc_categorical","vpc_count","vpc_tte","vpc_competing","vpc_recurrent","npde","npc","covariance","run_info"].map(function(item){return e("label",{className:"lw-check",key:item},e("input",{type:"checkbox",checked:current.elements.indexOf(item)>=0,onChange:function(event){var next=current.elements.filter(function(value){return value!==item;});if(event.target.checked)next.push(item);update(current.id,{elements:next});}})," "+item.replace(/_/g," "));}));
       }else{
-        optionBody=e("div",{className:"lw-form-stack"},common,current.source==="ai"?e(Field,{label:"AI instruction"},e("textarea",{rows:4,value:value(current.options.instruction,""),onChange:function(event){update(current.id,{options:Object.assign({},current.options,{instruction:event.target.value})});}})):null,e(Field,{label:current.source==="ai"?"Template text":"Section text"},e("textarea",{rows:8,value:current.source==="ai"?value(current.options.template,""):current.text,onChange:function(event){if(current.source==="ai")update(current.id,{options:Object.assign({},current.options,{template:event.target.value})});else update(current.id,{text:event.target.value});}})),e(Field,{label:"Source document (TXT, Markdown, DOCX, PDF)"},e("input",{type:"file",accept:".txt,.md,.docx,.pdf,text/plain,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document",onChange:function(event){readFile(current,event);}})),current.options.source_name?e("p",{className:"lw-help-text"},"Loaded: "+current.options.source_name):null,current.source==="ai"?e(Button,{className:"lw-button-primary",disabled:!ai.activated,onClick:function(){draft(current);}},"Draft with local AI"):null);
+        optionBody=e("div",{className:"lw-form-stack"},common,current.source==="ai"?e(Field,{label:"AI instruction"},e("textarea",{rows:4,value:value(current.options.instruction,""),onChange:function(event){update(current.id,{options:Object.assign({},current.options,{instruction:event.target.value})});}})):null,e(Field,{label:current.source==="ai"?"Template text":"Section text"},e("textarea",{rows:8,value:current.source==="ai"?value(current.options.template,""):current.text,onChange:function(event){if(current.source==="ai")update(current.id,{options:Object.assign({},current.options,{template:event.target.value})});else update(current.id,{text:event.target.value});}})),e(Field,{label:"Source document (TXT, Markdown, DOCX, PDF)"},e("input",{type:"file",accept:".txt,.md,.docx,.pdf,text/plain,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document",onChange:function(event){readFile(current,event);}})),current.options.source_name?e("p",{className:"lw-help-text"},"Loaded: "+current.options.source_name):null,current.source==="ai"?e(Button,{className:"lw-button-primary",disabled:!ai.activated||!!drafting[0],onClick:function(){draft(current);}},drafting[0]===current.id?"Loading evidence...":"Draft with local AI"):null);
       }
     }
     return e(Modal,{open:open,className:"lw-modal-report-designer",onClose:onClose,title:"Visual report designer",footer:e(React.Fragment,null,e(Button,{className:"lw-button-quiet",onClick:function(){emit(props,"report_design_save",payload());}},"Save workflow"),e(Button,{className:"lw-button-primary",disabled:!formats[0].docx&&!formats[0].pdf,onClick:function(){emit(props,"report_design_render",payload());}},"Generate DOCX / PDF"),e(Button,{className:"lw-button-quiet",onClick:onClose},"Close"))},
-      e("div",{className:"lw-report-designer-toolbar"},e(Field,{label:"Report title"},e("input",{value:title[0],onChange:function(event){title[1](event.target.value);}})),e(Field,{label:"Filename"},e("input",{value:name[0],onChange:function(event){name[1](event.target.value);}})),e(AIModelSelect,Object.assign({},props,{className:"lw-ai-model-report",purpose:"report",label:"Report AI model"})),e("label",{className:"lw-check"},e("input",{type:"checkbox",checked:formats[0].docx,onChange:function(event){formats[1](Object.assign({},formats[0],{docx:event.target.checked}));}})," DOCX"),e("label",{className:"lw-check"},e("input",{type:"checkbox",checked:formats[0].pdf,onChange:function(event){formats[1](Object.assign({},formats[0],{pdf:event.target.checked}));}})," PDF")),
+      e("div",{className:"lw-report-designer-toolbar"},e(Field,{label:"Report title"},e("input",{value:title[0],onChange:function(event){title[1](event.target.value);}})),e(Field,{label:"Filename"},e("input",{value:name[0],onChange:function(event){name[1](event.target.value);}})),e(Field,{label:"Save location",className:"lw-report-location"},e("div",null,e("input",{value:directory[0],placeholder:"Report output folder",onChange:function(event){directory[1](event.target.value);}}),e(Button,{className:"lw-button-quiet",title:"Choose report output folder",onClick:function(){emit(props,"report_directory_choose",{directory:directory[0]});}},"Browse..."))),e(AIModelSelect,Object.assign({},props,{className:"lw-ai-model-report",purpose:"report",label:"Report AI model"})),e(AIContextSelect,Object.assign({},props,{className:"lw-ai-context-report",purpose:"report",label:"Context"})),e("label",{className:"lw-check"},e("input",{type:"checkbox",checked:formats[0].docx,onChange:function(event){formats[1](Object.assign({},formats[0],{docx:event.target.checked}));}})," DOCX"),e("label",{className:"lw-check"},e("input",{type:"checkbox",checked:formats[0].pdf,onChange:function(event){formats[1](Object.assign({},formats[0],{pdf:event.target.checked}));}})," PDF")),
       e("div",{className:"lw-report-designer"},
         e("aside",{className:"lw-report-palette"},e("strong",null,"Blocks"),Object.keys(reportBlockLabels).map(function(type){return e("button",{type:"button",key:type,draggable:true,onDragStart:function(event){event.dataTransfer.setData("liber/block-type",type);}},reportBlockLabels[type]);}),e("p",{className:"lw-help-text"},"Drag blocks into the workflow. It remains a single top-to-bottom line.")),
-        e("main",{className:"lw-report-lane",onDragOver:function(event){event.preventDefault();},onDrop:function(event){drop(event,blocks[0].length);}},blocks[0].map(function(block,index){return e(React.Fragment,{key:block.id},e("div",{className:"lw-report-drop",onDragOver:function(event){event.preventDefault();},onDrop:function(event){event.stopPropagation();drop(event,index);}}),e("article",{className:"lw-report-block",draggable:true,onDragStart:function(event){event.dataTransfer.setData("liber/block-id",block.id);}},e("span",{className:"lw-report-order"},index+1),e("div",null,e("strong",null,block.title),e("small",null,block.type.replace(/_/g," "))),!["run","comparison","page_break","title"].includes(block.type)?e("select",{value:block.source,onChange:function(event){update(block.id,{source:event.target.value});}},e("option",{value:"user"},"User generated"),e("option",{value:"ai"},"AI generated")):e("span",{className:"lw-report-source"},block.source),e(Button,{className:"lw-button-quiet",title:"Block details",onClick:function(){selected[1](block.id);}},"..."),block.source==="ai"?e(Button,{className:"lw-button-primary",disabled:!ai.activated,onClick:function(){draft(block);}},"Draft"):null,e(Button,{className:"lw-button-link lw-prior-remove",title:"Remove block",onClick:function(){blocks[1](blocks[0].filter(function(item){return item.id!==block.id;}));}},"x"),block.text?e("p",null,block.text.slice(0,180)+(block.text.length>180?"...":"")):null));}))),
+        e("main",{className:"lw-report-lane",onDragOver:function(event){event.preventDefault();},onDrop:function(event){drop(event,blocks[0].length);}},blocks[0].map(function(block,index){return e(React.Fragment,{key:block.id},e("div",{className:"lw-report-drop",onDragOver:function(event){event.preventDefault();},onDrop:function(event){event.stopPropagation();drop(event,index);}}),e("article",{className:"lw-report-block",draggable:true,onDragStart:function(event){event.dataTransfer.setData("liber/block-id",block.id);}},e("span",{className:"lw-report-order"},index+1),e("div",null,e("strong",null,block.title),e("small",null,block.type.replace(/_/g," "))),!["run","comparison","page_break","title"].includes(block.type)?e("select",{value:block.source,onChange:function(event){update(block.id,{source:event.target.value});}},e("option",{value:"user"},"User generated"),e("option",{value:"ai"},"AI generated")):e("span",{className:"lw-report-source"},block.source),e(Button,{className:"lw-button-quiet",title:"Block details",onClick:function(){selected[1](block.id);}},"..."),block.source==="ai"?e(Button,{className:"lw-button-primary",disabled:!ai.activated||!!drafting[0],onClick:function(){draft(block);}},drafting[0]===block.id?"Loading...":"Draft"):null,e(Button,{className:"lw-button-link lw-prior-remove",title:"Remove block",onClick:function(){blocks[1](blocks[0].filter(function(item){return item.id!==block.id;}));}},"x"),block.text?e("p",null,block.text.slice(0,180)+(block.text.length>180?"...":"")):null));}))),
       e(Modal,{open:!!current,onClose:function(){selected[1](null);},title:current?current.title+" options":"Block options",footer:e(Button,{className:"lw-button-primary",onClick:function(){selected[1](null);}},"Done")},optionBody),
       e(AIStatusLine,props),props.report&&(props.report.docx||props.report.pdf)?e("div",{className:"lw-report-status"},e("strong",null,"Latest report"),props.report.docx?e("span",null,props.report.docx):null,props.report.pdf?e("span",null,props.report.pdf):null):null);
   }
@@ -790,8 +1181,8 @@
 
   function ComparisonPlots(props) {
     var plots = props.plots || {};
-    var labels = { gof:"Goodness-of-fit plots", vpc:"Visual predictive checks", vpc_categorical:"Categorical VPCs", vpc_tte:"Time-to-event VPCs", npde:"NPDE plots", npc:"NPC plots" };
-    var kinds = ["gof","vpc","vpc_categorical","vpc_tte","npde","npc"].filter(function(kind){return list(plots[kind]).length === 2;});
+    var labels = { gof:"Goodness-of-fit plots", vpc:"Visual predictive checks", vpc_categorical:"Categorical VPCs", vpc_count:"Count VPCs", vpc_tte:"Time-to-event VPCs", vpc_competing:"Competing-risk VPCs", vpc_recurrent:"Recurrent-event VPCs", npde:"NPDE plots", npc:"NPC plots" };
+    var kinds = ["gof","vpc","vpc_categorical","vpc_count","vpc_tte","vpc_competing","vpc_recurrent","npde","npc"].filter(function(kind){return list(plots[kind]).length === 2;});
     if (!kinds.length) return null;
     return e("div", { className:"lw-comparison-plot-sections" }, kinds.map(function(kind){
       return e("section", { key:kind }, e("h4",null,labels[kind]), e("div",{className:"lw-comparison-plot-grid"},list(plots[kind]).map(function(item,index){
@@ -866,21 +1257,28 @@
     var diagnostics = props.diagnostics || {};
     var diagnosticAvailability = diagnostics.available || {};
     var centerTabs = [{id:"diagram",label:"Visual model"},{id:"code",label:"Code"},{id:"gof",label:"GOF"}];
+    if (props.hmm&&props.hmm.available) centerTabs.push({id:"hmm",label:"HMM"});
+    if (props.kalman&&props.kalman.available) centerTabs.push({id:"kalman",label:"States"});
     if (diagnosticAvailability.vpc) centerTabs.push({id:"vpc",label:"VPC"});
     if (diagnosticAvailability.vpc_categorical) centerTabs.push({id:"vpc_categorical",label:"Cat VPC"});
+    if (diagnosticAvailability.vpc_count) centerTabs.push({id:"vpc_count",label:"Count VPC"});
     if (diagnosticAvailability.vpc_tte) centerTabs.push({id:"vpc_tte",label:"TTE VPC"});
+    if (diagnosticAvailability.vpc_competing) centerTabs.push({id:"vpc_competing",label:"Risk VPC"});
+    if (diagnosticAvailability.vpc_recurrent) centerTabs.push({id:"vpc_recurrent",label:"Recurrent VPC"});
     if (diagnosticAvailability.npde) centerTabs.push({id:"npde",label:"NPDE"});
     if (diagnosticAvailability.npc) centerTabs.push({id:"npc",label:"NPC"});
     if (diagnosticAvailability.bootstrap) centerTabs.push({id:"bootstrap",label:"Bootstrap"});
     if (diagnosticAvailability.profile) centerTabs.push({id:"profile",label:"Profile"});
     if (diagnosticAvailability.scm) centerTabs.push({id:"scm",label:"SCM"});
-    React.useEffect(function(){if(!centerTabs.some(function(item){return item.id===centerTab[0];}))centerTab[1]("code");},[!!diagnosticAvailability.vpc,!!diagnosticAvailability.vpc_categorical,!!diagnosticAvailability.vpc_tte,!!diagnosticAvailability.npde,!!diagnosticAvailability.npc,!!diagnosticAvailability.bootstrap,!!diagnosticAvailability.profile,!!diagnosticAvailability.scm]);
+    React.useEffect(function(){if(!centerTabs.some(function(item){return item.id===centerTab[0];}))centerTab[1]("code");},[!!(props.hmm&&props.hmm.available),!!(props.kalman&&props.kalman.available),!!diagnosticAvailability.vpc,!!diagnosticAvailability.vpc_categorical,!!diagnosticAvailability.vpc_count,!!diagnosticAvailability.vpc_tte,!!diagnosticAvailability.vpc_competing,!!diagnosticAvailability.vpc_recurrent,!!diagnosticAvailability.npde,!!diagnosticAvailability.npc,!!diagnosticAvailability.bootstrap,!!diagnosticAvailability.profile,!!diagnosticAvailability.scm]);
     React.useEffect(function(){if(props.result&&props.result.kind==="comparison")comparisonModal[1](true);},[props.result&&props.result.comparison_id]);
     function closeComparison(){comparisonModal[1](false);emit(props,"comparison_close");}
     function selectCenterTab(next) {
       centerTab[1](next);
       if (next === "gof" && props.fit.available && !props.fit.gof_loaded) emit(props,"load_payload",{kind:"gof"});
-      if (["vpc","npde","npc","vpc_categorical","vpc_tte","bootstrap","profile","scm"].indexOf(next) >= 0 && diagnosticAvailability[next] && !diagnostics[next]) emit(props,"load_payload",{kind:next});
+      if (next === "hmm" && props.hmm&&props.hmm.available&&!props.hmm.loaded) emit(props,"load_payload",{kind:"hmm"});
+      if (next === "kalman" && props.kalman&&props.kalman.available&&!props.kalman.loaded) emit(props,"load_payload",{kind:"kalman"});
+      if (["vpc","npde","npc","vpc_categorical","vpc_count","vpc_tte","vpc_competing","vpc_recurrent","bootstrap","profile","scm"].indexOf(next) >= 0 && diagnosticAvailability[next] && !diagnostics[next]) emit(props,"load_payload",{kind:next});
     }
     var actions = e("div", { className: "lw-header-actions" },
       e(Button, { className: "lw-button-quiet", disabled: !workspace.current_version, onClick: function () { if(workspace.current_run)emit(props,"run_open",{id:workspace.current,run:workspace.current_run});else emit(props, "project_open", { id: workspace.current, snapshot: workspace.current_version }); } }, "Reload"),
@@ -891,7 +1289,7 @@
       e("div", { className: "lw-center-column" },
         e(Panel, { title: props.model.loaded ? value(props.model.name, "Model version") : "Model version", subtitle: workspace.current_run ? "Selected run " + workspace.current_run : workspace.current_version ? "Selected model version" : "Unsaved", actions: actions, className: "lw-center-panel", bodyClass: "lw-center-body" },
           e(Tabs, { value: tab, onChange: selectCenterTab, items: centerTabs }),
-          centerTabs.map(function(item){return e("div",{key:item.id,className:"lw-center-tab "+(tab===item.id?"":"lw-center-tab-hidden"),"aria-hidden":tab===item.id?"false":"true"},item.id==="diagram"?e(VisualModelEditor,props):item.id==="code"?e(ModelEditor,props):e(CachedDiagnosticsPane,Object.assign({},props,{tab:item.id})));}))),
+          centerTabs.map(function(item){return e("div",{key:item.id,className:"lw-center-tab "+(tab===item.id?"":"lw-center-tab-hidden"),"aria-hidden":tab===item.id?"false":"true"},item.id==="diagram"?e(VisualModelEditor,props):item.id==="code"?e(ModelEditor,props):item.id==="hmm"?e(HmmPane,props):item.id==="kalman"?e(KalmanPane,props):e(CachedDiagnosticsPane,Object.assign({},props,{tab:item.id})));}))),
       e(ResultsPanel, props),
       e(Modal,{open:comparisonModal[0]&&props.result&&props.result.kind==="comparison",className:"lw-modal-comparison",onClose:closeComparison,title:"Compare estimation runs",footer:e(Button,{className:"lw-button-primary",onClick:closeComparison},"Close")},
         e("div",{className:"lw-comparison-content"},
@@ -1095,19 +1493,24 @@
 
   function AIActivation(props) {
     var ai=props.ai||{},active=useSynced(!!ai.activated,[!!ai.activated]),consent=useSynced(!!ai.consented,[!!ai.consented]),modal=React.useState(false);
-    function save(next,agreed){active[1](next);consent[1](agreed);if(!next)localAIShutdown();emit(props,"ai_settings",{activated:next,consented:agreed,help_model:value(ai.help_model,ai.model),report_model:value(ai.report_model,"same_as_help")});}
+    function save(next,agreed){active[1](next);consent[1](agreed);if(!next)localAIShutdown();var detail=localAISettingsDetail(ai);detail.activated=next;detail.consented=agreed;emit(props,"ai_settings",detail);}
     function toggle(event){var next=event.target.checked;if(next&&!consent[0]){modal[1](true);return;}save(next,consent[0]);}
     return e(React.Fragment,null,
       e(AIModelSelect,Object.assign({},props,{className:"lw-ai-model-header",purpose:"help",label:"Help"})),
+      e(AIContextSelect,Object.assign({},props,{className:"lw-ai-context-header",purpose:"help",label:"Ctx"})),
       e(AIModelSelect,Object.assign({},props,{className:"lw-ai-model-header",purpose:"report",label:"Report"})),
+      e(AIContextSelect,Object.assign({},props,{className:"lw-ai-context-header",purpose:"report",label:"Ctx"})),
       e("label",{className:"lw-ai-toggle",title:"Enable optional browser-local WebGPU assistance"},e("span",null,"Activate AI"),e("input",{type:"checkbox",checked:active[0],onChange:toggle}),e("i",null)),
       e(Modal,{open:modal[0],onClose:function(){modal[1](false);},title:"Activate browser-local AI",footer:e(React.Fragment,null,e(Button,{className:"lw-button-quiet",onClick:function(){modal[1](false);}},"Cancel"),e(Button,{className:"lw-button-primary",onClick:function(){modal[1](false);save(true,true);}},"Activate AI"))},
-        e("div",{className:"lw-ai-consent"},e("p",null,"LibeRation uses WebGPU language models that run entirely in a dedicated worker inside this browser session."),e("ul",null,e("li",null,"Each selected open model is downloaded on first actual use and cached for later sessions."),e("li",null,"Only one model is held in GPU memory. Switching between Help and Report unloads the resident model and lazily loads the other."),e("li",null,"Activation and both selections are remembered, but no model loads until you ask for help or draft report text."),e("li",null,"After loading, network APIs in the AI worker are disabled before model context is supplied."),e("li",null,"The model receives no tools, DOM access, or ability to change a model or report.")),e("p",{className:"lw-help-text"},"A compromised browser, extension, or operating system is outside this isolation boundary. AI output can be wrong and must be reviewed as modelling assistance, not clinical advice."))));
+        e("div",{className:"lw-ai-consent"},e("p",null,"LibeRation uses WebGPU language models that run entirely in a dedicated worker inside this browser session."),e("ul",null,e("li",null,"Each selected open model is downloaded on first actual use and cached for later sessions."),e("li",null,"Only one model is held in GPU memory. Switching model or context unloads the resident model and lazily loads the new configuration."),e("li",null,"Activation, model choices, and Help/Report context settings are remembered, but no model loads until you ask for help or draft report text."),e("li",null,"Auto uses a model-aware context size and falls back to a smaller window if browser GPU allocation fails."),e("li",null,"After loading, network APIs in the AI worker are disabled before model context is supplied."),e("li",null,"The model receives no tools, DOM access, or ability to change a model or report.")),e("p",{className:"lw-help-text"},"A compromised browser, extension, or operating system is outside this isolation boundary. AI output can be wrong and must be reviewed as modelling assistance, not clinical advice."))));
   }
 
   function LibeRWorkbench(props) {
     var ribbon = React.useState("home"), theme = React.useState(function () { try { return window.localStorage.getItem("liberationDarkTheme") !== "0"; } catch (error) { return true; } });
-    React.useEffect(function(){if(window.Shiny&&window.Shiny.addCustomMessageHandler)window.Shiny.addCustomMessageHandler("liber-report-document",function(message){window.dispatchEvent(new CustomEvent("liber-report-document",{detail:message||{}}));});},[]);
+    React.useEffect(function(){
+      if(localAI.status.stage==="error"&&!Object.keys(localAI.pending).length)localAIShutdown();
+      if(window.Shiny&&window.Shiny.addCustomMessageHandler){window.Shiny.addCustomMessageHandler("liber-report-document",function(message){window.dispatchEvent(new CustomEvent("liber-report-document",{detail:message||{}}));});window.Shiny.addCustomMessageHandler("liber-report-directory",function(message){window.dispatchEvent(new CustomEvent("liber-report-directory",{detail:message||{}}));});}
+    },[]);
     function toggleTheme() { var next = !theme[0]; theme[1](next); try { window.localStorage.setItem("liberationDarkTheme", next ? "1" : "0"); } catch (error) {} }
     function changeRibbon(next){ribbon[1](next);emit(props,"page_change",{page:next});}
     var ribbonItems = [{id:"home",label:"Home"},{id:"jobs",label:"Jobs"},{id:"data",label:"Data"}];

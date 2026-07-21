@@ -69,6 +69,11 @@ test_that("legacy workbench layout and workflow controls are present", {
   expect_match(source, 'lw-modal-comparison', fixed = TRUE)
   expect_match(source, 'lw-run-flag-cov', fixed = TRUE)
   expect_match(source, 'load_payload', fixed = TRUE)
+  expect_match(source, 'function HmmPane', fixed = TRUE)
+  expect_match(source, 'Retrospective smoothed', fixed = TRUE)
+  expect_match(source, 'kind:"hmm"', fixed = TRUE)
+  expect_match(source, 'function KalmanPane', fixed = TRUE)
+  expect_match(source, 'kind:"kalman"', fixed = TRUE)
   expect_match(source, 'Stratify by', fixed = TRUE)
   expect_match(source, 'function ComparisonPlots', fixed = TRUE)
   expect_match(source, 'lw-button-danger-ghost', fixed = TRUE)
@@ -78,7 +83,28 @@ test_that("legacy workbench layout and workflow controls are present", {
   expect_match(source, 'Selected project:', fixed = TRUE)
   expect_match(source, 'Selected model version:', fixed = TRUE)
   expect_match(source, 'Selected model run:', fixed = TRUE)
-  expect_match(source, 'Dataset:', fixed = TRUE)
+  expect_match(source, 'Dataset metadata:', fixed = TRUE)
+  expect_match(source, 'ai_context_request', fixed = TRUE)
+  expect_match(source, 'Saved project evidence', fixed = TRUE)
+  expect_match(source, 'localAICancelPurpose', fixed = TRUE)
+  expect_match(source, 'localAIRetryPending', fixed = TRUE)
+  expect_match(source, 'DXGI_ERROR_DEVICE_', fixed = TRUE)
+  expect_match(source, 'No usable WebGPU adapter is available', fixed = TRUE)
+  expect_match(source, 'Reset local AI', fixed = TRUE)
+  expect_match(source, 'localAIBudgetMessages', fixed = TRUE)
+  expect_match(source, 'function AIContextSelect', fixed = TRUE)
+  expect_match(source, 'help_context', fixed = TRUE)
+  expect_match(source, 'report_context', fixed = TRUE)
+  expect_match(source, 'context compacted', fixed = TRUE)
+  expect_match(source, 'helpQuestionScope', fixed = TRUE)
+  expect_match(source, 'scope:projectScope', fixed = TRUE)
+  expect_match(source, 'Evidence scope selected for this question', fixed = TRUE)
+  expect_match(source, 'report_ai_context_request', fixed = TRUE)
+  expect_match(source, 'reportSelections', fixed = TRUE)
+  expect_match(source, 'reportEvidenceText', fixed = TRUE)
+  expect_match(source, 'Treat every listed saved run as available evidence', fixed = TRUE)
+  expect_match(source, 'Save location', fixed = TRUE)
+  expect_match(source, 'report_directory_choose', fixed = TRUE)
   expect_match(source, 'Generation stopped before a response was produced.', fixed = TRUE)
   worker_source <- paste(readLines(
     system.file("htmlwidgets", "liber-ai-worker.js", package = "LibeRation"),
@@ -87,6 +113,15 @@ test_that("legacy workbench layout and workflow controls are present", {
   expect_match(worker_source, 'isDisposedFailure', fixed = TRUE)
   expect_match(worker_source, 'recoverEngine', fixed = TRUE)
   expect_match(worker_source, 'Refreshing the local GPU session', fixed = TRUE)
+  expect_match(worker_source, 'DXGI_ERROR_DEVICE_', fixed = TRUE)
+  expect_match(worker_source, 'requestAdapter', fixed = TRUE)
+  expect_match(worker_source, 'powerPreference: "high-performance"', fixed = TRUE)
+  expect_match(worker_source, 'isContextFailure', fixed = TRUE)
+  expect_match(worker_source, 'compactContextRequest', fixed = TRUE)
+  expect_match(worker_source, 'context_compacted', fixed = TRUE)
+  expect_match(worker_source, 'context_window_size: contextWindow', fixed = TRUE)
+  expect_match(worker_source, 'contextFallbacks', fixed = TRUE)
+  expect_match(worker_source, 'isMemoryAllocationFailure', fixed = TRUE)
   server_source <- paste(deparse(body(liber_gui)), collapse = "\n")
   expect_match(server_source, 'q\\$logs\\(selected,\\s+stream = "stdout"', perl = TRUE)
   expect_match(server_source, 'q\\$logs\\(id,\\s+stream = "stdout"', perl = TRUE)
@@ -94,6 +129,78 @@ test_that("legacy workbench layout and workflow controls are present", {
   estimator_source <- paste(deparse(body(LibeRation:::.liber_estimation_arguments)), collapse = "\n")
   expect_match(estimator_source, 'event$gqGrid', fixed = TRUE)
   expect_match(estimator_source, 'event$gqLevel', fixed = TRUE)
+})
+
+test_that("Help AI receives compact saved-run evidence on demand", {
+  fixture <- estimation_fixture()
+  fit <- nm_est(fixture$model, fixture$data, method = "FO", maxit = 1)
+  root <- tempfile("gui-ai-context-")
+  workspace <- nm_workspace(root)
+  project <- nm_project_create(workspace, "AI evidence")
+  version <- nm_project_save(
+    workspace, project$id, fixture$model, fixture$data, label = "Base model"
+  )
+  run <- nm_project_save_run(
+    workspace, project$id, version, fit, label = "FO estimation"
+  )
+  nm_project_save_diagnostics(
+    workspace, project$id, run, list(gof = nm_gof(fit))
+  )
+
+  context <- LibeRation:::.liber_gui_ai_context(
+    workspace, project$id, selected_run = run
+  )
+  expect_true(context$available)
+  expect_equal(context$run_count, 1L)
+  expect_equal(context$runs[[1L]]$label, "FO estimation")
+  expect_equal(context$runs[[1L]]$objective, fit$objective)
+  expect_true(context$runs[[1L]]$diagnostics$gof)
+  expect_true(length(context$runs[[1L]]$parameters) > 0L)
+  expect_false(any(c("data", "output", "gof") %in% names(context$runs[[1L]])))
+
+  index_context <- LibeRation:::.liber_gui_ai_context(
+    workspace, project$id, selected_run = run, detail = "index"
+  )
+  expect_equal(index_context$scope, "index")
+  expect_false("parameters" %in% names(index_context$runs[[1L]]))
+  expect_lt(as.numeric(object.size(index_context)), as.numeric(object.size(context)))
+
+  app <- liber_gui(
+    workspace = workspace, project = project$id, snapshot = version,
+    launch.browser = NULL
+  )
+  server_function <- app[["serverFuncSource"]]()
+  supplied <- NULL
+  shiny::testServer(server_function, {
+    session$setInputs(liber_workbench_event = list(action = "noop", nonce = 0))
+    session$flushReact()
+    session$setInputs(liber_workbench_event = list(
+      action = "ai_context_request", project = project$id,
+      requestId = "help-request-1", scope = "index", nonce = 1
+    ))
+    session$flushReact()
+    supplied <<- shiny::isolate(state$ai_context)
+  })
+  expect_equal(supplied$request_id, "help-request-1")
+  expect_true(supplied$available)
+  expect_equal(supplied$scope, "index")
+  expect_equal(supplied$runs[[1L]]$id, run)
+  expect_false("parameters" %in% names(supplied$runs[[1L]]))
+
+  second_run <- nm_project_save_run(
+    workspace, project$id, version, fit, label = "Second FO estimation"
+  )
+  report_context <- LibeRation:::.liber_gui_report_ai_context(
+    workspace, project$id, c(run, second_run)
+  )
+  expect_true(report_context$available)
+  expect_equal(report_context$run_ids, c(run, second_run))
+  expect_length(report_context$runs, 2L)
+  expect_equal(report_context$runs[[1L]]$model$advan, fixture$model$ADVAN)
+  expect_equal(report_context$runs[[1L]]$data$subjects,
+               length(unique(fit$data$.ID_INDEX)))
+  expect_true(length(report_context$runs[[1L]]$parameters) > 0L)
+  expect_true(is.list(report_context$runs[[1L]]$gof_summary))
 })
 
 test_that("large data and diagnostic payloads are lazy", {
@@ -112,6 +219,79 @@ test_that("large data and diagnostic payloads are lazy", {
   diagnostics <- LibeRation:::.liber_gui_diagnostics(list(vpc = vpc), payload = character())
   expect_true(diagnostics$available$vpc)
   expect_null(diagnostics$vpc)
+})
+
+test_that("HMM GUI payload exposes decoder trajectories and sequence evidence", {
+  decoded <- data.frame(
+    ID = c("A", "A"), TIME = 0:1, DVID = 1L,
+    HMM_ROW_NLL = c(0.2, 0.3),
+    HMM_FILTER_STATE_INDEX = c(1L, 2L),
+    HMM_FILTER_STATE = c("low", "high"),
+    HMM_SMOOTH_STATE_INDEX = c(1L, 1L),
+    HMM_SMOOTH_STATE = c("low", "low"),
+    HMM_VITERBI_STATE_INDEX = c(1L, 1L),
+    HMM_VITERBI_STATE = c("low", "low"),
+    HMM_FILTER_PROB_low = c(0.8, 0.4),
+    HMM_FILTER_PROB_high = c(0.2, 0.6),
+    HMM_SMOOTH_PROB_low = c(0.9, 0.7),
+    HMM_SMOOTH_PROB_high = c(0.1, 0.3)
+  )
+  attr(decoded, "states") <- c("low", "high")
+  attr(decoded, "method") <- "all"
+  attr(decoded, "eta_type") <- "individual"
+  attr(decoded, "log_likelihood") <- -0.5
+  attr(decoded, "sequence_summary") <- data.frame(
+    ID = "A", DVID = 1L, LOG_LIKELIHOOD = -0.5,
+    VITERBI_LOG_JOINT = -0.7, VITERBI_LOG_POSTERIOR = -0.2
+  )
+  class(decoded) <- c("nm_hmm_decode", class(decoded))
+
+  payload <- LibeRation:::.liber_gui_hmm(decoded)
+  expect_true(payload$available)
+  expect_true(payload$loaded)
+  expect_equal(payload$observations, 2L)
+  expect_equal(payload$sequences, 1L)
+  expect_equal(vapply(payload$states, `[[`, character(1), "label"),
+               c("low", "high"))
+  expect_equal(payload$rows[[1L]]$SUBJECT, "A")
+  expect_equal(payload$rows[[2L]]$HMM_SMOOTH_STATE, "low")
+  expect_equal(payload$sequence_summary[[1L]]$VITERBI_LOG_POSTERIOR, -0.2)
+
+  unloaded <- LibeRation:::.liber_gui_hmm(available = TRUE)
+  expect_true(unloaded$available)
+  expect_false(unloaded$loaded)
+  expect_length(unloaded$rows, 0L)
+})
+
+test_that("linear state-space results have a lazy GUI payload", {
+  decoded <- data.frame(
+    ID = c("A", "A"), TIME = c(0, 1), DVID = 1L, DV = c(1.2, 1.4),
+    KF_PRED_exposure = c(0, 0.8),
+    KF_FILTER_exposure = c(0.7, 1.0),
+    KF_SMOOTH_exposure = c(0.9, 1.0),
+    KF_FILTER_SD_exposure = c(0.5, 0.4),
+    KF_SMOOTH_SD_exposure = c(0.3, 0.4),
+    KF_INNOVATION = c(1.2, 0.6),
+    KF_INNOVATION_VARIANCE = c(1.44, 0.36),
+    KF_ROW_NLL = c(1.1, 0.8)
+  )
+  attr(decoded, "states") <- "exposure"
+  attr(decoded, "eta_type") <- "individual"
+  attr(decoded, "log_likelihood") <- -1.9
+  class(decoded) <- c("nm_kalman_decode", class(decoded))
+
+  payload <- LibeRation:::.liber_gui_kalman(decoded)
+  expect_true(payload$available)
+  expect_true(payload$loaded)
+  expect_equal(payload$observations, 2L)
+  expect_equal(payload$sequences, 1L)
+  expect_equal(payload$states[[1L]]$label, "exposure")
+  expect_equal(payload$rows[[1L]]$KF_STANDARDIZED_INNOVATION, 1)
+
+  unloaded <- LibeRation:::.liber_gui_kalman(available = TRUE)
+  expect_true(unloaded$available)
+  expect_false(unloaded$loaded)
+  expect_length(unloaded$rows, 0L)
 })
 
 test_that("selected run outputs are loaded lazily into Data explorer", {
@@ -142,6 +322,59 @@ test_that("draft model validation sees unsaved code and generated outputs", {
   expect_true("K" %in% nm_model_outputs(draft)$name)
   expect_equal(draft$OUTPUT, c("PRED", "K"))
   expect_s3_class(nm_compile(draft), "NMEngine")
+})
+
+test_that("GUI detects user likelihood edits and exposes compatible methods", {
+  model <- LibeRation:::.liber_model_template(1L)
+  draft <- LibeRation:::.liber_model_from_event(model, list(
+    pred = paste(model$PRED, "P = 1 / (1 + exp(-THETA(1))); F = P", sep = "\n"),
+    error = "LOGLIK = log(pmax(ifelse(DV == 1, F, 1 - F), 1e-12))"
+  ))
+  payload <- LibeRation:::.liber_gui_model(draft)
+  expect_identical(payload$likelihood_type, "likelihood")
+  expect_identical(draft$likelihood_output, "LOGLIK")
+
+  source <- paste(readLines(
+    system.file("htmlwidgets", "liberWorkbench.js", package = "LibeRation"),
+    warn = FALSE
+  ), collapse = "\n")
+  expect_match(source, "User-defined likelihood detected", fixed = TRUE)
+  expect_match(source, 'estimationMethod[1]("LAPLACE")', fixed = TRUE)
+})
+
+test_that("GUI exposes first-class outcomes, templates, and predictive checks", {
+  model <- nm_model(
+    INPUT = c("ID", "TIME", "DV", "MDV"), ADVAN = 1,
+    PRED = "MU=exp(THETA(1)); CL=1; V=1; S1=V; F=MU",
+    THETAS = data.frame(THETA = 1, Value = 0, LOWER = -10, UPPER = 10),
+    OUTCOMES = nm_outcome("poisson", name = "seizures", prediction = "MU")
+  )
+  payload <- LibeRation:::.liber_gui_model(model)
+  expect_equal(payload$outcomes[[1L]]$family, "poisson")
+  expect_equal(payload$outcomes[[1L]]$name, "seizures")
+  expect_true(payload$outcomes[[1L]]$generated_error)
+
+  count <- structure(list(
+    nsim = 20L, outcome = "seizures", family = "poisson", dvid = NULL,
+    observed = data.frame(TIME = 0, MEAN = 1),
+    simulated = data.frame(TIME = 0, MEAN_median = 1,
+                           MEAN_lower = 0.5, MEAN_upper = 1.5)
+  ), class = "nm_vpc_count")
+  diagnostics <- LibeRation:::.liber_gui_diagnostics(
+    list(vpc_count = count), payload = "vpc_count"
+  )
+  expect_true(diagnostics$available$vpc_count)
+  expect_equal(diagnostics$vpc_count$kind, "vpc_count")
+
+  source <- paste(readLines(
+    system.file("htmlwidgets", "liberWorkbench.js", package = "LibeRation"),
+    warn = FALSE
+  ), collapse = "\n")
+  expect_match(source, "First-class outcomes", fixed = TRUE)
+  expect_match(source, "Nonlinear elimination", fixed = TRUE)
+  expect_match(source, "Count VPC", fixed = TRUE)
+  expect_match(source, "Competing-risk VPC", fixed = TRUE)
+  expect_match(source, "Recurrent-event VPC", fixed = TRUE)
 })
 
 test_that("the initial queue refresh runs inside a reactive isolate", {
@@ -186,11 +419,18 @@ test_that("client queue settings live in the workspace and survive GUI recreatio
 
   app <- liber_gui(workspace = workspace, launch.browser = NULL)
   server_function <- app[["serverFuncSource"]]()
-  state <- get("state", envir = environment(server_function), inherits = TRUE)
   favicon_href <- get("favicon_href", envir = environment(server_function), inherits = TRUE)
-  expect_equal(shiny::isolate(state$queue_id), "team")
-  expect_equal(shiny::isolate(state$remote_meta)$team$name, "Team server")
-  expect_s3_class(shiny::isolate(state$remote_queues)$team, "LibeRRemote")
+  restored_state <- NULL
+  shiny::testServer(server_function, {
+    restored_state <<- shiny::isolate(list(
+      queue_id = state$queue_id,
+      remote_meta = state$remote_meta,
+      remote_queues = state$remote_queues
+    ))
+  })
+  expect_equal(restored_state$queue_id, "team")
+  expect_equal(restored_state$remote_meta$team$name, "Team server")
+  expect_s3_class(restored_state$remote_queues$team, "LibeRRemote")
   expect_match(favicon_href, "^liberation-assets-")
   expect_false(startsWith(favicon_href, "data:"))
   expect_lt(nchar(favicon_href), 100L)
@@ -279,6 +519,27 @@ test_that("all supported ADVAN templates are valid models", {
   expect_equal(attr(ode, "name"), "Four-state ODE")
   expect_s3_class(liber_gui(workspace = tempfile("gui-workspace-"), launch.browser = NULL),
                   "shiny.appobj")
+})
+
+test_that("hosted GUI sessions receive different ephemeral workspaces", {
+  root <- tempfile("gui-hosted-")
+  app <- liber_gui(
+    workspace = root, queue = FALSE, session_workspace = TRUE,
+    launch.browser = NULL
+  )
+  server <- app[["serverFuncSource"]]()
+  paths <- character()
+  shiny::testServer(server, {
+    paths <<- c(paths, workspace$path)
+  })
+  shiny::testServer(server, {
+    paths <<- c(paths, workspace$path)
+  })
+  expect_length(unique(paths), 2L)
+  expect_true(all(startsWith(
+    normalizePath(paths, winslash = "/"),
+    paste0(normalizePath(root, winslash = "/", mustWork = FALSE), "/sessions/")
+  )))
 })
 
 test_that("template project creation produces a linked synthetic dataset and version", {
@@ -374,8 +635,9 @@ test_that("model comparison includes GOF and only diagnostics common to both run
 
   app <- liber_gui(workspace = workspace, project = project$id, launch.browser = NULL)
   server_function <- app[["serverFuncSource"]]()
-  state <- get("state", envir = environment(server_function), inherits = TRUE)
   comparison <- NULL
+  closed_result <- NULL
+  comparison_open <- NULL
   shiny::testServer(server_function, {
     session$setInputs(liber_workbench_event = list(action = "noop", nonce = 0))
     session$flushReact()
@@ -388,14 +650,16 @@ test_that("model comparison includes GOF and only diagnostics common to both run
       action = "comparison_close", nonce = 2
     ))
     session$flushReact()
+    closed_result <<- shiny::isolate(state$result)
+    comparison_open <<- shiny::isolate(state$comparison_open)
   })
   expect_s3_class(comparison, "liber_gui_comparison")
   expect_named(comparison$plots, c("gof", "vpc"))
   expect_length(comparison$plots$gof, 2L)
   expect_length(comparison$plots$vpc, 2L)
   expect_null(comparison$plots$npc)
-  expect_null(shiny::isolate(state$result))
-  expect_false(shiny::isolate(state$comparison_open))
+  expect_null(closed_result)
+  expect_false(comparison_open)
 })
 
 test_that("local queued jobs are durable and opening a result is idempotent", {
@@ -406,7 +670,6 @@ test_that("local queued jobs are durable and opening a result is idempotent", {
   queue <- LibeRties::ls_local_queue(queue_root, "local", max_workers = 1L)
   app <- liber_gui(workspace = root, queue = queue, launch.browser = NULL)
   server_function <- app[["serverFuncSource"]]()
-  state <- get("state", envir = environment(server_function), inherits = TRUE)
 
   shiny::testServer(server_function, {
     send <- function(event) {
@@ -443,8 +706,10 @@ test_that("local queued jobs are durable and opening a result is idempotent", {
 
   restarted <- liber_gui(workspace = root, queue = queue, launch.browser = NULL)
   restarted_server <- restarted[["serverFuncSource"]]()
-  restarted_state <- get("state", envir = environment(restarted_server), inherits = TRUE)
-  restarted_jobs <- shiny::isolate(restarted_state$jobs)
+  restarted_jobs <- NULL
+  shiny::testServer(restarted_server, {
+    restarted_jobs <<- shiny::isolate(state$jobs)
+  })
   expect_equal(nrow(restarted_jobs), 1L)
   expect_equal(restarted_jobs$status[[1L]], "completed")
 })
@@ -455,13 +720,10 @@ test_that("default liber_gui creates and exposes its persistent local queue", {
   dir.create(root)
   app <- liber_gui(workspace = root, queue = NULL, launch.browser = NULL)
   server_function <- app[["serverFuncSource"]]()
-  state <- get("state", envir = environment(server_function), inherits = TRUE)
-  queue <- get("queue", envir = environment(server_function), inherits = TRUE)
-  expect_s3_class(queue, "LibeRQueue")
-  expect_equal(normalizePath(queue$root, winslash = "/"),
-               normalizePath(file.path(root, ".jobs"), winslash = "/", mustWork = FALSE))
+  created_queue <- NULL
 
   shiny::testServer(server_function, {
+    created_queue <<- queue
     send <- function(event) {
       session$setInputs(liber_workbench_event = event)
       session$flushReact()
@@ -478,4 +740,7 @@ test_that("default liber_gui creates and exposes its persistent local queue", {
     expect_equal(nrow(queue$list()), 1L)
     expect_match(paste(output$workbench, collapse = ""), "Visible local job", fixed = TRUE)
   })
+  expect_s3_class(created_queue, "LibeRQueue")
+  expect_equal(normalizePath(created_queue$root, winslash = "/"),
+               normalizePath(file.path(root, ".jobs"), winslash = "/", mustWork = FALSE))
 })

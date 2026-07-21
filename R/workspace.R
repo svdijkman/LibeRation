@@ -69,10 +69,14 @@
     parent_id = character(nrow(snapshots)),
     run_number = rep(NA_integer_, nrow(snapshots)),
     has_vpc = rep(FALSE, nrow(snapshots)),
+    has_gof = rep(FALSE, nrow(snapshots)),
     has_npc = rep(FALSE, nrow(snapshots)),
     has_npde = rep(FALSE, nrow(snapshots)),
     has_vpc_categorical = rep(FALSE, nrow(snapshots)),
+    has_vpc_count = rep(FALSE, nrow(snapshots)),
     has_vpc_tte = rep(FALSE, nrow(snapshots)),
+    has_vpc_competing = rep(FALSE, nrow(snapshots)),
+    has_vpc_recurrent = rep(FALSE, nrow(snapshots)),
     has_bootstrap = rep(FALSE, nrow(snapshots)),
     has_profile = rep(FALSE, nrow(snapshots)),
     has_scm = rep(FALSE, nrow(snapshots)),
@@ -215,7 +219,10 @@ nm_project_create <- function(workspace, name, id = NULL, description = NULL) {
       result_type = character(), method = character(),
       entry_type = character(), parent_id = character(), run_number = integer(),
       has_vpc = logical(), has_npc = logical(), has_npde = logical(),
-      has_vpc_categorical = logical(), has_vpc_tte = logical(),
+      has_gof = logical(),
+      has_vpc_categorical = logical(), has_vpc_count = logical(),
+      has_vpc_tte = logical(), has_vpc_competing = logical(),
+      has_vpc_recurrent = logical(),
       has_bootstrap = logical(), has_profile = logical(), has_scm = logical(),
       has_covariance = logical(),
       stringsAsFactors = FALSE
@@ -314,8 +321,10 @@ nm_project_save <- function(workspace, project, model = NULL, data = NULL,
     result_type = .nm_snapshot_result_type(result),
     method = if (inherits(result, "nm_fit")) .nm_fit_method_label(result) else "",
     entry_type = "version", parent_id = "", run_number = NA_integer_,
-    has_vpc = FALSE, has_npc = FALSE, has_npde = FALSE,
-    has_vpc_categorical = FALSE, has_vpc_tte = FALSE,
+    has_vpc = FALSE, has_npc = FALSE, has_npde = FALSE, has_gof = FALSE,
+    has_vpc_categorical = FALSE, has_vpc_count = FALSE,
+    has_vpc_tte = FALSE, has_vpc_competing = FALSE,
+    has_vpc_recurrent = FALSE,
     has_bootstrap = FALSE, has_profile = FALSE, has_scm = FALSE,
     has_covariance = FALSE, queue_id = "", queue_job_id = "",
     stringsAsFactors = FALSE
@@ -391,8 +400,10 @@ nm_project_save_run <- function(workspace, project, version, result, label = NUL
     result_type = kind,
     method = if (inherits(result, "nm_fit")) .nm_fit_method_label(result) else "",
     entry_type = "run", parent_id = version, run_number = as.integer(number),
-    has_vpc = FALSE, has_npc = FALSE, has_npde = FALSE,
-    has_vpc_categorical = FALSE, has_vpc_tte = FALSE,
+    has_vpc = FALSE, has_npc = FALSE, has_npde = FALSE, has_gof = FALSE,
+    has_vpc_categorical = FALSE, has_vpc_count = FALSE,
+    has_vpc_tte = FALSE, has_vpc_competing = FALSE,
+    has_vpc_recurrent = FALSE,
     has_bootstrap = FALSE, has_profile = FALSE, has_scm = FALSE,
     has_covariance = inherits(result, "nm_fit") &&
       !is.null(result$covariance) &&
@@ -427,8 +438,11 @@ nm_project_save_diagnostics <- function(workspace, project, run, diagnostics) {
   if (!is.list(diagnostics) || is.null(names(diagnostics))) {
     .nm_stop("`diagnostics` must be a named list.")
   }
-  allowed <- c("gof", "vpc", "npc", "npde", "vpc_categorical", "vpc_tte",
-               "bootstrap", "profile", "scm")
+  allowed <- c(
+    "gof", "vpc", "npc", "npde", "vpc_categorical", "vpc_count",
+    "vpc_tte", "vpc_competing", "vpc_recurrent",
+    "bootstrap", "profile", "scm"
+  )
   if (length(setdiff(names(diagnostics), allowed))) .nm_stop("Unknown diagnostic type.")
   current <- nm_project_load_diagnostics(workspace, project, run)
   merged <- utils::modifyList(current, diagnostics)
@@ -437,8 +451,9 @@ nm_project_save_diagnostics <- function(workspace, project, run, diagnostics) {
     .nm_stop("Unable to create project diagnostics directory.")
   }
   .nm_workspace_atomic_save(merged, file.path(directory, paste0(run, ".rds")))
-  flags <- setdiff(allowed, "gof")
-  for (name in flags) manifest$snapshots[[paste0("has_", name)]][[index]] <- !is.null(merged[[name]])
+  for (name in allowed) {
+    manifest$snapshots[[paste0("has_", name)]][[index]] <- !is.null(merged[[name]])
+  }
   manifest$updated <- format(Sys.time(), "%Y-%m-%dT%H:%M:%OS3Z", tz = "UTC")
   .nm_workspace_atomic_save(manifest, file.path(.nm_project_path(workspace, project), "manifest.rds"))
   invisible(merged)
