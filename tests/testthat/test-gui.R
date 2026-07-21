@@ -324,6 +324,59 @@ test_that("draft model validation sees unsaved code and generated outputs", {
   expect_s3_class(nm_compile(draft), "NMEngine")
 })
 
+test_that("draft validation synchronizes THETA ETA and residual parameter tables", {
+  model <- nm_model(
+    INPUT = c("ID", "TIME", "EVID", "AMT", "CMT", "DV", "MDV"),
+    ADVAN = 1,
+    PRED = "CL=THETA(1)*exp(ETA(1)); V=THETA(2); S1=V",
+    ERROR = "Y=F+ERR(1)",
+    THETAS = data.frame(THETA = 1:2, Value = c(2, 20)),
+    OMEGAS = data.frame(OMEGA = 1, Value = 0.1),
+    SIGMAS = data.frame(SIGMA = 1, Value = 0.1)
+  )
+  draft <- LibeRation:::.liber_model_from_event(model, list(
+    pred = paste(model$PRED, "BIO=THETA(3)*exp(ETA(2))", sep = "\n"),
+    error = "Y=F*(1+ERR(1))+ERR(2)"
+  ))
+  expect_equal(nrow(draft$THETAS), 3L)
+  expect_equal(draft$n_eta, 2L)
+  expect_equal(nrow(draft$SIGMAS), 2L)
+  expect_equal(draft$THETAS$Value[[3L]], 1)
+  expect_equal(draft$OMEGAS$Value[[2L]], 0.1)
+  expect_equal(draft$SIGMAS$Value[[2L]], 0.1)
+  expect_s3_class(nm_compile(draft), "NMEngine")
+
+  full <- LibeRation:::.liber_model_from_event(model, list(
+    pred = paste(model$PRED, "BIO=THETA(3)*exp(ETA(2))", sep = "\n"),
+    omega_structure = "full"
+  ))
+  expect_equal(nrow(full$OMEGAS), 3L)
+  expect_equal(full$OMEGAS[, c("ROW", "COL")],
+               data.frame(ROW = c(1L, 2L, 2L), COL = c(1L, 1L, 2L)))
+})
+
+test_that("GUI parameter estimates use THETA OMEGA SIGMA presentation order", {
+  values <- LibeRation:::.liber_gui_parameter_values(list(
+    theta = c(1, 2), omega = c(0.1, 0.2), sigma = 0.3
+  ))
+  expect_equal(
+    names(values),
+    c("THETA1", "THETA2", "OMEGA1", "OMEGA2", "SIGMA1")
+  )
+})
+
+test_that("validation payload returns synchronized draft parameter tables", {
+  validation <- structure(list(
+    kind = "model_validation", nonce = "validation-1",
+    parameters = list(theta = list(list(THETA = 1, Value = 1)),
+                      omega = list(), sigma = list())
+  ), class = "liber_gui_validation")
+  payload <- LibeRation:::.liber_gui_result(validation)
+  expect_equal(payload$status, "validated")
+  expect_equal(payload$kind, "model_validation")
+  expect_equal(payload$parameters$theta[[1L]]$THETA, 1)
+})
+
 test_that("GUI detects user likelihood edits and exposes compatible methods", {
   model <- LibeRation:::.liber_model_template(1L)
   draft <- LibeRation:::.liber_model_from_event(model, list(

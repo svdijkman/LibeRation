@@ -1,3 +1,19 @@
+# LibeRation 0.7.1
+
+- Restores exact HMM emission-parameter gradients for `$ERROR` expressions
+  that branch on fixed observations such as `ifelse(DV == 0, ...)`, via the
+  corrected LibeRtAD 0.7.4 conditional-expression implementation.
+- Moves the browser-local AI model and context controls into a compact settings
+  dialog opened beside the `Activate AI` switch.
+- Synchronizes THETA, OMEGA, and SIGMA tables with parameter references found
+  in the editable model code during validation and application, while retaining
+  explicit add/remove-row controls for manual model construction.
+- Presents estimates consistently in pharmacometric order: THETA, OMEGA,
+  SIGMA.
+- Corrects visual-model parameter renaming so referenced parameter rows are
+  renamed instead of duplicated, and permits compartment numbers to be swapped
+  within the current diagram.
+
 # LibeRation 0.7.0
 
 - Adds opt-in per-browser-session workspaces for hosted demonstrations and

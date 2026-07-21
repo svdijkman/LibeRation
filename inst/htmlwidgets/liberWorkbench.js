@@ -489,7 +489,11 @@
 
   function ParameterGrid(props) {
     var rows = list(props.rows);
-    return e("div", { className: "lw-parameter-block" }, e("h5", null, props.title), rows.length ? e("table", { className: "lw-param-table" },
+    return e("div", { className: "lw-parameter-block" },
+      e("div",{className:"lw-parameter-heading"},e("h5", null, props.title),e("div",null,
+        props.onRemove?e(Button,{className:"lw-button-quiet lw-parameter-resize",disabled:!rows.length,onClick:props.onRemove,title:"Remove the last "+value(props.unitLabel,props.prefix)+" definition"},"−"):null,
+        props.onAdd?e(Button,{className:"lw-button-quiet lw-parameter-resize",onClick:props.onAdd,title:"Add "+value(props.unitLabel,props.prefix)+" definition"},"+ Add "+value(props.unitLabel,props.prefix)):null)),
+      rows.length ? e("table", { className: "lw-param-table" },
       e("thead", null, e("tr", null, e("th", null, props.matrix ? "Element" : "Name"), e("th", null, "Initial"), props.bounds?e("th",null,"Lower"):null, props.bounds?e("th",null,"Upper"):null, e("th", null, "Fixed"))),
       e("tbody", null, rows.map(function (row, index) { var name = props.matrix ? "OMEGA(" + value(row.ROW, index + 1) + "," + value(row.COL, index + 1) + ")" : props.prefix + value(row[props.indexName], index + 1); return e("tr", { key: name + "-" + index },
         e("td", null, name),
@@ -532,11 +536,52 @@
     var outputState = useSynced(list(model.output), [model.output]), selectedOutput = outputState[0], setSelectedOutput = outputState[1];
     var columnModal = React.useState(false), transHelp = React.useState(false);
     var dirty = source.pred !== value(model.pred, "") || source.des !== value(model.des, "") || source.alg !== value(model.alg, "") || source.error !== value(model.error, "Y=F") || advanState[0] !== String(value(model.advan, 4)) || transState[0] !== String(value(model.trans, 2)) || problemState[0] !== value(model.name, "Untitled model") || JSON.stringify(parameters) !== JSON.stringify({ theta: cloneRows(model.theta), omega: cloneRows(model.omega), sigma: cloneRows(model.sigma) }) || JSON.stringify(priors) !== JSON.stringify(cloneRows(model.priors)) || omegaStructure !== value(model.omega_structure,"diagonal") || JSON.stringify(selectedInput) !== JSON.stringify(list(model.input)) || JSON.stringify(selectedOutput) !== JSON.stringify(list(model.output));
+    var validationNonce=props.result&&props.result.kind==="model_validation"?props.result.nonce:null;
+    React.useEffect(function(){
+      if(!validationNonce||!props.result.parameters)return;
+      setParameters({theta:cloneRows(props.result.parameters.theta),omega:cloneRows(props.result.parameters.omega),sigma:cloneRows(props.result.parameters.sigma)});
+      if(props.result.parameters.priors)setPriors(cloneRows(props.result.parameters.priors));
+    },[validationNonce]);
     function updateParameter(kind, index, field, nextValue) {
       var next = Object.assign({}, parameters); next[kind] = cloneRows(parameters[kind]); next[kind][index][field] = nextValue; setParameters(next);
     }
+    function omegaDimension(rows){var dimension=0;list(rows).forEach(function(row,index){dimension=Math.max(dimension,Number(value(row.ROW,row.OMEGA||index+1))||0,Number(value(row.COL,row.OMEGA||index+1))||0);});return dimension;}
+    function omegaRowsForDimension(count,current){
+      count=Math.max(0,Number(count)||0);current=cloneRows(current);
+      function find(row,column){return current.filter(function(item,index){return Number(value(item.ROW,item.OMEGA||index+1))===row&&Number(value(item.COL,item.OMEGA||index+1))===column;})[0];}
+      var rows=[];
+      if(omegaStructure==="full"){
+        for(var row=1;row<=count;row+=1)for(var column=1;column<=row;column+=1){var existing=find(row,column);rows.push({OMEGA:rows.length+1,ROW:row,COL:column,Value:existing?Number(existing.Value):(row===column?0.1:0),FIX:existing?!!existing.FIX:false});}
+      }else{
+        for(var diagonal=1;diagonal<=count;diagonal+=1){var item=find(diagonal,diagonal);rows.push({OMEGA:diagonal,ROW:diagonal,COL:diagonal,Value:item?Number(item.Value):0.1,FIX:item?!!item.FIX:false});}
+      }
+      return rows;
+    }
+    function simpleRowsForCount(kind,count,current){
+      count=Math.max(0,Number(count)||0);var rows=cloneRows(current).slice(0,count),indexName=kind==="theta"?"THETA":"SIGMA";
+      while(rows.length<count)rows.push(kind==="theta"?{THETA:rows.length+1,Value:1,LOWER:null,UPPER:null,FIX:false}:{SIGMA:rows.length+1,Value:0.1,FIX:false});
+      rows.forEach(function(row,index){row[indexName]=index+1;});return rows;
+    }
+    function parameterNames(next){return next.theta.map(function(_,i){return "THETA"+(i+1);}).concat(next.omega.map(function(_,i){return "OMEGA"+(i+1);})).concat(next.sigma.map(function(_,i){return "SIGMA"+(i+1);}));}
+    function commitParameterRows(next){var valid=parameterNames(next);setParameters(next);setPriors(cloneRows(priors).filter(function(prior){return valid.indexOf(String(prior.parameter))>=0;}));return next;}
+    function resizeParameterKind(kind,delta){
+      var next={theta:cloneRows(parameters.theta),omega:cloneRows(parameters.omega),sigma:cloneRows(parameters.sigma)};
+      if(kind==="omega")next.omega=omegaRowsForDimension(Math.max(0,omegaDimension(next.omega)+delta),next.omega);
+      else next[kind]=simpleRowsForCount(kind,Math.max(0,next[kind].length+delta),next[kind]);
+      commitParameterRows(next);
+    }
+    function maximumCodeReference(names){
+      var code=[source.pred,source.des,source.alg,source.error].join("\n").replace(/\/\*[\s\S]*?\*\//g,"").replace(/\/\/.*$/gm,"").replace(/#.*$/gm,"");
+      var pattern=new RegExp("\\b(?:"+names.join("|")+")\\s*\\(\\s*([1-9][0-9]*)\\s*\\)","gi"),match,maximum=0;
+      while((match=pattern.exec(code))!==null)maximum=Math.max(maximum,Number(match[1])||0);
+      return maximum;
+    }
+    function synchronizedParameters(){
+      var thetaCount=Math.max(parameters.theta.length,maximumCodeReference(["THETA"])),etaCount=Math.max(omegaDimension(parameters.omega),maximumCodeReference(["ETA"])),sigmaCount=Math.max(parameters.sigma.length,maximumCodeReference(["ERR","EPS","SIGMA"]));
+      return {theta:simpleRowsForCount("theta",thetaCount,parameters.theta),omega:omegaRowsForDimension(etaCount,parameters.omega),sigma:simpleRowsForCount("sigma",sigmaCount,parameters.sigma)};
+    }
     function changeOmegaStructure(nextStructure) {
-      var nEta=Number(value(model.n_eta,parameters.omega.length)), current=cloneRows(parameters.omega), nextRows=[];
+      var nEta=omegaDimension(parameters.omega), current=cloneRows(parameters.omega), nextRows=[];
       function find(row,column){return current.filter(function(item,index){var r=Number(value(item.ROW,index+1)),c=Number(value(item.COL,index+1));return r===row&&c===column;})[0];}
       if(nextStructure==="full"){
         for(var row=1;row<=nEta;row+=1)for(var column=1;column<=row;column+=1){var existing=find(row,column);nextRows.push({OMEGA:nextRows.length+1,ROW:row,COL:column,Value:existing?Number(existing.Value):(row===column?0.1:0),FIX:existing?!!existing.FIX:false});}
@@ -546,16 +591,20 @@
       var remapped=cloneRows(priors).map(function(prior){if(!/^OMEGA\d+$/.test(prior.parameter))return prior;var old=current[Number(prior.parameter.replace("OMEGA",""))-1];if(!old)return null;var oldRow=Number(value(old.ROW,old.OMEGA)),oldCol=Number(value(old.COL,old.OMEGA));var nextIndex=nextRows.findIndex(function(item){return Number(item.ROW)===oldRow&&Number(item.COL)===oldCol;});if(nextIndex<0)return null;prior.parameter="OMEGA"+(nextIndex+1);return prior;}).filter(function(prior){return !!prior;});
       setPriors(remapped);setParameters(Object.assign({},parameters,{omega:nextRows}));omegaStructureState[1](nextStructure);
     }
-    var priorParameterNames = parameters.theta.map(function(_,i){return "THETA"+(i+1);}).concat(parameters.sigma.map(function(_,i){return "SIGMA"+(i+1);})).concat(parameters.omega.map(function(_,i){return "OMEGA"+(i+1);}));
-    function draftPayload(mode) {
+    var priorParameterNames = parameterNames(parameters);
+    function draftPayload(mode,parameterRows) {
+      parameterRows=parameterRows||parameters;var validParameters=parameterNames(parameterRows),draftPriors=cloneRows(priors).filter(function(prior){return validParameters.indexOf(String(prior.parameter))>=0;});
       return {
         pred: source.pred, des: source.des, alg: source.alg, error: source.error, advan: Number(advanState[0]), trans: Number(transState[0]),
-        n_state: Number(nState[0]), problem: problemState[0], theta: parameters.theta, omega: parameters.omega, sigma: parameters.sigma,
-        omega_structure: omegaStructure, priors: priors, input: selectedInput, output: selectedOutput, save_mode: mode
+        n_state: Number(nState[0]), problem: problemState[0], theta: parameterRows.theta, omega: parameterRows.omega, sigma: parameterRows.sigma,
+        omega_structure: omegaStructure, priors: draftPriors, input: selectedInput, output: selectedOutput, save_mode: mode
       };
     }
     function save(mode) {
-      emit(props, "update_model", draftPayload(mode));
+      var next=synchronizedParameters();commitParameterRows(next);emit(props, "update_model", draftPayload(mode,next));
+    }
+    function validateDraft(){
+      var next=synchronizedParameters();commitParameterRows(next);emit(props,"validate",draftPayload("validate",next));
     }
     return e("div", { className: "lw-code-workspace" },
       dirty ? e("div", { className: "lw-dirty-banner" }, "Unsaved editor changes — apply changes before saving or running the model.") : null,
@@ -597,12 +646,12 @@
         model.dae ? e("div", { className: "lw-editor-box" }, e("h5", null, "$ALG"), e(CodeEditor,{label:"Algebraic residual equation code",value:source.alg,onValue:function(next){setSource(Object.assign({},source,{alg:next}));}})) : null,
         e("div", { className: "lw-editor-box" }, e("h5", null, "$ERROR"), e(CodeEditor,{label:"ERROR model code",value:source.error,onValue:function(next){setSource(Object.assign({},source,{error:next}));}}))),
       e("div", { className: "lw-parameter-grid" },
-        e(ParameterGrid, { title: "THETA", bounds:true, prefix: "THETA", indexName: "THETA", rows: parameters.theta, onChange: function (i,f,v) { updateParameter("theta",i,f,v); } }),
-        e("div",{className:"lw-omega-block"},e(ParameterGrid, { title: omegaStructure==="full"?"OMEGA lower triangle":"OMEGA", matrix:omegaStructure==="full", prefix: "OMEGA", indexName: "OMEGA", rows: parameters.omega, onChange: function (i,f,v) { updateParameter("omega",i,f,v); } }),e("label",{className:"lw-check lw-omega-matrix-toggle"},e("input",{type:"checkbox",checked:omegaStructure==="full",onChange:function(event){changeOmegaStructure(event.target.checked?"full":"diagonal");}})," OMEGA matrix")),
-        e(ParameterGrid, { title: "SIGMA", prefix: "SIGMA", indexName: "SIGMA", rows: parameters.sigma, onChange: function (i,f,v) { updateParameter("sigma",i,f,v); } })),
+        e(ParameterGrid, { title: "THETA", bounds:true, prefix: "THETA", indexName: "THETA", rows: parameters.theta, unitLabel:"THETA", onAdd:function(){resizeParameterKind("theta",1);}, onRemove:function(){resizeParameterKind("theta",-1);}, onChange: function (i,f,v) { updateParameter("theta",i,f,v); } }),
+        e("div",{className:"lw-omega-block"},e(ParameterGrid, { title: omegaStructure==="full"?"OMEGA lower triangle":"OMEGA", matrix:omegaStructure==="full", prefix: "OMEGA", indexName: "OMEGA", rows: parameters.omega, unitLabel:"ETA", onAdd:function(){resizeParameterKind("omega",1);}, onRemove:function(){resizeParameterKind("omega",-1);}, onChange: function (i,f,v) { updateParameter("omega",i,f,v); } }),e("label",{className:"lw-check lw-omega-matrix-toggle"},e("input",{type:"checkbox",checked:omegaStructure==="full",onChange:function(event){changeOmegaStructure(event.target.checked?"full":"diagonal");}})," OMEGA matrix")),
+        e(ParameterGrid, { title: "SIGMA", prefix: "SIGMA", indexName: "SIGMA", rows: parameters.sigma, unitLabel:"SIGMA", onAdd:function(){resizeParameterKind("sigma",1);}, onRemove:function(){resizeParameterKind("sigma",-1);}, onChange: function (i,f,v) { updateParameter("sigma",i,f,v); } })),
       e(PriorGrid,{rows:priors,parameterNames:priorParameterNames,onChange:setPriors}),
       e("div", { className: "lw-inline-actions lw-editor-actions" },
-        e(Button, { className: "lw-button-quiet", onClick: function () { emit(props, "validate", draftPayload("validate")); } }, "Validate"),
+        e(Button, { className: "lw-button-quiet", onClick: validateDraft }, "Validate"),
         e(Button, { className: "lw-button-primary", onClick: function () { save("current"); } }, "Apply changes")),
       e(Modal, { open: columnModal[0], onClose: function () { columnModal[1](false); }, title: "$INPUT / generated OUTPUT columns", footer: e(Button, { className: "lw-button-primary", onClick: function () { columnModal[1](false); } }, "Done") },
         e("div", { className: "lw-column-sections" },
@@ -1198,6 +1247,14 @@
   function diagramStarter(model){return {schema:"liber.model-diagram/1",version:1,title:value(model&&model.name,"Visual model"),advan:6,residual:"additive",covariates:[],compartments:[{id:1,name:"CENTRAL",kind:"amount",volume_parameter:"V",scale_parameter:"V",dose:true,observe:true,x:280,y:190}],flows:[{id:"flow-cl",from:1,to:0,type:"clearance",parameter:"CL",secondary_parameter:"",expression:"",label:"Elimination"}],parameters:[{name:"V",initial:20,lower:null,upper:null,fixed:false,iiv:true,eta_variance:.1},{name:"CL",initial:2,lower:null,upper:null,fixed:false,iiv:true,eta_variance:.1}]};}
   function diagramSymbols(graph){var names=[];function add(name){name=String(name||"").trim().toUpperCase();if(/^[A-Z][A-Z0-9_]*$/.test(name)&&names.indexOf(name)<0)names.push(name);}list(graph.compartments).forEach(function(item){add(item.volume_parameter);add(item.scale_parameter);});list(graph.flows).forEach(function(flow){add(flow.parameter);add(flow.secondary_parameter);if(flow.type==="custom")String(flow.expression||"").match(/\b[A-Za-z][A-Za-z0-9_]*\b/g)?.forEach(function(token){var upper=token.toUpperCase();if(["A","C","DADT","EXP","LOG","SQRT","TIME","T","IFELSE","MIN","MAX"].indexOf(upper)<0)add(upper);});});return names;}
   function diagramSyncParameters(graph){var required=diagramSymbols(graph),existing=list(graph.parameters),next=required.map(function(name){return existing.filter(function(item){return String(item.name).toUpperCase()===name;})[0]||{name:name,initial:1,lower:null,upper:null,fixed:false,iiv:true,eta_variance:.1};});existing.forEach(function(item){if(next.indexOf(item)<0&&required.indexOf(String(item.name).toUpperCase())<0)next.push(item);});graph.parameters=next;return graph;}
+  function diagramRenameParameter(graph,oldName,newName){
+    oldName=String(oldName||"").trim().toUpperCase();newName=String(newName||"").trim().toUpperCase();
+    if(!oldName||oldName===newName||!/^[A-Z][A-Z0-9_]*$/.test(newName)||diagramSymbols(graph).indexOf(oldName)>=0)return graph;
+    var oldIndex=list(graph.parameters).findIndex(function(item){return String(item.name||"").toUpperCase()===oldName;}),newIndex=list(graph.parameters).findIndex(function(item){return String(item.name||"").toUpperCase()===newName;});
+    if(oldIndex<0)return graph;
+    if(newIndex>=0)graph.parameters.splice(oldIndex,1);else graph.parameters[oldIndex].name=newName;
+    return graph;
+  }
   function VisualModelEditor(props){
     var supplied=props.model&&props.model.diagram&&props.model.diagram.available?props.model.diagram.graph:null;
     var graphState=React.useState(function(){return diagramClone(supplied||diagramStarter(props.model));}),graph=graphState[0],selected=React.useState(null),connect=React.useState(null),preview=React.useState(null),canvas=React.useRef(null),drag=React.useRef(null);
@@ -1211,8 +1268,15 @@
     function pointerMove(event){if(!drag.current)return;var rect=canvas.current.getBoundingClientRect(),next=diagramClone(graph),item=next.compartments.filter(function(compartment){return compartment.id===drag.current.id;})[0];if(item){item.x=Math.max(60,Math.min(rect.width-60,event.clientX-rect.left-drag.current.dx));item.y=Math.max(45,Math.min(rect.height-45,event.clientY-rect.top-drag.current.dy));graphState[1](next);}}
     function pointerUp(){drag.current=null;window.removeEventListener("pointermove",pointerMove);}
     function dropPalette(event){event.preventDefault();var kind=event.dataTransfer.getData("liber/compartment"),rect=canvas.current.getBoundingClientRect();if(kind)addCompartment(kind,event.clientX-rect.left,event.clientY-rect.top);}
-    function updateComp(id,field,value){var next=diagramClone(graph),item=next.compartments.filter(function(row){return row.id===id;})[0];item[field]=value;if(field==="volume_parameter"&&(!item.scale_parameter||String(item.scale_parameter).startsWith("V")))item.scale_parameter=value;setGraph(next);}
-    function updateFlow(id,field,value){var next=diagramClone(graph),item=next.flows.filter(function(row){return row.id===id;})[0];item[field]=["from","to"].indexOf(field)>=0?Number(value):value;setGraph(next);}
+    function updateComp(id,field,value){var next=diagramClone(graph),item=next.compartments.filter(function(row){return row.id===id;})[0],oldValue=item[field];item[field]=value;if(field==="volume_parameter"&&(!item.scale_parameter||String(item.scale_parameter).startsWith("V")))item.scale_parameter=value;if(field==="volume_parameter"||field==="scale_parameter")diagramRenameParameter(next,oldValue,value);setGraph(next);}
+    function updateFlow(id,field,value){var next=diagramClone(graph),item=next.flows.filter(function(row){return row.id===id;})[0],oldValue=item[field];item[field]=["from","to"].indexOf(field)>=0?Number(value):value;if(field==="parameter"||field==="secondary_parameter")diagramRenameParameter(next,oldValue,value);setGraph(next);}
+    function renumberCompartment(oldId,newId){
+      newId=Number(newId);var next=diagramClone(graph),count=next.compartments.length;if(!Number.isInteger(newId)||newId<1||newId>count||newId===oldId)return;
+      var replacement=next.compartments.filter(function(item){return item.id===newId;})[0];next.compartments.forEach(function(item){if(item.id===oldId)item.id=newId;else if(replacement&&item.id===newId)item.id=oldId;});
+      function swapId(id){return id===oldId?newId:(replacement&&id===newId?oldId:id);}
+      next.flows.forEach(function(flow){flow.from=swapId(flow.from);flow.to=swapId(flow.to);if(flow.type==="custom")flow.expression=String(flow.expression||"").replace(/\b(C|A|DADT)\s*\(\s*([0-9]+)\s*\)/g,function(_,symbol,id){return symbol+"("+swapId(Number(id))+")";});});
+      next.compartments.sort(function(a,b){return a.id-b.id;});selected[1]("c:"+newId);setGraph(next);
+    }
     function updateParameter(index,field,value){var next=diagramClone(graph);next.parameters[index][field]=["initial","lower","upper","eta_variance"].indexOf(field)>=0?(value===""?null:Number(value)):value;graphState[1](next);}
     function removeParameter(index){var next=diagramClone(graph),item=next.parameters[index],required=diagramSymbols(next);if(!item||required.indexOf(String(item.name||"").toUpperCase())>=0)return;next.parameters.splice(index,1);graphState[1](next);}
     function removeSelected(){if(!selected[0])return;var next=diagramClone(graph);if(selected[0].startsWith("c:")){var id=Number(selected[0].slice(2));if(next.compartments.length<=1)return;next.compartments=next.compartments.filter(function(item){return item.id!==id;});next.flows=next.flows.filter(function(item){return item.from!==id&&item.to!==id;});}else{var flowId=selected[0].slice(2);next.flows=next.flows.filter(function(item){return item.id!==flowId;});}selected[1](null);setGraph(next);}
@@ -1221,7 +1285,7 @@
     return e("div",{className:"lw-diagram-workspace"},
       e("div",{className:"lw-diagram-toolbar"},e("div",{className:"lw-diagram-palette"},[["amount","Amount compartment"],["response","Response compartment"]].map(function(item){return e("button",{key:item[0],type:"button",draggable:true,onDragStart:function(event){event.dataTransfer.setData("liber/compartment",item[0]);}},item[1]);})),e(Field,{label:"ADVAN"},e("select",{value:graph.advan,onChange:function(event){setGraph(Object.assign({},graph,{advan:Number(event.target.value)}));}},e("option",{value:6},"6 (general ODE)"),e("option",{value:13},"13 (stiff ODE)"))),e(Field,{label:"Residual error"},e("select",{value:graph.residual,onChange:function(event){setGraph(Object.assign({},graph,{residual:event.target.value}));}},e("option",{value:"additive"},"Additive"),e("option",{value:"proportional"},"Proportional"),e("option",{value:"combined"},"Combined"))),e(Button,{className:"lw-button-quiet",onClick:function(){connect[1]({type:"rate",from:null});}},"Connect"),e(Button,{className:"lw-button-quiet",onClick:function(){connect[1]({type:"bidirectional_clearance",from:null});}},"Bidirectional"),e(Button,{className:"lw-button-quiet",onClick:function(){connect[1]({type:"michaelis_menten",from:null});}},"Nonlinear"),e(Button,{className:"lw-button-quiet",disabled:!selectedComp,onClick:function(){if(selectedComp)addFlow(selectedComp.id,0,"clearance");}},"Elimination"),connect[0]?e("span",{className:"lw-diagram-mode"},connect[0].from?"Select target compartment":"Select source compartment"):null),
       e("div",{className:"lw-diagram-main"},e("div",{className:"lw-diagram-canvas",ref:canvas,onDragOver:function(event){event.preventDefault();},onDrop:dropPalette,onClick:function(){selected[1](null);}},e("svg",{className:"lw-diagram-links"},e("defs",null,e("marker",{id:"lw-arrow",viewBox:"0 0 10 10",refX:9,refY:5,markerWidth:7,markerHeight:7,orient:"auto-start-reverse"},e("path",{d:"M 0 0 L 10 5 L 0 10 z"})),e("marker",{id:"lw-arrow-start",viewBox:"0 0 10 10",refX:1,refY:5,markerWidth:7,markerHeight:7,orient:"auto-start-reverse"},e("path",{d:"M 10 0 L 0 5 L 10 10 z"}))),graph.flows.map(line)),graph.compartments.map(function(item){return e("button",{type:"button",key:item.id,className:"lw-diagram-node lw-diagram-"+item.kind+(selected[0]==="c:"+item.id?" selected":""),style:{left:item.x,top:item.y},onPointerDown:function(event){pointerDown(event,item);},onClick:function(event){event.stopPropagation();nodeClick(item.id);}},e("strong",null,item.name),e("small",null,item.kind==="amount"?(item.volume_parameter?"A / "+item.volume_parameter:"Amount"):"Response"),item.dose?e("i",null,"Dose"):null,item.observe?e("i",null,"Obs"):null);})),
-        e("aside",{className:"lw-diagram-inspector"},selectedComp?e("div",{className:"lw-form-stack"},e("strong",null,"Compartment "+selectedComp.id),e(Field,{label:"Name"},e("input",{value:selectedComp.name,onChange:function(event){updateComp(selectedComp.id,"name",event.target.value);}})),e(Field,{label:"Kind"},e("select",{value:selectedComp.kind,onChange:function(event){updateComp(selectedComp.id,"kind",event.target.value);}},e("option",{value:"amount"},"Amount"),e("option",{value:"response"},"Response"))),e(Field,{label:"Volume / scale parameter"},e("input",{value:selectedComp.volume_parameter,onChange:function(event){updateComp(selectedComp.id,"volume_parameter",event.target.value.toUpperCase());}})),e("label",{className:"lw-check"},e("input",{type:"checkbox",checked:!!selectedComp.dose,onChange:function(event){updateComp(selectedComp.id,"dose",event.target.checked);}})," Dose compartment"),e("label",{className:"lw-check"},e("input",{type:"checkbox",checked:!!selectedComp.observe,onChange:function(event){updateComp(selectedComp.id,"observe",event.target.checked);}})," Observation compartment"),e(Button,{className:"lw-button-danger",disabled:graph.compartments.length<=1,onClick:removeSelected},"Delete")):selectedFlow?e("div",{className:"lw-form-stack"},e("strong",null,"Flow"),e(Field,{label:"From"},e("select",{value:selectedFlow.from,onChange:function(event){updateFlow(selectedFlow.id,"from",event.target.value);}},[e("option",{key:0,value:0},"Outside")].concat(graph.compartments.map(function(item){return e("option",{key:item.id,value:item.id},item.name);})))),e(Field,{label:"To"},e("select",{value:selectedFlow.to,onChange:function(event){updateFlow(selectedFlow.id,"to",event.target.value);}},[e("option",{key:0,value:0},"Outside")].concat(graph.compartments.map(function(item){return e("option",{key:item.id,value:item.id},item.name);})))),e(Field,{label:"Flow type"},e("select",{value:selectedFlow.type,onChange:function(event){updateFlow(selectedFlow.id,"type",event.target.value);}},[["rate","First-order rate"],["clearance","Clearance"],["bidirectional_clearance","Bidirectional clearance"],["michaelis_menten","Michaelis-Menten"],["zero_order","Zero-order"],["custom","Custom nonlinear"]].map(function(item){return e("option",{key:item[0],value:item[0]},item[1]);}))),selectedFlow.type!=="custom"?e(Field,{label:selectedFlow.type==="michaelis_menten"?"VMAX":"Parameter"},e("input",{value:selectedFlow.parameter,onChange:function(event){updateFlow(selectedFlow.id,"parameter",event.target.value.toUpperCase());}})):null,selectedFlow.type==="michaelis_menten"?e(Field,{label:"KM"},e("input",{value:selectedFlow.secondary_parameter,onChange:function(event){updateFlow(selectedFlow.id,"secondary_parameter",event.target.value.toUpperCase());}})):null,selectedFlow.type==="custom"?e(Field,{label:"Flux expression (C(1) allowed)"},e("textarea",{rows:5,value:selectedFlow.expression,onChange:function(event){updateFlow(selectedFlow.id,"expression",event.target.value);}})):null,e(Button,{className:"lw-button-danger",onClick:removeSelected},"Delete")):e("p",{className:"lw-help-text"},"Drag compartments onto the canvas. Select a connection tool, then its source and target. Select any item to edit its model semantics."))),
+        e("aside",{className:"lw-diagram-inspector"},selectedComp?e("div",{className:"lw-form-stack"},e("strong",null,"Compartment "+selectedComp.id),e(Field,{label:"Compartment number"},e("select",{value:selectedComp.id,onChange:function(event){renumberCompartment(selectedComp.id,event.target.value);}},graph.compartments.map(function(_,index){return e("option",{key:index+1,value:index+1},index+1);}))),e(Field,{label:"Name"},e("input",{value:selectedComp.name,onChange:function(event){updateComp(selectedComp.id,"name",event.target.value);}})),e(Field,{label:"Kind"},e("select",{value:selectedComp.kind,onChange:function(event){updateComp(selectedComp.id,"kind",event.target.value);}},e("option",{value:"amount"},"Amount"),e("option",{value:"response"},"Response"))),e(Field,{label:"Volume / scale parameter"},e("input",{value:selectedComp.volume_parameter,onChange:function(event){updateComp(selectedComp.id,"volume_parameter",event.target.value.toUpperCase());}})),e("label",{className:"lw-check"},e("input",{type:"checkbox",checked:!!selectedComp.dose,onChange:function(event){updateComp(selectedComp.id,"dose",event.target.checked);}})," Dose compartment"),e("label",{className:"lw-check"},e("input",{type:"checkbox",checked:!!selectedComp.observe,onChange:function(event){updateComp(selectedComp.id,"observe",event.target.checked);}})," Observation compartment"),e(Button,{className:"lw-button-danger",disabled:graph.compartments.length<=1,onClick:removeSelected},"Delete")):selectedFlow?e("div",{className:"lw-form-stack"},e("strong",null,"Flow"),e(Field,{label:"From"},e("select",{value:selectedFlow.from,onChange:function(event){updateFlow(selectedFlow.id,"from",event.target.value);}},[e("option",{key:0,value:0},"Outside")].concat(graph.compartments.map(function(item){return e("option",{key:item.id,value:item.id},item.name);})))),e(Field,{label:"To"},e("select",{value:selectedFlow.to,onChange:function(event){updateFlow(selectedFlow.id,"to",event.target.value);}},[e("option",{key:0,value:0},"Outside")].concat(graph.compartments.map(function(item){return e("option",{key:item.id,value:item.id},item.name);})))),e(Field,{label:"Flow type"},e("select",{value:selectedFlow.type,onChange:function(event){updateFlow(selectedFlow.id,"type",event.target.value);}},[["rate","First-order rate"],["clearance","Clearance"],["bidirectional_clearance","Bidirectional clearance"],["michaelis_menten","Michaelis-Menten"],["zero_order","Zero-order"],["custom","Custom nonlinear"]].map(function(item){return e("option",{key:item[0],value:item[0]},item[1]);}))),selectedFlow.type!=="custom"?e(Field,{label:selectedFlow.type==="michaelis_menten"?"VMAX":"Parameter"},e("input",{value:selectedFlow.parameter,onChange:function(event){updateFlow(selectedFlow.id,"parameter",event.target.value.toUpperCase());}})):null,selectedFlow.type==="michaelis_menten"?e(Field,{label:"KM"},e("input",{value:selectedFlow.secondary_parameter,onChange:function(event){updateFlow(selectedFlow.id,"secondary_parameter",event.target.value.toUpperCase());}})):null,selectedFlow.type==="custom"?e(Field,{label:"Flux expression (C(1) allowed)"},e("textarea",{rows:5,value:selectedFlow.expression,onChange:function(event){updateFlow(selectedFlow.id,"expression",event.target.value);}})):null,e(Button,{className:"lw-button-danger",onClick:removeSelected},"Delete")):e("p",{className:"lw-help-text"},"Drag compartments onto the canvas. Select a connection tool, then its source and target. Select any item to edit its model semantics."))),
       e("details",{className:"lw-diagram-parameters",open:true},
         e("summary",null,"Structural parameters - log-normal ETA by default"),
         e("div",{className:"lw-table-wrap"},
@@ -1492,16 +1556,18 @@
   }
 
   function AIActivation(props) {
-    var ai=props.ai||{},active=useSynced(!!ai.activated,[!!ai.activated]),consent=useSynced(!!ai.consented,[!!ai.consented]),modal=React.useState(false);
+    var ai=props.ai||{},active=useSynced(!!ai.activated,[!!ai.activated]),consent=useSynced(!!ai.consented,[!!ai.consented]),consentModal=React.useState(false),settingsModal=React.useState(false);
     function save(next,agreed){active[1](next);consent[1](agreed);if(!next)localAIShutdown();var detail=localAISettingsDetail(ai);detail.activated=next;detail.consented=agreed;emit(props,"ai_settings",detail);}
-    function toggle(event){var next=event.target.checked;if(next&&!consent[0]){modal[1](true);return;}save(next,consent[0]);}
+    function toggle(event){var next=event.target.checked;if(next&&!consent[0]){consentModal[1](true);return;}save(next,consent[0]);}
     return e(React.Fragment,null,
-      e(AIModelSelect,Object.assign({},props,{className:"lw-ai-model-header",purpose:"help",label:"Help"})),
-      e(AIContextSelect,Object.assign({},props,{className:"lw-ai-context-header",purpose:"help",label:"Ctx"})),
-      e(AIModelSelect,Object.assign({},props,{className:"lw-ai-model-header",purpose:"report",label:"Report"})),
-      e(AIContextSelect,Object.assign({},props,{className:"lw-ai-context-header",purpose:"report",label:"Ctx"})),
       e("label",{className:"lw-ai-toggle",title:"Enable optional browser-local WebGPU assistance"},e("span",null,"Activate AI"),e("input",{type:"checkbox",checked:active[0],onChange:toggle}),e("i",null)),
-      e(Modal,{open:modal[0],onClose:function(){modal[1](false);},title:"Activate browser-local AI",footer:e(React.Fragment,null,e(Button,{className:"lw-button-quiet",onClick:function(){modal[1](false);}},"Cancel"),e(Button,{className:"lw-button-primary",onClick:function(){modal[1](false);save(true,true);}},"Activate AI"))},
+      e(Button,{className:"lw-ai-settings-button",title:"Local AI settings",onClick:function(){settingsModal[1](true);}},"..."),
+      e(Modal,{open:settingsModal[0],className:"lw-modal-ai-settings",onClose:function(){settingsModal[1](false);},title:"Local AI settings",footer:e(Button,{className:"lw-button-primary",onClick:function(){settingsModal[1](false);}},"Done")},
+        e("div",{className:"lw-ai-settings-grid"},
+          e("section",{className:"lw-modal-section lw-modal-section-tinted"},e("h4",null,"Help assistant"),e("p",{className:"lw-help-text"},"Optimised for model code, syntax and workflow questions."),e(AIModelSelect,Object.assign({},props,{className:"lw-ai-model-settings",purpose:"help",label:"Model"})),e(AIContextSelect,Object.assign({},props,{className:"lw-ai-context-settings",purpose:"help",label:"Context window"}))),
+          e("section",{className:"lw-modal-section lw-modal-section-tinted"},e("h4",null,"Report builder"),e("p",{className:"lw-help-text"},"A separate, larger model can synthesize selected model runs and diagnostics."),e(AIModelSelect,Object.assign({},props,{className:"lw-ai-model-settings",purpose:"report",label:"Model"})),e(AIContextSelect,Object.assign({},props,{className:"lw-ai-context-settings",purpose:"report",label:"Context window"})))),
+        e("p",{className:"lw-help-text lw-ai-settings-note"},"Selections are saved immediately. Models remain lazy-loaded and only one model occupies GPU memory at a time.")),
+      e(Modal,{open:consentModal[0],onClose:function(){consentModal[1](false);},title:"Activate browser-local AI",footer:e(React.Fragment,null,e(Button,{className:"lw-button-quiet",onClick:function(){consentModal[1](false);}},"Cancel"),e(Button,{className:"lw-button-primary",onClick:function(){consentModal[1](false);save(true,true);}},"Activate AI"))},
         e("div",{className:"lw-ai-consent"},e("p",null,"LibeRation uses WebGPU language models that run entirely in a dedicated worker inside this browser session."),e("ul",null,e("li",null,"Each selected open model is downloaded on first actual use and cached for later sessions."),e("li",null,"Only one model is held in GPU memory. Switching model or context unloads the resident model and lazily loads the new configuration."),e("li",null,"Activation, model choices, and Help/Report context settings are remembered, but no model loads until you ask for help or draft report text."),e("li",null,"Auto uses a model-aware context size and falls back to a smaller window if browser GPU allocation fails."),e("li",null,"After loading, network APIs in the AI worker are disabled before model context is supplied."),e("li",null,"The model receives no tools, DOM access, or ability to change a model or report.")),e("p",{className:"lw-help-text"},"A compromised browser, extension, or operating system is outside this isolation boundary. AI output can be wrong and must be reviewed as modelling assistance, not clinical advice."))));
   }
 

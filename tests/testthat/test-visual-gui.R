@@ -130,6 +130,9 @@ test_that("Help and Report generation route through separate lazy models", {
   expect_match(script, 'purpose:"report"', fixed = TRUE)
   expect_match(script, "Only one model is held in GPU memory", fixed = TRUE)
   expect_match(script, "same_as_help", fixed = TRUE)
+  expect_match(script, "Local AI settings", fixed = TRUE)
+  expect_match(script, "lw-ai-settings-button", fixed = TRUE)
+  expect_false(grepl('className:"lw-ai-model-header"', script, fixed = TRUE))
 })
 
 test_that("visual builder renders safe structural-parameter deletion", {
@@ -141,6 +144,21 @@ test_that("visual builder renders safe structural-parameter deletion", {
   expect_match(script, "function removeParameter\\(index\\)")
   expect_match(script, "This parameter is used by a compartment or flow", fixed = TRUE)
   expect_match(script, "lw-diagram-param-remove", fixed = TRUE)
+  expect_match(script, "function diagramRenameParameter", fixed = TRUE)
+  expect_match(script, "function renumberCompartment", fixed = TRUE)
+  expect_match(script, 'label:"Compartment number"', fixed = TRUE)
+})
+
+test_that("code editor exposes resizable synchronized parameter tables", {
+  script <- paste(readLines(
+    system.file("htmlwidgets", "liberWorkbench.js", package = "LibeRation"),
+    warn = FALSE
+  ), collapse = "\n")
+  expect_match(script, "function maximumCodeReference", fixed = TRUE)
+  expect_match(script, "function synchronizedParameters", fixed = TRUE)
+  expect_match(script, 'unitLabel:"THETA"', fixed = TRUE)
+  expect_match(script, 'unitLabel:"ETA"', fixed = TRUE)
+  expect_match(script, 'unitLabel:"SIGMA"', fixed = TRUE)
 })
 
 test_that("GUI report workflow renders without a selected estimation", {

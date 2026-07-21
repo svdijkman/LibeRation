@@ -939,7 +939,17 @@ liber_gui <- function(model = NULL, data = NULL, queue = NULL,
           nm_compile(draft)
           state$draft_outputs <- nm_model_outputs(draft)
           structure(
-            list(outputs = state$draft_outputs),
+            list(
+              kind = "model_validation",
+              nonce = format(Sys.time(), "%Y%m%d%H%M%OS6"),
+              outputs = state$draft_outputs,
+              parameters = list(
+                theta = .liber_gui_rows(draft$THETAS),
+                omega = .liber_gui_rows(draft$OMEGAS),
+                sigma = .liber_gui_rows(draft$SIGMAS),
+                priors = .liber_gui_rows(draft$LIK_CONFIG$priors %||% data.frame())
+              )
+            ),
             class = "liber_gui_validation"
           )
         }))
@@ -1507,12 +1517,10 @@ liber_gui <- function(model = NULL, data = NULL, queue = NULL,
             .nm_stop("Both selected runs must contain estimation results.")
           }
           labels <- make.unique(vapply(entries, function(entry) entry$label, character(1)))
-          gof_frames <- lapply(fits, nm_gof)
-          parameter_vector <- function(fit) {
-            values <- c(fit$theta, fit$sigma, fit$omega)
-            names(values) <- .nm_parameter_names(fit$theta, fit$sigma, fit$omega)
-            values
-          }
+                  gof_frames <- lapply(fits, nm_gof)
+                  parameter_vector <- function(fit) {
+                    .liber_gui_parameter_values(fit)
+                  }
           vectors <- lapply(fits, parameter_vector)
           parameter_names <- unique(unlist(lapply(vectors, names), use.names = FALSE))
           parameters <- data.frame(Parameter = parameter_names, stringsAsFactors = FALSE)

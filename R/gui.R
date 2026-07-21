@@ -574,14 +574,23 @@
   )
 }
 
+.liber_gui_parameter_values <- function(fit) {
+  values <- c(fit$theta, fit$omega, fit$sigma)
+  names(values) <- c(
+    .nm_numbered_names("THETA", length(fit$theta)),
+    .nm_numbered_names("OMEGA", length(fit$omega)),
+    .nm_numbered_names("SIGMA", length(fit$sigma))
+  )
+  values
+}
+
 .liber_gui_fit <- function(fit, include_gof = TRUE, gof = NULL) {
   if (!inherits(fit, "nm_fit")) {
     return(list(available = FALSE, parameters = list(), gof = list(),
                 gof_loaded = FALSE, run_info = list()))
   }
   etab <- nm_etab(fit)
-  parameters <- c(fit$theta, fit$sigma, fit$omega)
-  names(parameters) <- .nm_parameter_names(fit$theta, fit$sigma, fit$omega)
+  parameters <- .liber_gui_parameter_values(fit)
   covariance <- fit$covariance
   posterior <- .liber_gui_posterior(fit)
   nonparametric <- .liber_gui_nonparametric(fit)
@@ -593,12 +602,16 @@
       row$rse <- unname(covariance$rse[[name]])
     }
     if (isTRUE(posterior$available)) {
-      posterior_row <- posterior$parameters[[i]]
-      row$posterior_sd <- posterior_row$posterior_sd
-      row$posterior_cv <- posterior_row$posterior_cv
-      row$median <- posterior_row$median
-      row$lower_95 <- posterior_row$lower_95
-      row$upper_95 <- posterior_row$upper_95
+      posterior_names <- vapply(posterior$parameters, `[[`, character(1), "name")
+      posterior_index <- match(name, posterior_names)
+      if (!is.na(posterior_index)) {
+        posterior_row <- posterior$parameters[[posterior_index]]
+        row$posterior_sd <- posterior_row$posterior_sd
+        row$posterior_cv <- posterior_row$posterior_cv
+        row$median <- posterior_row$median
+        row$lower_95 <- posterior_row$lower_95
+        row$upper_95 <- posterior_row$upper_95
+      }
     }
     row
   }))
@@ -768,8 +781,7 @@
     }
     result <- opened$result
     if (inherits(result, "nm_fit")) {
-      estimates <- c(result$theta, result$sigma, result$omega)
-      names(estimates) <- .nm_parameter_names(result$theta, result$sigma, result$omega)
+      estimates <- .liber_gui_parameter_values(result)
       keep <- utils::head(seq_along(estimates), max(1L, as.integer(max_parameters)[[1L]]))
       covariance <- result$covariance %||% NULL
       se <- covariance$se %||% numeric()
@@ -910,7 +922,10 @@
 .liber_gui_result <- function(result) {
   if (is.null(result)) return(list(status = "idle", message = "Ready"))
   if (inherits(result, "liber_gui_validation")) {
-    return(list(status = "validated", message = "Model validation completed"))
+    return(utils::modifyList(
+      list(status = "validated", message = "Model validation completed"),
+      unclass(result)
+    ))
   }
   if (inherits(result, "liber_gui_diagram_preview")) {
     return(list(
@@ -1036,8 +1051,7 @@
   }
   if (inherits(result, "nm_fit")) {
     etab <- nm_etab(result)
-    parameters <- c(result$theta, result$sigma, result$omega)
-    names(parameters) <- .nm_parameter_names(result$theta, result$sigma, result$omega)
+    parameters <- .liber_gui_parameter_values(result)
     return(list(
       status = if (result$convergence == 0L) "completed" else "warning",
       kind = "estimation", message = paste(result$method, "estimation completed"),
@@ -1410,39 +1424,123 @@ renderLiberWorkbench <- function(expr, env = parent.frame(), quoted = FALSE) {
   if (is.data.frame(values)) {
     values <- lapply(seq_len(nrow(values)), function(i) as.list(values[i, , drop = FALSE]))
   }
+  number_or <- function(value, default) {
+    output <- suppressWarnings(as.numeric(value))
+    if (length(output) != 1L || is.na(output) || !is.finite(output)) default else output
+  }
   if (identical(label, "OMEGA")) {
     if (!length(values)) return(table[0L, , drop = FALSE])
     rows <- lapply(seq_along(values), function(i) {
       value <- values[[i]]
       data.frame(
-        OMEGA = i, Value = as.numeric(value$Value), FIX = isTRUE(value$FIX),
+        OMEGA = i,
+        Value = number_or(value$Value, if (i <= nrow(table)) table$Value[[i]] else 0.1),
+        FIX = isTRUE(value$FIX),
         ROW = as.integer(value$ROW %||% value$OMEGA %||% i),
         COL = as.integer(value$COL %||% value$OMEGA %||% i),
         stringsAsFactors = FALSE
       )
     })
-    updated <- do.call(rbind, rows)
-    if (max(c(updated$ROW, updated$COL)) != .nm_n_eta(table)) {
-      .nm_stop("OMEGA matrix must retain the model's existing ETA dimension.")
-    }
-    return(updated)
+    return(do.call(rbind, rows))
   }
-  if (length(values) != nrow(table)) {
-    .nm_stop(label, " parameter count changed unexpectedly.")
+  if (!length(values)) {
+    return(if (identical(label, "THETA")) {
+      data.frame(THETA = integer(), Value = numeric(), FIX = logical(),
+                 LOWER = numeric(), UPPER = numeric())
+    } else {
+      data.frame(SIGMA = integer(), Value = numeric(), FIX = logical())
+    })
   }
-  for (i in seq_len(nrow(table))) {
-    table$Value[[i]] <- as.numeric(values[[i]]$Value)
-    table$FIX[[i]] <- isTRUE(values[[i]]$FIX)
+  rows <- lapply(seq_along(values), function(i) {
+    value <- values[[i]]
+    initial <- if (i <= nrow(table)) table$Value[[i]] else
+      if (identical(label, "THETA")) 1 else 0.1
+    output <- data.frame(
+      INDEX = i, Value = number_or(value$Value, initial),
+      FIX = isTRUE(value$FIX), stringsAsFactors = FALSE
+    )
+    names(output)[[1L]] <- label
     if (identical(label, "THETA")) {
-      if (!"LOWER" %in% names(table)) table$LOWER <- NA_real_
-      if (!"UPPER" %in% names(table)) table$UPPER <- NA_real_
-      lower <- suppressWarnings(as.numeric(values[[i]]$LOWER %||% NA_real_))
-      upper <- suppressWarnings(as.numeric(values[[i]]$UPPER %||% NA_real_))
-      table$LOWER[[i]] <- if (length(lower) == 1L) lower else NA_real_
-      table$UPPER[[i]] <- if (length(upper) == 1L) upper else NA_real_
+      output$LOWER <- number_or(value$LOWER, NA_real_)
+      output$UPPER <- number_or(value$UPPER, NA_real_)
+    }
+    output
+  })
+  do.call(rbind, rows)
+}
+
+.liber_code_reference_max <- function(code, functions) {
+  code <- paste(as.character(code %||% ""), collapse = "\n")
+  code <- gsub("(?s)/\\*.*?\\*/", " ", code, perl = TRUE)
+  code <- gsub("(?m)//.*$|#.*$", " ", code, perl = TRUE)
+  pattern <- paste0(
+    "(?i)\\b(?:", paste(functions, collapse = "|"),
+    ")\\s*\\(\\s*([1-9][0-9]*)\\s*\\)"
+  )
+  matches <- regmatches(code, gregexpr(pattern, code, perl = TRUE))[[1L]]
+  if (!length(matches)) return(0L)
+  indices <- suppressWarnings(as.integer(sub(pattern, "\\1", matches, perl = TRUE)))
+  if (!length(indices) || all(is.na(indices))) 0L else max(indices, na.rm = TRUE)
+}
+
+.liber_model_parameter_requirements <- function(arguments) {
+  code <- unname(unlist(arguments[c("PRED", "DES", "ALG", "ERROR")], use.names = FALSE))
+  list(
+    theta = .liber_code_reference_max(code, "THETA"),
+    eta = .liber_code_reference_max(code, "ETA"),
+    sigma = .liber_code_reference_max(code, c("ERR", "EPS", "SIGMA"))
+  )
+}
+
+.liber_parameter_table_ensure <- function(table, count, label) {
+  count <- max(nrow(table), as.integer(count %||% 0L))
+  if (count <= 0L) return(.liber_parameter_table_update(table, list(), label))
+  values <- rep(if (identical(label, "THETA")) 1 else 0.1, count)
+  fixed <- rep(FALSE, count)
+  if (nrow(table)) {
+    values[seq_len(nrow(table))] <- table$Value
+    fixed[seq_len(nrow(table))] <- table$FIX
+  }
+  output <- data.frame(INDEX = seq_len(count), Value = values, FIX = fixed,
+                       stringsAsFactors = FALSE)
+  names(output)[[1L]] <- label
+  if (identical(label, "THETA")) {
+    output$LOWER <- output$UPPER <- NA_real_
+    if (nrow(table)) {
+      if ("LOWER" %in% names(table)) output$LOWER[seq_len(nrow(table))] <- table$LOWER
+      if ("UPPER" %in% names(table)) output$UPPER[seq_len(nrow(table))] <- table$UPPER
     }
   }
-  table
+  output
+}
+
+.liber_omega_table_ensure <- function(table, count, structure = "diagonal") {
+  count <- max(.nm_n_eta(table), as.integer(count %||% 0L))
+  if (count <= 0L) {
+    return(data.frame(OMEGA = integer(), Value = numeric(), FIX = logical(),
+                      ROW = integer(), COL = integer()))
+  }
+  positions <- if (identical(structure, "full")) {
+    do.call(rbind, lapply(seq_len(count), function(row) {
+      data.frame(ROW = row, COL = seq_len(row))
+    }))
+  } else data.frame(ROW = seq_len(count), COL = seq_len(count))
+  output <- data.frame(
+    OMEGA = seq_len(nrow(positions)),
+    Value = ifelse(positions$ROW == positions$COL, 0.1, 0),
+    FIX = FALSE, ROW = positions$ROW, COL = positions$COL,
+    stringsAsFactors = FALSE
+  )
+  if (nrow(table)) {
+    existing <- match(
+      paste(output$ROW, output$COL, sep = ":"),
+      paste(table$ROW, table$COL, sep = ":")
+    )
+    keep <- which(!is.na(existing))
+    output$Value[keep] <- table$Value[existing[keep]]
+    output$FIX[keep] <- table$FIX[existing[keep]]
+  }
+  output
 }
 
 .liber_prior_table_update <- function(values) {
@@ -1479,9 +1577,6 @@ renderLiberWorkbench <- function(expr, env = parent.frame(), quoted = FALSE) {
   arguments$ALG <- as.character(event$alg %||% model$ALG %||% "")
   arguments$INPUT <- unique(as.character(unlist(event$input %||% model$INPUT)))
   arguments$OUTPUT <- unique(as.character(unlist(event$output %||% model$OUTPUT %||% character())))
-  arguments$THETAS <- .liber_parameter_table_update(model$THETAS, event$theta, "THETA")
-  arguments$OMEGAS <- .liber_parameter_table_update(model$OMEGAS, event$omega, "OMEGA")
-  arguments$SIGMAS <- .liber_parameter_table_update(model$SIGMAS, event$sigma, "SIGMA")
   likelihood <- as.list(model$LIK_CONFIG)
   likelihood$version <- NULL
   inferred_error <- .nm_error_type(arguments$ERROR, "auto")
@@ -1491,9 +1586,23 @@ renderLiberWorkbench <- function(expr, env = parent.frame(), quoted = FALSE) {
              !identical(inferred_error, "none")) {
     likelihood$error <- inferred_error
   }
-  likelihood$omega <- as.character(
+  omega_structure <- as.character(
     event$omega_structure %||% model$LIK_CONFIG$omega %||% "diagonal"
+  )[[1L]]
+  requirements <- .liber_model_parameter_requirements(arguments)
+  arguments$THETAS <- .liber_parameter_table_ensure(
+    .liber_parameter_table_update(model$THETAS, event[["theta", exact = TRUE]], "THETA"),
+    requirements$theta, "THETA"
   )
+  arguments$OMEGAS <- .liber_omega_table_ensure(
+    .liber_parameter_table_update(model$OMEGAS, event[["omega", exact = TRUE]], "OMEGA"),
+    requirements$eta, omega_structure
+  )
+  arguments$SIGMAS <- .liber_parameter_table_ensure(
+    .liber_parameter_table_update(model$SIGMAS, event[["sigma", exact = TRUE]], "SIGMA"),
+    requirements$sigma, "SIGMA"
+  )
+  likelihood$omega <- omega_structure
   likelihood$priors <- if (is.null(event$priors)) {
     model$LIK_CONFIG$priors
   } else {

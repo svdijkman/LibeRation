@@ -220,25 +220,27 @@ test_that("continuous-time HMM validates generator dimensions", {
 })
 
 test_that("scaled HMM objective and exact gradient match the forward likelihood", {
-  model <- hmm_test_model()
   data <- data.frame(
     ID = "A", TIME = 0:4, DV = c(0, 0, 1, 1, 0), MDV = 0, DVID = 1
   )
-  objective <- nm_objective(model, data, gradient = TRUE)
-  expected <- -2 * hmm_manual_loglik(data$DV)
-  expect_equal(objective$value, expected, tolerance = 1e-10)
-  expect_length(objective$gradient, 5L)
-  expect_true(all(is.finite(objective$gradient)))
+  for (log_scale in c(FALSE, TRUE)) {
+    model <- hmm_test_model(log_scale = log_scale)
+    objective <- nm_objective(model, data, gradient = TRUE)
+    expected <- -2 * hmm_manual_loglik(data$DV)
+    expect_equal(objective$value, expected, tolerance = 1e-10)
+    expect_length(objective$gradient, 5L)
+    expect_true(all(is.finite(objective$gradient)))
 
-  step <- 1e-5
-  numeric_gradient <- vapply(seq_len(5), function(index) {
-    plus <- minus <- model$THETAS$Value
-    plus[[index]] <- plus[[index]] + step
-    minus[[index]] <- minus[[index]] - step
-    (nm_objective(model, data, theta = plus, gradient = FALSE)$value -
-       nm_objective(model, data, theta = minus, gradient = FALSE)$value) / (2 * step)
-  }, numeric(1))
-  expect_equal(unname(objective$gradient), numeric_gradient, tolerance = 2e-5)
+    step <- 1e-5
+    numeric_gradient <- vapply(seq_len(5), function(index) {
+      plus <- minus <- model$THETAS$Value
+      plus[[index]] <- plus[[index]] + step
+      minus[[index]] <- minus[[index]] - step
+      (nm_objective(model, data, theta = plus, gradient = FALSE)$value -
+         nm_objective(model, data, theta = minus, gradient = FALSE)$value) / (2 * step)
+    }, numeric(1))
+    expect_equal(unname(objective$gradient), numeric_gradient, tolerance = 2e-5)
+  }
 })
 
 test_that("log-weight HMM is equivalent and exposes filtered state probabilities", {
