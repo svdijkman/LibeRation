@@ -1,3 +1,9 @@
+# LibeRation 0.7.2
+
+- Removes Shiny/Bootstrap's default 15-pixel page gutters so the workbench
+  reaches both viewport edges at desktop, laptop, tablet, and mobile widths,
+  while preserving the workbench's own responsive scrolling.
+
 # LibeRation 0.7.1
 
 - Restores exact HMM emission-parameter gradients for `$ERROR` expressions

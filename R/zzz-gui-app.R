@@ -82,7 +82,7 @@ liber_gui <- function(model = NULL, data = NULL, queue = NULL,
   }
   ai_models <- .liber_ai_models()
   allowed_ai_models <- vapply(ai_models, `[[`, character(1), "id")
-  ui <- shiny::fluidPage(
+  ui <- .liber_full_page_ui(
     htmltools::tags$head(
       htmltools::tags$title("LibeRation"),
       htmltools::tags$meta(name = "viewport", content = "width=device-width, initial-scale=1"),
@@ -90,10 +90,7 @@ liber_gui <- function(model = NULL, data = NULL, queue = NULL,
         htmltools::tags$link(rel = "icon", type = "image/svg+xml", href = favicon_href)
       }
     ),
-    htmltools::tags$div(
-      style = "width: 100%; height: 100vh;",
-      liberWorkbenchOutput("workbench", height = "100vh")
-    )
+    liberWorkbenchOutput("workbench", height = "100vh")
   )
 
   server <- function(input, output, session) {

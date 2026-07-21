@@ -574,6 +574,19 @@ test_that("all supported ADVAN templates are valid models", {
                   "shiny.appobj")
 })
 
+test_that("GUI page shell fills the viewport without Bootstrap gutters", {
+  page <- LibeRation:::.liber_full_page_ui(
+    htmltools::tags$head(htmltools::tags$title("LibeRation")),
+    htmltools::tags$div(id = "workbench")
+  )
+  rendered <- htmltools::renderTags(page)
+  markup <- paste(rendered$head, rendered$html)
+
+  expect_match(markup, "body > .container-fluid", fixed = TRUE)
+  expect_match(markup, "class=\"liberation-app-root\"", fixed = TRUE)
+  expect_match(markup, "margin: 0; padding: 0; overflow: hidden;", fixed = TRUE)
+})
+
 test_that("hosted GUI sessions receive different ephemeral workspaces", {
   root <- tempfile("gui-hosted-")
   app <- liber_gui(

@@ -1409,6 +1409,28 @@ liberWorkbenchOutput <- function(outputId, width = "100%", height = "100vh") {
   )
 }
 
+.liber_full_page_ui <- function(head, output) {
+  head <- htmltools::tagAppendChild(
+    head,
+    htmltools::tags$style(htmltools::HTML(paste(
+      "html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; }",
+      "body > .container-fluid { width: 100%; height: 100vh;",
+      "min-width: 0; margin: 0; padding: 0; overflow: hidden; }"
+    )))
+  )
+  shiny::fluidPage(
+    head,
+    htmltools::tags$div(
+      class = "liberation-app-root",
+      style = paste(
+        "width: 100%; height: 100vh; min-width: 0;",
+        "margin: 0; padding: 0; overflow: hidden;"
+      ),
+      output
+    )
+  )
+}
+
 #' Render a LibeR workbench in Shiny
 #' @param expr Expression returning [liber_workbench()].
 #' @param env Evaluation environment.
@@ -1942,15 +1964,12 @@ renderLiberWorkbench <- function(expr, env = parent.frame(), quoted = FALSE) {
     fit = if (inherits(initial_result, "nm_fit")) initial_result else NULL,
     jobs = data.frame(), project = project
   )
-  ui <- shiny::fluidPage(
+  ui <- .liber_full_page_ui(
     htmltools::tags$head(
       htmltools::tags$title("LibeRation"),
       htmltools::tags$meta(name = "viewport", content = "width=device-width, initial-scale=1")
     ),
-    htmltools::tags$div(
-      style = "width: 100%; height: 100vh;",
-      liberWorkbenchOutput("workbench", height = "100vh")
-    )
+    liberWorkbenchOutput("workbench", height = "100vh")
   )
   server <- function(input, output, session) {
     if (!is.null(queue)) {
