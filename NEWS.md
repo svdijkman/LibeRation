@@ -1,3 +1,9 @@
+# LibeRation 0.7.3
+
+- Keeps the workbench within the available viewport height and assigns vertical
+  scrolling to its main content area, so lower sidebar actions remain reachable
+  in short desktop windows and on mobile without restoring page gutters.
+
 # LibeRation 0.7.2
 
 - Removes Shiny/Bootstrap's default 15-pixel page gutters so the workbench

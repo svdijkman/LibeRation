@@ -1,5 +1,5 @@
 dependencies:
   - name: liber-workbench-style
-    version: 0.6.0
+    version: 0.7.3
     src: htmlwidgets
     stylesheet: liberWorkbench.css

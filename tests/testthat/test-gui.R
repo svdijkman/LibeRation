@@ -587,6 +587,30 @@ test_that("GUI page shell fills the viewport without Bootstrap gutters", {
   expect_match(markup, "margin: 0; padding: 0; overflow: hidden;", fixed = TRUE)
 })
 
+test_that("workbench content remains scrollable in short viewports", {
+  css_path <- system.file(
+    "htmlwidgets", "liberWorkbench.css", package = "LibeRation"
+  )
+  css <- paste(readLines(css_path, warn = FALSE), collapse = "\n")
+
+  expect_match(
+    css, "width: 100%; height: 100%; min-height: 0;", fixed = TRUE
+  )
+  expect_match(
+    css,
+    ".lw-legacy-shell { min-height: 0; overflow: hidden; }.lw-page-host { overflow: auto; }",
+    fixed = TRUE
+  )
+  expect_false(grepl("min-height: 720px", css, fixed = TRUE))
+  expect_false(grepl("min-height: 760px", css, fixed = TRUE))
+
+  dependency_path <- system.file(
+    "htmlwidgets", "liberWorkbench.yaml", package = "LibeRation"
+  )
+  dependency <- paste(readLines(dependency_path, warn = FALSE), collapse = "\n")
+  expect_match(dependency, "version: 0.7.3", fixed = TRUE)
+})
+
 test_that("hosted GUI sessions receive different ephemeral workspaces", {
   root <- tempfile("gui-hosted-")
   app <- liber_gui(
