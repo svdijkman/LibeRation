@@ -28,11 +28,11 @@ workspace when LibeRties is installed. Use `FALSE` for in-process work.}
 `C:/Users/<username>/Documents/LibeR/workspace` on Windows and
 `~/LibeR/workspace` on Linux and macOS.}
 
+\item{project}{Optional project id to open when the application starts.}
+
 \item{session_workspace}{Create a separate ephemeral workspace beneath
 `workspace` for every browser session. This is intended for hosted
 demonstrations where application users must not share project files.}
-
-\item{project}{Optional project id to open when the application starts.}
 
 \item{launch.browser}{Passed to [shiny::runApp()]. Use `NULL` to return the
 Shiny app object without launching it.}

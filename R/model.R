@@ -995,8 +995,20 @@ nm_support_matrix <- function() {
     "offline dense neural components", "offline spline components",
     "offline Gaussian-process components", "learned DES dynamics"
   )
-  data.frame(feature = c(feature, experimental),
-             status = c(rep("implemented", length(feature)),
-                        rep("experimental", length(experimental))),
-             stringsAsFactors = FALSE)
+  values <- c(feature, experimental)
+  reference_validated <- c(
+    "ADVAN1", "ADVAN2", "ADVAN3", "ADVAN4", "ADVAN11", "ADVAN12",
+    "matrix exponential", "FO"
+  )
+  data.frame(
+    feature = values,
+    status = c(rep("implemented", length(feature)), rep("experimental", length(experimental))),
+    validation = ifelse(
+      values %in% experimental, "experimental-smoke-tested",
+      ifelse(values %in% reference_validated, "reference-validated", "unit/integration-tested")
+    ),
+    recommended_use = ifelse(values %in% experimental,
+                             "experimental research only", "research and teaching"),
+    stringsAsFactors = FALSE
+  )
 }

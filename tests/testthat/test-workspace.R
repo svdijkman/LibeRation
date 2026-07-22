@@ -2,6 +2,7 @@ test_that("workspaces preserve immutable serializable modelling snapshots", {
   root <- tempfile("liber-workspace-")
   on.exit(unlink(root, recursive = TRUE, force = TRUE), add = TRUE)
   workspace <- nm_workspace(root)
+  expect_identical(workspace$version, 2L)
   project <- nm_project_create(
     workspace, "First PK project", description = "Population PK analysis"
   )
@@ -30,12 +31,60 @@ test_that("workspaces preserve immutable serializable modelling snapshots", {
   expect_false(inherits(snapshot$model, "NMEngine"))
   expect_s3_class(snapshot$data, "nm_dataset")
   expect_null(snapshot$result)
+  expect_true(nm_workspace_verify(workspace)$valid)
+  object_files <- list.files(file.path(root, "objects"), pattern = "\\.rds$", recursive = TRUE)
+  expect_true(length(object_files) >= 2L)
   expect_error(nm_project_load(workspace, "../escape"), "Invalid project id")
 
   copied <- nm_project_copy(workspace, project$id, first, label = "Baseline copy")
   expect_equal(nm_project_load(workspace, project$id, copied)$label, "Baseline copy")
   expect_true(nm_project_delete_snapshot(workspace, project$id, copied))
   expect_false(copied %in% nm_project_list(workspace, project$id)$id)
+})
+
+test_that("workspace v2 deduplicates model and data objects", {
+  root <- tempfile("liber-deduplicate-")
+  on.exit(unlink(root, recursive = TRUE, force = TRUE), add = TRUE)
+  workspace <- nm_workspace(root)
+  project <- nm_project_create(workspace, "Deduplication")
+  model <- nm_model(
+    INPUT = c("ID", "TIME", "EVID", "AMT"), ADVAN = 1,
+    PRED = "CL=THETA(1);V=THETA(2);S1=V", ERROR = "Y=F",
+    THETAS = data.frame(THETA = 1:2, Value = c(2, 20))
+  )
+  data <- data.frame(ID = 1, TIME = c(0, 1), EVID = c(1, 0), AMT = c(100, 0))
+  first <- nm_project_save(workspace, project$id, model, data)
+  second <- nm_project_save(workspace, project$id, model, data)
+  first_raw <- readRDS(file.path(root, "projects", project$id, "snapshots", paste0(first, ".rds")))
+  second_raw <- readRDS(file.path(root, "projects", project$id, "snapshots", paste0(second, ".rds")))
+  expect_identical(first_raw$storage$model$hash, second_raw$storage$model$hash)
+  expect_identical(first_raw$storage$data$hash, second_raw$storage$data$hash)
+  expect_true(nm_workspace_verify(workspace)$valid)
+  expect_equal(nrow(nm_workspace_gc(workspace)), 0L)
+})
+
+test_that("legacy workspace manifests and snapshots migrate explicitly", {
+  root <- tempfile("liber-migrate-")
+  on.exit(unlink(root, recursive = TRUE, force = TRUE), add = TRUE)
+  workspace <- nm_workspace(root)
+  project <- nm_project_create(workspace, "Legacy")
+  model <- nm_model(
+    INPUT = c("ID", "TIME"), ADVAN = 1, PRED = "CL=THETA(1);V=10;S1=V",
+    THETAS = data.frame(THETA = 1, Value = 2)
+  )
+  id <- nm_project_save(workspace, project$id, model)
+  snapshot_path <- file.path(root, "projects", project$id, "snapshots", paste0(id, ".rds"))
+  value <- nm_project_load(workspace, project$id, id)
+  value$version <- 1L; value$schema <- value$storage <- NULL
+  saveRDS(value, snapshot_path)
+  manifest_path <- file.path(root, "projects", project$id, "manifest.rds")
+  manifest <- readRDS(manifest_path); manifest$version <- 1L; manifest$schema <- NULL
+  saveRDS(manifest, manifest_path)
+  migrated <- nm_workspace_migrate(workspace, convert_snapshots = TRUE, backup = FALSE)
+  expect_identical(migrated$snapshots_converted, 1L)
+  expect_identical(readRDS(manifest_path)$version, 2L)
+  expect_identical(readRDS(snapshot_path)$version, 2L)
+  expect_s3_class(nm_project_load(workspace, project$id, id)$model, "nm_model")
 })
 
 test_that("integrated package provenance is retained without replacing runtime provenance", {

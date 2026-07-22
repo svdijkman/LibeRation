@@ -1,3 +1,21 @@
+# LibeRation 0.8.0
+
+- Adds a versioned semantic model contract used by LibeRties so advanced HMM,
+  state-space, DDE/DAE, random-effect, component, experimental, and outcome
+  configuration survives remote job round trips without executable R objects.
+- Introduces workspace schema v2 with content-addressed model/data/result
+  objects, atomic project locks, legacy migration, integrity verification,
+  backup, and dry-run garbage collection. Repeated model versions no longer
+  duplicate large datasets and fit payloads.
+- Adds `liber_doctor()` and an explicit capability/validation tier to separate
+  implemented, integration-tested, reference-validated, and experimental
+  model families.
+- Adds provenance-bearing numerical validation gates for objectives,
+  parameters, variability, ETAs, and predictions. Benchmark summaries are not
+  publishable unless correctness tolerances pass before timing is considered.
+- Adds gated real-browser regression tests for responsive layout, modal
+  reachability, scrolling, and deferred large-data transfer.
+
 # LibeRation 0.7.3
 
 - Keeps the workbench within the available viewport height and assigns vertical

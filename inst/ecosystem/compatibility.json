@@ -1,0 +1,26 @@
+{
+  "schema": "liber.ecosystem/1",
+  "release": "0.8.0-consolidation",
+  "packages": {
+    "LibeRtAD": {"version": "0.7.5", "required": true},
+    "LibeRation": {"version": "0.8.0", "required": true},
+    "LibeRary": {"version": "0.7.2", "required": false},
+    "LibeRator": {"version": "0.2.3", "required": false},
+    "LibeRality": {"version": "0.2.0", "required": false},
+    "LibeRties": {"version": "0.7.0", "required": false}
+  },
+  "contracts": {
+    "model": 2,
+    "job": 2,
+    "result": 2,
+    "liberation_workspace": 2,
+    "liberties_queue": 2
+  },
+  "policy": {
+    "minimum_r": "4.1.0",
+    "numerical_use": "research",
+    "clinical_use": "not qualified",
+    "remote_tls": "required outside loopback",
+    "advanced_families": "explicit validation tier required"
+  }
+}

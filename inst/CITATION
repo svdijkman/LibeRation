@@ -1,0 +1,10 @@
+citHeader("To cite LibeRation in publications, use:")
+
+citEntry(
+  entry = "Manual",
+  title = "LibeRation: Population Pharmacometric Simulation and Estimation",
+  author = person("Sven C.", "van Dijkman"),
+  year = "2026",
+  note = "R package version 0.8.0",
+  textVersion = "van Dijkman SC (2026). LibeRation: Population Pharmacometric Simulation and Estimation. R package version 0.8.0."
+)
