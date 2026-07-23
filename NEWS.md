@@ -1,3 +1,8 @@
+# LibeRation 0.9.1
+
+- Updates the ecosystem compatibility manifest for the cross-platform
+  LibeRality source-publication correction in research beta 2.
+
 # LibeRation 0.9.0
 
 - Adds a machine-readable ecosystem support matrix with validated, verified,

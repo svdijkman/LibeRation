@@ -1,7 +1,7 @@
 Package: LibeRation
 Type: Package
 Title: Population Pharmacometric Simulation and Estimation
-Version: 0.9.0
+Version: 0.9.1
 Authors@R: person("Sven C.", "van Dijkman",
     email = "svdijkman@users.noreply.github.com", role = c("aut", "cre"))
 Author: Sven C. van Dijkman [aut, cre]

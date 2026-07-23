@@ -606,7 +606,7 @@ test_that("workbench content remains scrollable in short viewports", {
     "htmlwidgets", "liberWorkbench.yaml", package = "LibeRation"
   )
   dependency <- paste(readLines(dependency_path, warn = FALSE), collapse = "\n")
-  expect_match(dependency, "version: 0.9.0", fixed = TRUE)
+  expect_match(dependency, "version: 0.9.1", fixed = TRUE)
 })
 
 test_that("workbench exposes the privacy-preserving support workflow", {
