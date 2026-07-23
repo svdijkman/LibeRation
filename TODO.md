@@ -1,6 +1,6 @@
 # LibeR engineering TODO
 
-Last reviewed: 2026-07-21
+Last reviewed: 2026-07-23
 
 Legend: completed work is checked and struck through; partially completed work
 retains an unchecked parent item with completed sub-items checked.
@@ -162,11 +162,29 @@ when NONMEM control-stream compatibility requires it.
 - [x] ~~Use multi-direction Forward sweeps for suitable dense Jacobians.~~
 - [x] ~~Use subgraph Reverse for sufficiently large sparse Jacobians and report
   the selected derivative strategy and nonzero count.~~
+- [x] ~~Measure Hessian structure once, select sparse symmetric coloring only
+  for sufficiently large sparse objectives, and cache its pattern/work object.~~
 - [x] ~~Persist optimized CppAD graphs with exact version/commit provenance and
   reconstruct worker tapes without parsing or retaping.~~
 - [x] ~~Prototype nested-AD-safe `chkpoint_two` ADVAN1 and 2x2 matrix kernels and
   verify values and Jacobians against their direct forms.~~
+- [x] ~~Expose ODE recording/evaluation/tape-memory profiles and checkpoint
+  decision support across solver tolerances. Current checkpoint prototypes are
+  exact but materially slower and larger than direct small-kernel tapes, so
+  they remain outside production.~~
 - [ ] Promote checkpoint/atomic kernels to the production path only if a
   representative benchmark overcomes their current small-kernel overhead.
 - [ ] Revisit sparsity thresholds and cache policy using large population
   models, ODE systems, and remote-worker startup benchmarks.
+
+## 12. Native Bayesian trajectories - complete
+
+- [x] ~~Move HMC leapfrog trajectories and NUTS tree construction into C++ with
+  no R callback inside a trajectory.~~
+- [x] ~~Keep bounded/native parameter transformations, exact Jacobians, priors,
+  full OMEGA Cholesky derivatives, and all subject ETAs on the exact CppAD
+  target.~~
+- [x] ~~Implement dual-averaged step-size and diagonal mass adaptation with
+  cancellation and iteration logging between sampler iterations.~~
+- [x] ~~Retain the R sampler as an explicit reference backend and verify native
+  target values/gradients against it.~~

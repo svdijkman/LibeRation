@@ -100,6 +100,20 @@ test_that("automatic and sandwich covariance expose R and S diagnostics", {
   expect_true(is.finite(sandwich$se[[1L]]))
 })
 
+test_that("NONMEM and likelihood covariance conventions have explicit scaling", {
+  fixture <- estimation_fixture()
+  fixture$model$THETAS$FIX <- c(FALSE, TRUE)
+  fit <- nm_est(fixture$model, fixture$data, method = "FOCEI", maxit = 3)
+  nonmem <- nm_cov_step(fit, type = "hessian", convention = "nonmem")
+  likelihood <- nm_cov_step(fit, type = "hessian", convention = "likelihood")
+
+  expect_identical(nonmem$convention, "nonmem")
+  expect_identical(likelihood$convention, "likelihood")
+  expect_equal(nonmem$bread, 2 * likelihood$bread, tolerance = 1e-7)
+  expect_equal(nonmem$covariance, likelihood$covariance / 2, tolerance = 1e-7)
+  expect_equal(nonmem$se, likelihood$se / sqrt(2), tolerance = 1e-7)
+})
+
 test_that("IMP and SAEM covariance use marginal importance information", {
   fixture <- estimation_fixture()
   fixture$model$THETAS$FIX <- c(FALSE, TRUE)

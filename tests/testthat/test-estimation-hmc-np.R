@@ -45,6 +45,32 @@ test_that("HMC joint gradient includes population transforms and ETA derivatives
   expect_equal(evaluated$gradient, numerical, tolerance = 2e-4)
 })
 
+test_that("native HMC target exactly matches the retained R reference target", {
+  fixture <- estimation_fixture(FALSE)
+  fixture$model$LIK_CONFIG$priors <- do.call(rbind, list(
+    nm_prior("THETA1", "normal", mean = 2, sd = 0.5),
+    nm_prior("OMEGA1", "lognormal", mean = log(0.09), sd = 0.3)
+  ))
+  context <- LibeRation:::.nm_estimation_context(
+    fixture$model, fixture$data, n_cores = 1, method = "HMC"
+  )
+  map <- LibeRation:::.nm_outer_map(context$model)
+  reference <- LibeRation:::.nm_hmc_target(context, map)
+  q <- reference$initial + seq_along(reference$initial) * 0.0007
+
+  expected <- reference$evaluate(q)
+  observed <- LibeRation:::.nm_hmc_native_target_eval(
+    reference, context, map, q
+  )
+
+  expect_equal(observed$logp, expected$logp, tolerance = 2e-11)
+  expect_equal(observed$gradient, expected$gradient, tolerance = 2e-10)
+  expect_equal(observed$outer, expected$outer, tolerance = 2e-12)
+  expect_equal(
+    as.numeric(observed$eta), as.numeric(expected$eta), tolerance = 2e-12
+  )
+})
+
 test_that("HMC differentiates the full-OMEGA Cholesky transform", {
   fixture <- estimation_fixture(TRUE)
   model <- nm_model(
@@ -74,6 +100,11 @@ test_that("HMC differentiates the full-OMEGA Cholesky transform", {
     (target$evaluate(plus)$logp - target$evaluate(minus)$logp) / (2 * step)
   }, numeric(1))
   expect_equal(evaluated$gradient, numerical, tolerance = 3e-4)
+  native <- LibeRation:::.nm_hmc_native_target_eval(
+    target, context, map, q
+  )
+  expect_equal(native$logp, evaluated$logp, tolerance = 2e-11)
+  expect_equal(native$gradient, evaluated$gradient, tolerance = 2e-10)
 })
 
 test_that("NPML estimates fixed-support weights and NPAG adapts its support", {

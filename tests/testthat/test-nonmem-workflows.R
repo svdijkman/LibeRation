@@ -132,7 +132,7 @@ test_that("binary categorical and hazard VPCs produce saved summaries", {
 test_that("profile likelihood refits fixed grids and SCM evaluates candidates", {
   fixture <- estimation_fixture()
   fixture$data$WT <- rep(c(55, 70, 90), each = 4)
-  model <- .nm_model_rebuild(
+  model <- LibeRation:::.nm_model_rebuild(
     fixture$model,
     list(INPUT = c(fixture$model$INPUT, "WT"), COVARIATES = "WT")
   )

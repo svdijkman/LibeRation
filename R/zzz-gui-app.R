@@ -86,6 +86,9 @@ liber_gui <- function(model = NULL, data = NULL, queue = NULL,
     htmltools::tags$head(
       htmltools::tags$title("LibeRation"),
       htmltools::tags$meta(name = "viewport", content = "width=device-width, initial-scale=1"),
+      htmltools::tags$script(htmltools::HTML(
+        "(function(){try{var t=localStorage.getItem('liber.theme');if(t!=='dark'&&t!=='light'){var l=localStorage.getItem('liberationDarkTheme');t=l==='1'?'dark':l==='0'?'light':(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light');}document.documentElement.setAttribute('data-liber-theme',t);}catch(e){}})();"
+      )),
       if (nzchar(favicon_href)) {
         htmltools::tags$link(rel = "icon", type = "image/svg+xml", href = favicon_href)
       }

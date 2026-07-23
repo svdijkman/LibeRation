@@ -31,12 +31,18 @@ test_that("joint likelihood gradient and Hessian come from the full AD tape", {
   fixture <- objective_fixture()
   engine <- nm_compile(fixture$model)
   tape <- engine$objective_tape(fixture$data, eta = fixture$eta)
-  exact <- .liberation_objective_tape_eval(tape$pointer, tape$point, TRUE, TRUE)
+  exact <- LibeRation:::.liberation_objective_tape_eval(
+    tape$pointer, tape$point, TRUE, TRUE
+  )
   fn <- function(point) {
-    .liberation_objective_tape_eval(tape$pointer, point, FALSE, FALSE)$value
+    LibeRation:::.liberation_objective_tape_eval(
+      tape$pointer, point, FALSE, FALSE
+    )$value
   }
   gr <- function(point) {
-    .liberation_objective_tape_eval(tape$pointer, point, TRUE, FALSE)$gradient
+    LibeRation:::.liberation_objective_tape_eval(
+      tape$pointer, point, TRUE, FALSE
+    )$gradient
   }
   numerical_gradient <- vapply(seq_along(tape$point), function(index) {
     objective_central_difference(fn, tape$point, index, step = 2e-6)

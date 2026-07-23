@@ -998,7 +998,8 @@ nm_support_matrix <- function() {
   values <- c(feature, experimental)
   reference_validated <- c(
     "ADVAN1", "ADVAN2", "ADVAN3", "ADVAN4", "ADVAN11", "ADVAN12",
-    "matrix exponential", "FO"
+    "matrix exponential", "steady-state bolus", "steady-state infusion",
+    "ADVAN6", "ADVAN13", "FO", "FOCEI"
   )
   data.frame(
     feature = values,

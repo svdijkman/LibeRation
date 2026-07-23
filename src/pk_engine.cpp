@@ -3,6 +3,7 @@
 
 #include <Rcpp.h>
 #include <LibeRtAD/eigen_r.hpp>
+#include <LibeRtAD/sparse_hessian.hpp>
 #include <unsupported/Eigen/MatrixFunctions>
 #include <LibeRtAD/program.hpp>
 #include "eigen_solver.h"
@@ -15,6 +16,7 @@
 #include <memory>
 #include <numeric>
 #include <queue>
+#include <random>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -3447,6 +3449,7 @@ struct ObjectiveTape {
   std::vector<int> structural_dvid;
   std::vector<double> dynamic_values;
   int n_rows = 0;
+  libertad::SparseHessianCache hessian_cache;
 };
 
 class TapePathChange : public std::runtime_error {
@@ -8007,6 +8010,8 @@ Rcpp::NumericVector kalman_simulate(
   return simulated;
 }
 
+#include "hmc_sampler.h"
+
 }  // namespace liberation
 
 // [[Rcpp::export(name = ".liberation_population_objective_create")]]
@@ -8176,6 +8181,47 @@ SEXP liberation_prediction_tape_create(
   pointer.attr("operation_count") = static_cast<double>(pointer->operation_count);
   pointer.attr("variable_count") = static_cast<double>(pointer->variable_count);
   return pointer;
+}
+
+// [[Rcpp::export(name = ".liberation_prediction_tape_info")]]
+Rcpp::List liberation_prediction_tape_info(SEXP tape_pointer) {
+  Rcpp::XPtr<liberation::PredictionTape> tape(tape_pointer);
+  const std::size_t taylor_bytes =
+    tape->fun.size_var() * tape->fun.size_order() *
+    std::max<std::size_t>(tape->fun.size_direction(), 1U) * sizeof(double);
+  const std::size_t resident_proxy = tape->fun.size_op_seq() +
+    tape->fun.size_random() + tape->fun.size_forward_bool() +
+    tape->fun.size_forward_set() + taylor_bytes;
+  return Rcpp::List::create(
+    Rcpp::Named("operations") = static_cast<double>(tape->fun.size_op()),
+    Rcpp::Named("operator_arguments") =
+      static_cast<double>(tape->fun.size_op_arg()),
+    Rcpp::Named("variables") = static_cast<double>(tape->fun.size_var()),
+    Rcpp::Named("parameters") = static_cast<double>(tape->fun.size_par()),
+    Rcpp::Named("dynamic_independent") =
+      static_cast<double>(tape->fun.size_dyn_ind()),
+    Rcpp::Named("dynamic_parameters") =
+      static_cast<double>(tape->fun.size_dyn_par()),
+    Rcpp::Named("dynamic_arguments") =
+      static_cast<double>(tape->fun.size_dyn_arg()),
+    Rcpp::Named("taylor_orders") =
+      static_cast<double>(tape->fun.size_order()),
+    Rcpp::Named("taylor_directions") =
+      static_cast<double>(tape->fun.size_direction()),
+    Rcpp::Named("operation_sequence_bytes") =
+      static_cast<double>(tape->fun.size_op_seq()),
+    Rcpp::Named("random_access_bytes") =
+      static_cast<double>(tape->fun.size_random()),
+    Rcpp::Named("forward_sparsity_bytes") = static_cast<double>(
+      tape->fun.size_forward_bool() + tape->fun.size_forward_set()),
+    Rcpp::Named("taylor_bytes_proxy") = static_cast<double>(taylor_bytes),
+    Rcpp::Named("resident_bytes_proxy") =
+      static_cast<double>(resident_proxy),
+    Rcpp::Named("propagation_kernel") = tape->propagation_kernel,
+    Rcpp::Named("derivative_strategy") = tape->derivative_strategy,
+    Rcpp::Named("jacobian_nonzeros") =
+      static_cast<double>(tape->jacobian_nonzeros)
+  );
 }
 
 // [[Rcpp::export(name = ".liberation_prediction_tape_new_dynamic")]]
@@ -8396,15 +8442,29 @@ Rcpp::List liberation_objective_tape_eval(
   if (hessian) {
     const std::size_t n = tape->domain_names.size();
     Rcpp::NumericMatrix output(n, n);
-    std::vector<double> direction(n, 0.0);
-    std::vector<double> weight(1, 1.0);
-    for (std::size_t column = 0; column < n; ++column) {
-      direction[column] = 1.0;
-      tape->fun.Forward(1, direction, messages);
-      direction[column] = 0.0;
-      std::vector<double> reverse = tape->fun.Reverse(2, weight);
+    libertad::analyse_hessian_sparsity(
+      tape->fun, tape->hessian_cache);
+    if (tape->hessian_cache.use_sparse) {
+      const std::vector<double> values = libertad::sparse_hessian(
+        tape->fun, x, tape->hessian_cache);
+      liberation::require_unchanged_path(
+        tape->fun, "sparse objective Hessian evaluation");
       for (std::size_t row = 0; row < n; ++row) {
-        output(row, column) = reverse[row * 2 + 1];
+        for (std::size_t column = 0; column < n; ++column) {
+          output(row, column) = values[row * n + column];
+        }
+      }
+    } else {
+      std::vector<double> direction(n, 0.0);
+      std::vector<double> weight(1, 1.0);
+      for (std::size_t column = 0; column < n; ++column) {
+        direction[column] = 1.0;
+        tape->fun.Forward(1, direction, messages);
+        direction[column] = 0.0;
+        std::vector<double> reverse = tape->fun.Reverse(2, weight);
+        for (std::size_t row = 0; row < n; ++row) {
+          output(row, column) = reverse[row * 2 + 1];
+        }
       }
     }
     output.attr("dimnames") = Rcpp::List::create(
@@ -8413,6 +8473,68 @@ Rcpp::List liberation_objective_tape_eval(
   }
   result.attr("domain") = Rcpp::wrap(tape->domain_names);
   return result;
+}
+
+// [[Rcpp::export(name = ".liberation_objective_tape_info")]]
+Rcpp::List liberation_objective_tape_info(SEXP tape_pointer) {
+  Rcpp::XPtr<liberation::ObjectiveTape> tape(tape_pointer);
+  const std::size_t taylor_bytes =
+    tape->fun.size_var() * tape->fun.size_order() *
+    std::max<std::size_t>(tape->fun.size_direction(), 1U) * sizeof(double);
+  return Rcpp::List::create(
+    Rcpp::Named("operations") = static_cast<double>(tape->fun.size_op()),
+    Rcpp::Named("operator_arguments") =
+      static_cast<double>(tape->fun.size_op_arg()),
+    Rcpp::Named("variables") = static_cast<double>(tape->fun.size_var()),
+    Rcpp::Named("parameters") = static_cast<double>(tape->fun.size_par()),
+    Rcpp::Named("dynamic_independent") =
+      static_cast<double>(tape->fun.size_dyn_ind()),
+    Rcpp::Named("dynamic_parameters") =
+      static_cast<double>(tape->fun.size_dyn_par()),
+    Rcpp::Named("operation_sequence_bytes") =
+      static_cast<double>(tape->fun.size_op_seq()),
+    Rcpp::Named("random_access_bytes") =
+      static_cast<double>(tape->fun.size_random()),
+    Rcpp::Named("forward_sparsity_bytes") = static_cast<double>(
+      tape->fun.size_forward_bool() + tape->fun.size_forward_set()),
+    Rcpp::Named("taylor_bytes_proxy") = static_cast<double>(taylor_bytes),
+    Rcpp::Named("hessian_strategy") = tape->hessian_cache.strategy,
+    Rcpp::Named("hessian_nonzeros") =
+      static_cast<double>(tape->hessian_cache.nonzeros),
+    Rcpp::Named("hessian_density") = tape->hessian_cache.density,
+    Rcpp::Named("hessian_sweeps") =
+      static_cast<double>(tape->hessian_cache.sweeps),
+    Rcpp::Named("resident_bytes_proxy") = static_cast<double>(
+      tape->fun.size_op_seq() + tape->fun.size_random() +
+      tape->fun.size_forward_bool() + tape->fun.size_forward_set() +
+      taylor_bytes)
+  );
+}
+
+// [[Rcpp::export(name = ".liberation_hmc_target_eval")]]
+Rcpp::List liberation_hmc_target_eval(
+    SEXP tape_pointer, const Rcpp::NumericVector& q,
+    const Rcpp::List& config) {
+  Rcpp::XPtr<liberation::ObjectiveTape> tape(tape_pointer);
+  return liberation::native_hmc_target_eval(*tape, q, config);
+}
+
+// [[Rcpp::export(name = ".liberation_hmc_sample")]]
+Rcpp::List liberation_hmc_sample(
+    SEXP tape_pointer, const Rcpp::List& config, const std::string& method,
+    int n_warmup, int n_sample, int n_thin, int n_chains, double seed,
+    double step_size, double target_acceptance, bool adapt_mass,
+    int n_leapfrog, int max_depth, double divergence_threshold,
+    int print_every) {
+  if (!std::isfinite(seed) || seed < 0.0) {
+    Rcpp::stop("Native HMC seed must be a non-negative finite number.");
+  }
+  Rcpp::XPtr<liberation::ObjectiveTape> tape(tape_pointer);
+  return liberation::native_hmc_sample(
+    *tape, config, method, n_warmup, n_sample, n_thin, n_chains,
+    static_cast<std::uint64_t>(seed), step_size, target_acceptance,
+    adapt_mass, n_leapfrog, max_depth, divergence_threshold, print_every
+  );
 }
 
 // [[Rcpp::export(name = ".liberation_objective_tape_eta_values")]]
@@ -8850,207 +8972,6 @@ Rcpp::List liberation_objective_tape_eta_metropolis(
     Rcpp::Named("value") = values,
     Rcpp::Named("accepted") = accepted,
     Rcpp::Named("attempted") = subjects * mcmc_steps);
-}
-
-namespace {
-
-double optimizer_value(const Rcpp::Function& function,
-                       const Eigen::VectorXd& point,
-                       const Eigen::VectorXd& scale) {
-  Rcpp::NumericVector native(point.size());
-  for (Eigen::Index i = 0; i < point.size(); ++i) native[i] = point[i] * scale[i];
-  Rcpp::NumericVector value = function(native);
-  if (value.size() != 1 || !std::isfinite(value[0])) return 1e100;
-  return value[0];
-}
-
-Eigen::VectorXd optimizer_gradient(const Rcpp::Function& function,
-                                   const Eigen::VectorXd& point,
-                                   const Eigen::VectorXd& scale) {
-  Rcpp::NumericVector native(point.size());
-  for (Eigen::Index i = 0; i < point.size(); ++i) native[i] = point[i] * scale[i];
-  Rcpp::NumericVector source = function(native);
-  if (source.size() != point.size()) {
-    Rcpp::stop("The native optimizer gradient has the wrong length.");
-  }
-  Eigen::VectorXd result(point.size());
-  for (Eigen::Index i = 0; i < point.size(); ++i) {
-    result[i] = source[i] * scale[i];
-    if (!std::isfinite(result[i])) {
-      Rcpp::stop("The native optimizer gradient is not finite.");
-    }
-  }
-  return result;
-}
-
-Eigen::VectorXd projected_gradient(const Eigen::VectorXd& point,
-                                   const Eigen::VectorXd& gradient,
-                                   const Eigen::VectorXd& lower,
-                                   const Eigen::VectorXd& upper) {
-  Eigen::VectorXd result = gradient;
-  for (Eigen::Index i = 0; i < point.size(); ++i) {
-    const double margin = 1e-12 * std::max(1.0, std::abs(point[i]));
-    if ((point[i] <= lower[i] + margin && gradient[i] > 0.0) ||
-        (point[i] >= upper[i] - margin && gradient[i] < 0.0)) {
-      result[i] = 0.0;
-    }
-  }
-  return result;
-}
-
-}  // namespace
-
-// A scaled, box-constrained BFGS implementation keeps all line-search and
-// convergence bookkeeping in compiled code while accepting the population
-// objective/gradient closures used by the R estimation layer.
-// [[Rcpp::export(name = ".liberation_native_optimizer")]]
-Rcpp::List liberation_native_optimizer(
-    const Rcpp::Function& objective, const Rcpp::Function& gradient,
-    const Rcpp::NumericVector& start, const Rcpp::NumericVector& lower,
-    const Rcpp::NumericVector& upper, int maxit = 200,
-    double tolerance = 1e-6, int trace = 0) {
-  const Eigen::Index dimension = start.size();
-  if (lower.size() != dimension || upper.size() != dimension || maxit < 1 ||
-      !std::isfinite(tolerance) || tolerance <= 0.0) {
-    Rcpp::stop("Native optimizer controls or bounds are invalid.");
-  }
-  Eigen::VectorXd scale(dimension), point(dimension), low(dimension), high(dimension);
-  for (Eigen::Index i = 0; i < dimension; ++i) {
-    scale[i] = std::max(std::abs(start[i]), 1.0);
-    point[i] = start[i] / scale[i];
-    low[i] = lower[i] / scale[i];
-    high[i] = upper[i] / scale[i];
-    if (low[i] > high[i] || point[i] < low[i] || point[i] > high[i]) {
-      Rcpp::stop("Native optimizer start is outside its bounds.");
-    }
-  }
-  double value = optimizer_value(objective, point, scale);
-  Eigen::VectorXd derivative = optimizer_gradient(gradient, point, scale);
-  int function_evaluations = 1;
-  int gradient_evaluations = 1;
-  int convergence = 1;
-  int iterations = 0;
-  std::string message = "iteration limit reached";
-  const Eigen::MatrixXd identity = Eigen::MatrixXd::Identity(dimension, dimension);
-  Eigen::MatrixXd initial_inverse = identity;
-  for (Eigen::Index i = 0; i < dimension; ++i) {
-    initial_inverse(i, i) = 1.0 / (scale[i] * scale[i]);
-  }
-  Eigen::MatrixXd inverse = initial_inverse;
-  std::vector<int> trace_iteration;
-  std::vector<double> trace_value, trace_gradient, trace_step;
-
-  for (int iteration = 0; iteration < maxit; ++iteration) {
-    Eigen::VectorXd projected = projected_gradient(point, derivative, low, high);
-    const double norm = dimension ? projected.lpNorm<Eigen::Infinity>() : 0.0;
-    trace_iteration.push_back(iteration);
-    trace_value.push_back(value);
-    trace_gradient.push_back(norm);
-    trace_step.push_back(iteration ? trace_step.back() : 0.0);
-    if (trace > 0) {
-      Rcpp::Rcout << "[LibeRation/native] ITERATION " << iteration
-                  << " OFV " << value << " PROJECTED_GRADIENT " << norm << "\n";
-    }
-    if (norm <= std::max(tolerance, 1e-8) * (1.0 + std::abs(value))) {
-      convergence = 0;
-      message = "projected gradient tolerance reached";
-      iterations = iteration;
-      break;
-    }
-    Eigen::VectorXd direction = -inverse * projected;
-    for (Eigen::Index i = 0; i < dimension; ++i) {
-      if (projected[i] == 0.0) direction[i] = 0.0;
-    }
-    double directional = derivative.dot(direction);
-    if (!std::isfinite(directional) || directional >= -1e-14) {
-      inverse = initial_inverse;
-      direction = -inverse * projected;
-      directional = derivative.dot(direction);
-    }
-    double maximum_step = 1.0;
-    for (Eigen::Index i = 0; i < dimension; ++i) {
-      if (direction[i] > 0.0 && std::isfinite(high[i])) {
-        maximum_step = std::min(maximum_step, (high[i] - point[i]) / direction[i]);
-      } else if (direction[i] < 0.0 && std::isfinite(low[i])) {
-        maximum_step = std::min(maximum_step, (low[i] - point[i]) / direction[i]);
-      }
-    }
-    double step = std::max(0.0, maximum_step);
-    Eigen::VectorXd candidate = point;
-    double candidate_value = 1e100;
-    bool accepted = false;
-    for (int line_search = 0; line_search < 40 && step > 1e-16; ++line_search) {
-      candidate = point + step * direction;
-      candidate = candidate.cwiseMax(low).cwiseMin(high);
-      candidate_value = optimizer_value(objective, candidate, scale);
-      ++function_evaluations;
-      if (std::isfinite(candidate_value) &&
-          candidate_value <= value + 1e-4 * step * directional) {
-        accepted = true;
-        break;
-      }
-      step *= 0.5;
-    }
-    if (!accepted) {
-      convergence = 52;
-      message = "line search failed";
-      iterations = iteration;
-      break;
-    }
-    Eigen::VectorXd candidate_derivative = optimizer_gradient(gradient, candidate, scale);
-    ++gradient_evaluations;
-    const Eigen::VectorXd displacement = candidate - point;
-    const Eigen::VectorXd change = candidate_derivative - derivative;
-    const double curvature = displacement.dot(change);
-    if (std::isfinite(curvature) &&
-        curvature > 1e-12 * displacement.norm() * change.norm()) {
-      const double rho = 1.0 / curvature;
-      const Eigen::MatrixXd left = identity - rho * displacement * change.transpose();
-      inverse = left * inverse * left.transpose() +
-        rho * displacement * displacement.transpose();
-    } else {
-      inverse = initial_inverse;
-    }
-    const double previous = value;
-    point = candidate;
-    value = candidate_value;
-    derivative = candidate_derivative;
-    iterations = iteration + 1;
-    trace_step.back() = step;
-    if (std::abs(previous - value) <= tolerance * (1.0 + std::abs(value))) {
-      Eigen::VectorXd next_projected = projected_gradient(point, derivative, low, high);
-      if (!dimension || next_projected.lpNorm<Eigen::Infinity>() <=
-          std::sqrt(tolerance) * (1.0 + std::abs(value))) {
-        convergence = 0;
-        message = "relative objective and gradient tolerance reached";
-        break;
-      }
-    }
-    if ((iteration + 1) % 10 == 0) Rcpp::checkUserInterrupt();
-  }
-  Rcpp::NumericVector par(dimension), final_gradient(dimension);
-  for (Eigen::Index i = 0; i < dimension; ++i) {
-    par[i] = point[i] * scale[i];
-    final_gradient[i] = derivative[i] / scale[i];
-  }
-  Rcpp::IntegerVector counts = Rcpp::IntegerVector::create(
-    Rcpp::Named("function") = function_evaluations,
-    Rcpp::Named("gradient") = gradient_evaluations);
-  return Rcpp::List::create(
-    Rcpp::Named("par") = par,
-    Rcpp::Named("value") = value,
-    Rcpp::Named("convergence") = convergence,
-    Rcpp::Named("message") = message,
-    Rcpp::Named("counts") = counts,
-    Rcpp::Named("iterations") = iterations,
-    Rcpp::Named("objective_evaluations") = function_evaluations,
-    Rcpp::Named("gradient_evaluations") = gradient_evaluations,
-    Rcpp::Named("gradient") = final_gradient,
-    Rcpp::Named("telemetry") = Rcpp::DataFrame::create(
-      Rcpp::Named("iteration") = trace_iteration,
-      Rcpp::Named("objective") = trace_value,
-      Rcpp::Named("projected_gradient") = trace_gradient,
-      Rcpp::Named("step") = trace_step));
 }
 
 // [[Rcpp::export(name = ".liberation_mixture_component_nll")]]

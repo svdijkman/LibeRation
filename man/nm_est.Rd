@@ -87,7 +87,9 @@ For `method = "HMC"` or `"NUTS"`, controls include `n_warmup` (500),
 `n_sample` (1000 per chain), `n_thin` (1), `n_chains` (4), `seed`,
 optional `step_size`, `target_acceptance` (0.8), `adapt_mass` (`TRUE`),
 `n_leapfrog` (10; HMC), `max_depth` (10; NUTS), and
-`divergence_threshold` (1000). For `method = "NPML"` or `"NPAG"`, use
+`divergence_threshold` (1000). `sampler_backend = "native"` keeps complete
+trajectories in C++; `"r"` retains the slower reference implementation for
+numerical comparison. For `method = "NPML"` or `"NPAG"`, use
 `np_supports` for an optional fixed starting matrix, `np_points` (25),
 `np_max_support` (100), `np_min_weight` (1e-5), `np_weight_maxit` (1000),
 `np_cycles` (3), and, for NPAG, `np_grid_step` (1), `np_grid_decay`

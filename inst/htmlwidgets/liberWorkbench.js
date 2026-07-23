@@ -7,6 +7,52 @@
   function list(x) { return Array.isArray(x) ? x : []; }
   function value(x, fallback) { return x === null || x === undefined || x === "" ? fallback : x; }
   function number(x) { var n = Number(x); return isFinite(n) ? n : null; }
+  function initialDarkTheme(legacyKey) {
+    try {
+      var shared = window.localStorage.getItem("liber.theme");
+      if (shared === "dark" || shared === "light") return shared === "dark";
+      var legacy = window.localStorage.getItem(legacyKey);
+      if (legacy === "1" || legacy === "dark") return true;
+      if (legacy === "0" || legacy === "light") return false;
+    } catch (error) {}
+    return !!(window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches);
+  }
+  function storeTheme(dark, legacyKey, numericLegacy) {
+    try {
+      window.localStorage.setItem("liber.theme", dark ? "dark" : "light");
+      window.localStorage.setItem(legacyKey, numericLegacy ? (dark ? "1" : "0") : (dark ? "dark" : "light"));
+      document.documentElement.setAttribute("data-liber-theme", dark ? "dark" : "light");
+    } catch (error) {}
+  }
+  function useDialogFocus(open, onClose) {
+    var dialog = React.useRef(null), close = React.useRef(onClose);
+    close.current = onClose;
+    React.useEffect(function () {
+      if (!open) return;
+      var prior = document.activeElement, node = dialog.current;
+      function focusable() {
+        return node ? Array.prototype.slice.call(node.querySelectorAll(
+          'button:not([disabled]),input:not([disabled]),select:not([disabled]),textarea:not([disabled]),a[href],[tabindex]:not([tabindex="-1"])'
+        )) : [];
+      }
+      function keydown(event) {
+        if (event.key === "Escape") { event.preventDefault(); close.current(); return; }
+        if (event.key !== "Tab" || !node) return;
+        var items = focusable();
+        if (!items.length) { event.preventDefault(); node.focus(); return; }
+        var first = items[0], last = items[items.length - 1];
+        if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+        else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+      }
+      document.addEventListener("keydown", keydown);
+      window.setTimeout(function () { var items = focusable(); (items[0] || node).focus(); }, 0);
+      return function () {
+        document.removeEventListener("keydown", keydown);
+        if (prior && prior.focus) prior.focus();
+      };
+    }, [open]);
+    return dialog;
+  }
   function formatNumber(x) {
     var n = Number(x);
     if (!isFinite(n)) return "-";
@@ -275,12 +321,12 @@
         onScroll: scroll, onKeyDown: keyDown, onChange: function (event) { props.onValue(event.target.value); } }));
   }
 
-  function StatusDot(props) { return e("span", { className: "lw-status-dot lw-status-" + value(props.status, "ready") }); }
+  function StatusDot(props) { return e("span", { className: "lw-status-dot lw-status-" + value(props.status, "ready"), "aria-hidden": "true" }); }
   function Button(props) {
     return e("button", {
       type: "button", className: "lw-button " + value(props.className, ""), disabled: !!props.disabled,
       title: props.title, "aria-label": props.ariaLabel || props.title, onClick: props.onClick
-    }, props.icon ? e("span", { className: "lw-button-icon" }, props.icon) : null, props.children);
+    }, props.icon ? e("span", { className: "lw-button-icon", "aria-hidden": "true" }, props.icon) : null, props.children);
   }
   function Empty(props) {
     return e("div", { className: "lw-empty" }, e("strong", null, value(props.title, "Nothing to display")), e("span", null, value(props.detail, "")));
@@ -314,9 +360,10 @@
       }))));
   }
   function Modal(props) {
+    var dialog = useDialogFocus(!!props.open, props.onClose);
     if (!props.open) return null;
     return e("div", { className: "lw-modal-backdrop", onMouseDown: function (event) { if (event.target === event.currentTarget) props.onClose(); } },
-      e("div", { className: "lw-modal " + value(props.className, ""), role: "dialog", "aria-modal": "true" },
+      e("div", { ref: dialog, tabIndex: -1, className: "lw-modal " + value(props.className, ""), role: "dialog", "aria-modal": "true", "aria-label": props.title },
         e("header", { className:"lw-modal-header" }, e("strong", null, props.title), e("button", { className:"lw-modal-close", type: "button", "aria-label":"Close", onClick: props.onClose }, "×")),
         e("div", { className: "lw-modal-body" }, props.children),
         props.footer ? e("footer", { className:"lw-modal-footer" }, props.footer) : null));
@@ -1572,17 +1619,18 @@
   }
 
   function LibeRWorkbench(props) {
-    var ribbon = React.useState("home"), theme = React.useState(function () { try { return window.localStorage.getItem("liberationDarkTheme") !== "0"; } catch (error) { return true; } });
+    var ribbon = React.useState("home"), theme = React.useState(function () { return initialDarkTheme("liberationDarkTheme"); });
     React.useEffect(function(){
       if(localAI.status.stage==="error"&&!Object.keys(localAI.pending).length)localAIShutdown();
       if(window.Shiny&&window.Shiny.addCustomMessageHandler){window.Shiny.addCustomMessageHandler("liber-report-document",function(message){window.dispatchEvent(new CustomEvent("liber-report-document",{detail:message||{}}));});window.Shiny.addCustomMessageHandler("liber-report-directory",function(message){window.dispatchEvent(new CustomEvent("liber-report-directory",{detail:message||{}}));});}
     },[]);
-    function toggleTheme() { var next = !theme[0]; theme[1](next); try { window.localStorage.setItem("liberationDarkTheme", next ? "1" : "0"); } catch (error) {} }
+    React.useEffect(function () { storeTheme(theme[0], "liberationDarkTheme", true); }, [theme[0]]);
+    function toggleTheme() { theme[1](!theme[0]); }
     function changeRibbon(next){ribbon[1](next);emit(props,"page_change",{page:next});}
     var ribbonItems = [{id:"home",label:"Home"},{id:"jobs",label:"Jobs"},{id:"data",label:"Data"}];
     return e("div", { className: "lw-legacy-shell " + (theme[0] ? "theme-dark" : "theme-light") },
-      e("header", { className: "lw-app-header" }, e("div", null, props.server&&props.server.icon?e("img",{className:"lw-app-icon",src:props.server.icon,alt:""}):null, e("strong", null, "LibeRation"), e("span", {className:"lw-app-version"}, "v"+value(props.server&&props.server.package_version,"unknown")), e("span", null, "Population PK/PD modelling")),
-        e("div", { className: "lw-app-header-right" },e(AIActivation,props), e("label", { className: "lw-theme-toggle" }, e("span", null, theme[0] ? "Dark" : "Light"), e("input", { type: "checkbox", checked: theme[0], onChange: toggleTheme }), e("i", null)), e("span", { className: "lw-workspace-path" }, value(props.workspace && props.workspace.path, "No workspace selected")))),
+      e("header", { className: "lw-app-header" }, e("div", {className:"lw-app-brand"}, props.server&&props.server.icon?e("img",{className:"lw-app-icon",src:props.server.icon,alt:""}):null, e("div",{className:"lw-app-title"},e("strong", null, "LibeRation"), e("span", null, "Population PK/PD modelling"))),
+        e("div", { className: "lw-app-header-right" },e(AIActivation,props), e("span", {className:"lw-app-version"}, "v"+value(props.server&&props.server.package_version,"unknown")), e("label", { className: "lw-theme-toggle" }, e("span", null, theme[0] ? "Dark" : "Light"), e("input", { type: "checkbox", checked: theme[0], onChange: toggleTheme }), e("i", null)), e("span", { className: "lw-workspace-path" }, value(props.workspace && props.workspace.path, "No workspace selected")))),
       e("div", { className: "lw-ribbon" }, e(Tabs, { value: ribbon[0], onChange: changeRibbon, items: ribbonItems, className: "lw-ribbon-tabs" })),
       e(LogBanner, props),
       e("div", { className: "lw-page-host" }, ribbon[0] === "home" ? e(HomePage, props) : ribbon[0] === "jobs" ? e(JobsPage, props) : e(DataPage, props)),

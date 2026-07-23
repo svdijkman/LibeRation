@@ -1,8 +1,8 @@
-// GCC 14 reports false-positive uninitialized-pointer diagnostics inside
-// Eigen's optimized self-adjoint matrix/vector kernels. Keep the
-// suppression confined to this third-party adapter translation unit.
 #if defined(__GNUC__) && !defined(__clang__)
-#pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
+// Eigen tracks this optimizer false positive as upstream issue #2304 and
+// suppresses it for GCC in its own test builds.
+#define LIBERATION_GCC_DIAGNOSTIC(x) _Pragma(#x)
+LIBERATION_GCC_DIAGNOSTIC(GCC diagnostic ignored "-Wmaybe-uninitialized")
 #endif
 
 #include "eigen_solver.h"
@@ -15,14 +15,18 @@ SelfAdjointEigenResult self_adjoint_eigen(
   Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> solver;
   solver.compute(matrix, compute_vectors ? Eigen::ComputeEigenvectors :
                                            Eigen::EigenvaluesOnly);
-  SelfAdjointEigenResult result;
-  result.info = solver.info();
-  if (result.info == Eigen::Success) {
-    result.values = solver.eigenvalues();
-    if (compute_vectors) result.vectors = solver.eigenvectors();
+  SelfAdjointEigenResult output{};
+  output.info = solver.info();
+  if (output.info == Eigen::Success) {
+    output.values = solver.eigenvalues();
+    if (compute_vectors) output.vectors = solver.eigenvectors();
   }
-  return result;
+  return output;
 }
 
 }  // namespace detail
 }  // namespace liberation
+
+#if defined(__GNUC__) && !defined(__clang__)
+#undef LIBERATION_GCC_DIAGNOSTIC
+#endif

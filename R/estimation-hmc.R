@@ -124,6 +124,45 @@
        n_outer = n_outer, n_eta_total = n_eta_total, full_tape = full_tape)
 }
 
+.nm_hmc_cpp_config <- function(context, map, target) {
+  priors <- .nm_cpp_prior_config(context$model)
+  list(
+    theta = as.numeric(context$model$THETAS$Value),
+    sigma = as.numeric(context$model$SIGMAS$Value),
+    omega = as.numeric(context$model$OMEGAS$Value),
+    theta_free = as.integer(map$theta_free),
+    sigma_free = as.integer(map$sigma_free),
+    omega_free = as.integer(map$omega_free),
+    omega_full = isTRUE(map$omega_full),
+    omega_rows = as.integer(context$model$OMEGAS$ROW),
+    omega_cols = as.integer(context$model$OMEGAS$COL),
+    n_eta_base = as.integer(context$model$n_eta),
+    n_subjects = as.integer(context$n_subjects),
+    n_eta = as.integer(context$n_eta),
+    lower = as.numeric(map$lower),
+    upper = as.numeric(map$upper),
+    initial = as.numeric(target$initial),
+    prior_index = priors$index,
+    prior_family = priors$family,
+    prior_mean = priors$mean,
+    prior_sd = priors$sd,
+    prior_shape = priors$shape,
+    prior_rate = priors$rate,
+    output_columns = as.integer(
+      nrow(context$model$THETAS) + nrow(context$model$SIGMAS) +
+        nrow(context$model$OMEGAS) +
+        context$n_subjects * context$n_eta + 1L
+    )
+  )
+}
+
+.nm_hmc_native_target_eval <- function(target, context, map, q) {
+  .liberation_hmc_target_eval(
+    target$full_tape$pointer, as.numeric(q),
+    .nm_hmc_cpp_config(context, map, target)
+  )
+}
+
 .nm_hmc_leapfrog <- function(q, momentum, gradient, epsilon, mass, target) {
   next_momentum <- momentum + 0.5 * epsilon * gradient
   next_q <- q + epsilon * next_momentum / mass
@@ -391,8 +430,10 @@
                         step_size = NULL, target_acceptance = 0.8,
                         adapt_mass = TRUE, n_leapfrog = 10L,
                         max_depth = 10L, divergence_threshold = 1000,
-                        print_every = 0L, ...) {
+                        print_every = 0L,
+                        sampler_backend = c("native", "r"), ...) {
   method <- match.arg(method)
+  sampler_backend <- match.arg(sampler_backend)
   n_warmup <- as.integer(n_warmup); n_sample <- as.integer(n_sample)
   n_thin <- as.integer(n_thin); n_chains <- as.integer(n_chains)
   if (anyNA(c(n_warmup, n_sample, n_thin, n_chains)) ||
@@ -414,82 +455,111 @@
   if (!is.finite(target_acceptance) || target_acceptance <= 0 || target_acceptance >= 1) {
     .nm_stop("`target_acceptance` must lie strictly between zero and one.")
   }
+  maximum_seed <- .Machine$integer.max - n_chains + 1
+  if (length(seed) != 1L || !is.finite(seed) || seed < 0 ||
+      seed != floor(seed) || seed > maximum_seed) {
+    .nm_stop(
+      "`seed` must be a non-negative integer no larger than ",
+      maximum_seed, " for the requested number of chains."
+    )
+  }
   target <- .nm_hmc_target(context, map)
   if (!length(target$initial)) .nm_stop(method, " requires at least one unknown parameter or ETA.")
-  chain_results <- vector("list", n_chains)
-  chain_diagnostics <- vector("list", n_chains)
-  final_evaluated <- NULL
-  for (chain_id in seq_len(n_chains)) {
-    set.seed(as.integer(seed) + chain_id - 1L)
-    q <- target$initial + stats::rnorm(length(target$initial), sd = 0.02)
-    evaluated <- target$evaluate(q)
-    if (!is.finite(evaluated$logp)) {
-      q <- target$initial
+  objective_evaluations <- NA_integer_
+  if (sampler_backend == "native") {
+    native <- .liberation_hmc_sample(
+      target$full_tape$pointer, .nm_hmc_cpp_config(context, map, target),
+      method, n_warmup, n_sample, n_thin, n_chains, as.numeric(seed),
+      if (is.null(step_size)) NaN else as.numeric(step_size),
+      target_acceptance, isTRUE(adapt_mass), n_leapfrog, max_depth,
+      divergence_threshold, as.integer(print_every)
+    )
+    chain_results <- native$chains
+    chain_diagnostics <- lapply(native$diagnostics, function(value) {
+      value$trace <- as.data.frame(value$trace, stringsAsFactors = FALSE)
+      value$trace <- data.frame(
+        iteration = seq_len(nrow(value$trace)), value$trace,
+        check.names = FALSE
+      )
+      value$trace$divergence <- as.logical(value$trace$divergence)
+      value
+    })
+    objective_evaluations <- as.integer(native$objective_evaluations)
+  } else {
+    chain_results <- vector("list", n_chains)
+    chain_diagnostics <- vector("list", n_chains)
+    for (chain_id in seq_len(n_chains)) {
+      set.seed(as.integer(seed) + chain_id - 1L)
+      q <- target$initial + stats::rnorm(length(target$initial), sd = 0.02)
       evaluated <- target$evaluate(q)
-    }
-    if (!is.finite(evaluated$logp)) .nm_stop("Unable to initialize ", method, " at a finite posterior density.")
-    mass <- rep(1, length(q))
-    epsilon <- if (is.null(step_size)) .nm_hmc_find_step(q, evaluated, mass, target) else as.numeric(step_size)
-    dual <- .nm_dual_average(epsilon, target_acceptance)
-    warmup_q <- matrix(NA_real_, max(n_warmup, 1L), length(q))
-    total <- n_warmup + n_sample * n_thin
-    draws <- matrix(NA_real_, n_sample,
-                    nrow(context$model$THETAS) + nrow(context$model$SIGMAS) +
-                      nrow(context$model$OMEGAS) + context$n_subjects * context$n_eta + 1L)
-    trace <- data.frame(
-      iteration = seq_len(total), acceptance = NA_real_, divergence = FALSE,
-      tree_depth = NA_integer_, leapfrog = NA_integer_, step_size = NA_real_,
-      stringsAsFactors = FALSE
-    )
-    keep <- 0L
-    for (iteration in seq_len(total)) {
-      transition <- if (method == "NUTS") {
-        .nm_nuts_transition(q, evaluated, epsilon, mass, max_depth, target,
-                            divergence_threshold)
-      } else {
-        .nm_hmc_transition(q, evaluated, epsilon, mass, n_leapfrog, target,
-                           divergence_threshold)
+      if (!is.finite(evaluated$logp)) {
+        q <- target$initial
+        evaluated <- target$evaluate(q)
       }
-      q <- transition$q
-      evaluated <- transition$evaluated
-      trace$acceptance[[iteration]] <- transition$acceptance
-      trace$divergence[[iteration]] <- transition$divergence
-      trace$tree_depth[[iteration]] <- transition$tree_depth
-      trace$leapfrog[[iteration]] <- transition$leapfrog
-      trace$step_size[[iteration]] <- epsilon
-      if (iteration <= n_warmup) {
-        warmup_q[iteration, ] <- q
-        epsilon <- dual$update(transition$acceptance)
-        if (isTRUE(adapt_mass) && n_warmup >= 20L && iteration == floor(n_warmup / 2)) {
-          variance <- apply(warmup_q[seq_len(iteration), , drop = FALSE], 2, stats::var)
-          mass <- pmin(pmax(variance + 1e-3, 1e-3), 1e3)
-          epsilon <- .nm_hmc_find_step(q, evaluated, mass, target)
-          dual <- .nm_dual_average(epsilon, target_acceptance)
+      if (!is.finite(evaluated$logp)) .nm_stop("Unable to initialize ", method, " at a finite posterior density.")
+      mass <- rep(1, length(q))
+      epsilon <- if (is.null(step_size)) .nm_hmc_find_step(q, evaluated, mass, target) else as.numeric(step_size)
+      dual <- .nm_dual_average(epsilon, target_acceptance)
+      warmup_q <- matrix(NA_real_, max(n_warmup, 1L), length(q))
+      total <- n_warmup + n_sample * n_thin
+      draws <- matrix(NA_real_, n_sample,
+                      nrow(context$model$THETAS) + nrow(context$model$SIGMAS) +
+                        nrow(context$model$OMEGAS) + context$n_subjects * context$n_eta + 1L)
+      trace <- data.frame(
+        iteration = seq_len(total), acceptance = NA_real_, divergence = FALSE,
+        tree_depth = NA_integer_, leapfrog = NA_integer_, step_size = NA_real_,
+        stringsAsFactors = FALSE
+      )
+      keep <- 0L
+      for (iteration in seq_len(total)) {
+        transition <- if (method == "NUTS") {
+          .nm_nuts_transition(q, evaluated, epsilon, mass, max_depth, target,
+                              divergence_threshold)
+        } else {
+          .nm_hmc_transition(q, evaluated, epsilon, mass, n_leapfrog, target,
+                             divergence_threshold)
         }
-        if (iteration == n_warmup) epsilon <- dual$final()
-      } else if ((iteration - n_warmup) %% n_thin == 0L) {
-        keep <- keep + 1L
-        draws[keep, ] <- .nm_mcmc_native_row(evaluated, context)
+        q <- transition$q
+        evaluated <- transition$evaluated
+        trace$acceptance[[iteration]] <- transition$acceptance
+        trace$divergence[[iteration]] <- transition$divergence
+        trace$tree_depth[[iteration]] <- transition$tree_depth
+        trace$leapfrog[[iteration]] <- transition$leapfrog
+        trace$step_size[[iteration]] <- epsilon
+        if (iteration <= n_warmup) {
+          warmup_q[iteration, ] <- q
+          epsilon <- dual$update(transition$acceptance)
+          if (isTRUE(adapt_mass) && n_warmup >= 20L && iteration == floor(n_warmup / 2)) {
+            variance <- apply(warmup_q[seq_len(iteration), , drop = FALSE], 2, stats::var)
+            mass <- pmin(pmax(variance + 1e-3, 1e-3), 1e3)
+            epsilon <- .nm_hmc_find_step(q, evaluated, mass, target)
+            dual <- .nm_dual_average(epsilon, target_acceptance)
+          }
+          if (iteration == n_warmup) epsilon <- dual$final()
+        } else if ((iteration - n_warmup) %% n_thin == 0L) {
+          keep <- keep + 1L
+          draws[keep, ] <- .nm_mcmc_native_row(evaluated, context)
+        }
+        if (print_every > 0L && iteration %% print_every == 0L) {
+          cat(sprintf(
+            "[LibeRation] %s CHAIN %d ITERATION %d LOGPOST %.10g ACCEPT %.3f STEP %.5g DIVERGENT %s\n",
+            method, chain_id, iteration, evaluated$logp, transition$acceptance,
+            epsilon, transition$divergence
+          ))
+          try(flush(stdout()), silent = TRUE)
+        }
       }
-      if (print_every > 0L && iteration %% print_every == 0L) {
-        cat(sprintf(
-          "[LibeRation] %s CHAIN %d ITERATION %d LOGPOST %.10g ACCEPT %.3f STEP %.5g DIVERGENT %s\n",
-          method, chain_id, iteration, evaluated$logp, transition$acceptance,
-          epsilon, transition$divergence
-        ))
-        try(flush(stdout()), silent = TRUE)
-      }
+      chain_results[[chain_id]] <- draws
+      post <- seq.int(n_warmup + 1L, total)
+      chain_diagnostics[[chain_id]] <- list(
+        trace = trace, step_size = epsilon, mass = mass,
+        divergences = sum(trace$divergence[post]),
+        mean_acceptance = mean(trace$acceptance[post]),
+        max_depth_hits = if (method == "NUTS") {
+          sum(trace$tree_depth[post] >= max_depth, na.rm = TRUE)
+        } else 0L
+      )
     }
-    chain_results[[chain_id]] <- draws
-    chain_diagnostics[[chain_id]] <- list(
-      trace = trace, step_size = epsilon, mass = mass,
-      divergences = sum(trace$divergence[(n_warmup + 1L):total]),
-      mean_acceptance = mean(trace$acceptance[(n_warmup + 1L):total]),
-      max_depth_hits = if (method == "NUTS") {
-        sum(trace$tree_depth[(n_warmup + 1L):total] >= max_depth, na.rm = TRUE)
-      } else 0L
-    )
-    final_evaluated <- evaluated
   }
   n_theta <- nrow(context$model$THETAS); n_sigma <- nrow(context$model$SIGMAS)
   n_omega <- nrow(context$model$OMEGAS)
@@ -521,10 +591,19 @@
   })
   optimizer <- list(
     convergence = 0L, message = paste(method, "sampling completed"),
-    counts = c(`function` = sum(vapply(chain_diagnostics, function(x) nrow(x$trace), integer(1))),
-               gradient = NA_integer_),
+    counts = if (is.finite(objective_evaluations)) {
+      c(`function` = objective_evaluations, gradient = objective_evaluations)
+    } else {
+      c(
+        `function` = sum(vapply(
+          chain_diagnostics, function(x) nrow(x$trace), integer(1)
+        )),
+        gradient = NA_integer_
+      )
+    },
     iterations = n_warmup + n_sample * n_thin,
-    objective_evaluations = NA_integer_, backend = paste0("cppad-", tolower(method))
+    objective_evaluations = objective_evaluations,
+    backend = paste0(sampler_backend, "-cppad-", tolower(method))
   )
   fit <- .nm_fit_result(
     context, method, parameters, -2 * max(chain[, "LOG_POSTERIOR"]), modes, optimizer,
@@ -536,7 +615,9 @@
       mean_acceptance = mean(vapply(chain_diagnostics, `[[`, numeric(1), "mean_acceptance")),
       max_depth_hits = sum(vapply(chain_diagnostics, `[[`, numeric(1), "max_depth_hits")),
       chain = chain_diagnostics,
-      gradient = "exact joint CppAD gradient"
+      gradient = "exact joint CppAD gradient",
+      sampler_backend = sampler_backend,
+      objective_evaluations = objective_evaluations
     )
   )
   population_covariance <- if (nrow(population_chain) > 1L) stats::cov(population_chain) else

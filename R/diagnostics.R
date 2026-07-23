@@ -746,6 +746,10 @@ nm_etab <- function(fit) {
 #' @param type `hessian`/`r` uses objective curvature, `opg`/`s` uses the
 #'   subject-score matrix, and `sandwich` uses R-inverse S R-inverse. `auto`
 #'   prefers a well-conditioned R matrix and falls back to sandwich or S.
+#' @param convention Information-matrix scaling. `"nonmem"` uses derivatives
+#'   of the reported objective function for NONMEM-compatible R and S matrices.
+#'   `"likelihood"` uses one-half of those derivatives and retains the former
+#'   log-likelihood convention.
 #' @param tolerance Positive-definite regularization tolerance.
 #' @param samples Target integration budget for IMP/SAEM marginal information.
 #'   Low-dimensional ETA integrals use a tensor Gauss--Hermite design near this
@@ -763,9 +767,12 @@ nm_etab <- function(fit) {
 nm_cov_step <- function(fit,
                         type = c("auto", "hessian", "opg", "sandwich", "r", "s"),
                         tolerance = 1e-8,
-                        samples = NULL, seed = NULL, eta_maxit = NULL) {
+                        samples = NULL, seed = NULL, eta_maxit = NULL,
+                        convention = c("nonmem", "likelihood")) {
   if (!inherits(fit, "nm_fit")) .nm_stop("`fit` must be an nm_fit.")
   type <- match.arg(type)
+  convention <- match.arg(convention)
+  information_scale <- if (convention == "nonmem") 1 else 0.5
   requested_type <- type
   if (type == "r") type <- "hessian"
   if (type == "s") type <- "opg"
@@ -822,7 +829,7 @@ nm_cov_step <- function(fit,
     return(structure(list(
       status = "completed", type = type, covariance = empty, correlation = empty,
       se = numeric(), rse = numeric(), eigenvalues = numeric(),
-      condition = NA_real_, regularization = 0
+      condition = NA_real_, regularization = 0, convention = convention
     ), class = "nm_covariance"))
   }
   need_bread <- type %in% c("auto", "hessian", "sandwich")
@@ -853,7 +860,7 @@ nm_cov_step <- function(fit,
     }
     bread_compiled <- attr(objective, "compiled_objective", exact = TRUE)
     bread <- tryCatch(
-      0.5 * stats::optimHess(
+      information_scale * stats::optimHess(
         at, objective, gr = attr(objective, "gradient", exact = TRUE)
       ),
       error = function(error) {
@@ -880,6 +887,7 @@ nm_cov_step <- function(fit,
           fit, context, map, parameters
         )
       }
+      if (convention == "nonmem") result <- 2 * result
       result
     }, error = function(error) {
       meat_error <<- conditionMessage(error)
@@ -935,6 +943,7 @@ nm_cov_step <- function(fit,
   correlation <- covariance / outer(se, se)
   structure(list(
     status = "completed", type = type, requested_type = requested_type,
+    convention = convention,
     covariance = covariance, correlation = correlation,
     se = stats::setNames(se, native_names),
     rse = stats::setNames(100 * se / pmax(abs(native_estimates), 1e-12), native_names),

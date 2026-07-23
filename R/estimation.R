@@ -623,8 +623,10 @@
               prediction_tape = prediction_tape, tape_profile = tape_profile
             )
           })
-          assign(".liber_parallel_subjects", evaluators, envir = .GlobalEnv)
-          assign(".liber_parallel_model", specification, envir = .GlobalEnv)
+          state <- new.env(parent = emptyenv())
+          state$subjects <- evaluators
+          state$model <- specification
+          assign(".liber_parallel_state", state, envir = .GlobalEnv)
           TRUE
         },
         data_chunks = lapply(chunks, function(rows) subject_data[rows]),
@@ -1215,7 +1217,7 @@
       context$parallel$cluster, seq_along(chunks),
        function(index, start_chunks, theta, sigma, omega, maxit, tolerance,
                 interaction, exact_hessian) {
-        evaluators <- get(".liber_parallel_subjects", envir = .GlobalEnv)
+        evaluators <- get(".liber_parallel_state", envir = .GlobalEnv)$subjects
         worker_starts <- start_chunks[[index]]
         context <- list(n_eta = ncol(worker_starts))
         parameters <- list(theta = theta, sigma = sigma, omega = omega)
@@ -1351,7 +1353,7 @@
     pieces <- parallel::clusterApply(
       context$parallel$cluster, seq_along(context$parallel$chunks),
       function(index, eta_chunks, parameters, interaction) {
-        evaluators <- get(".liber_parallel_subjects", envir = .GlobalEnv)
+        evaluators <- get(".liber_parallel_state", envir = .GlobalEnv)$subjects
         collection <- get(
           ".nm_objective_collection_gradient", envir = asNamespace("LibeRation")
         )
@@ -1405,7 +1407,7 @@
     pieces <- parallel::clusterApply(
       context$parallel$cluster, seq_along(context$parallel$chunks),
       function(index, eta_chunks, n_eta, parameters, approximation, transform) {
-        evaluators <- get(".liber_parallel_subjects", envir = .GlobalEnv)
+        evaluators <- get(".liber_parallel_state", envir = .GlobalEnv)$subjects
         batch <- get(".nm_nested_gradient_batch", envir = asNamespace("LibeRation"))
         batch(
           evaluators, n_eta, parameters, eta_chunks[[index]],
@@ -1583,8 +1585,9 @@
       function(index, parameters) {
         namespace <- asNamespace("LibeRation")
         subject_objective <- get(".nm_fo_subject", envir = namespace)
-        evaluators <- get(".liber_parallel_subjects", envir = .GlobalEnv)
-        model <- get(".liber_parallel_model", envir = .GlobalEnv)
+        state <- get(".liber_parallel_state", envir = .GlobalEnv)
+        evaluators <- state$subjects
+        model <- state$model
         vapply(
           evaluators, subject_objective, numeric(1), model = model,
           theta = parameters$theta, sigma = parameters$sigma,
@@ -1617,7 +1620,7 @@
     pieces <- parallel::clusterCall(
       context$parallel$cluster,
       function(parameters) {
-        evaluators <- get(".liber_parallel_subjects", envir = .GlobalEnv)
+        evaluators <- get(".liber_parallel_state", envir = .GlobalEnv)$subjects
         collection <- get(".nm_fo_collection_gradient", envir = asNamespace("LibeRation"))
         colSums(collection(evaluators, parameters))
       }, parameters = parameters
@@ -1852,7 +1855,9 @@
 #'   `n_sample` (1000 per chain), `n_thin` (1), `n_chains` (4), `seed`,
 #'   optional `step_size`, `target_acceptance` (0.8), `adapt_mass` (`TRUE`),
 #'   `n_leapfrog` (10; HMC), `max_depth` (10; NUTS), and
-#'   `divergence_threshold` (1000). For `method = "NPML"` or `"NPAG"`, use
+#'   `divergence_threshold` (1000). `sampler_backend = "native"` keeps complete
+#'   trajectories in C++; `"r"` retains the slower reference implementation
+#'   for numerical comparison. For `method = "NPML"` or `"NPAG"`, use
 #'   `np_supports` for an optional fixed starting matrix, `np_points` (25),
 #'   `np_max_support` (100), `np_min_weight` (1e-5), `np_weight_maxit` (1000),
 #'   `np_cycles` (3), and, for NPAG, `np_grid_step` (1), `np_grid_decay`

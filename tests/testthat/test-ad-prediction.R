@@ -14,8 +14,8 @@ test_that("the scalar-generic Pade exponential agrees with Eigen", {
   for (n in 1:5) {
     matrix <- matrix(rnorm(n * n, sd = 0.3), n, n)
     expect_equal(
-      .liberation_matrix_exp_pade(matrix),
-      .liberation_matrix_exp(matrix),
+      LibeRation:::.liberation_matrix_exp_pade(matrix),
+      LibeRation:::.liberation_matrix_exp(matrix),
       tolerance = 2e-12
     )
   }

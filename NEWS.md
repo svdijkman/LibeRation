@@ -1,3 +1,36 @@
+# LibeRation 0.8.3
+
+- Restores the established high-resolution LibeR dove and visibly aligns the
+  workbench header, controls, panels, and dialog geometry with the ecosystem.
+- Adds keyboard-safe dialogs with Escape handling, focus containment, and
+  focus restoration, plus consistent focus indicators throughout the GUI.
+- Uses the ecosystem-wide theme preference and a transparent package-coloured
+  dove favicon.
+
+# LibeRation 0.8.2
+
+- Moves HMC and NUTS trajectory generation, dual averaging, diagonal mass
+  adaptation, and posterior transformation into C++, with an explicit R
+  reference fallback and target/gradient equivalence tests covering priors and
+  full OMEGA Cholesky parameters.
+- Adds persistent prediction/objective tape-size telemetry, nonlinear ODE
+  tolerance profiling, and measured checkpoint decision support without
+  silently changing the production solver.
+- Reuses LibeRtAD's cached sparse-Hessian path for sufficiently large sparse
+  full objectives while retaining the dense route elsewhere.
+- Defines and tests process-isolated parallel execution; PSOCK workers now
+  retain one private worker-state object instead of multiple global bindings.
+
+# LibeRation 0.8.1
+
+- Corrects covariance scaling for NONMEM and likelihood Hessian conventions and
+  validates covariance standard errors against paired NONMEM runs.
+- Extracts the native optimizer into a dedicated compilation unit, enables
+  large Windows object files, and adds randomized ADVAN and parameter-bound
+  property tests.
+- Adds release-qualified capability metadata and reproducible validation
+  provenance for analytical ADVAN, steady-state, ODE, FO, and FOCEI paths.
+
 # LibeRation 0.8.0
 
 - Adds a versioned semantic model contract used by LibeRties so advanced HMM,

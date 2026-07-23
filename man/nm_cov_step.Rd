@@ -10,7 +10,8 @@ nm_cov_step(
   tolerance = 1e-08,
   samples = NULL,
   seed = NULL,
-  eta_maxit = NULL
+  eta_maxit = NULL,
+  convention = c("nonmem", "likelihood")
 )
 }
 \arguments{
@@ -34,6 +35,11 @@ IMP/SAEM information.}
 
 \item{eta_maxit}{Maximum conditional ETA iterations for GQ/IMP/SAEM
 information.}
+
+\item{convention}{Information-matrix scaling. `"nonmem"` uses derivatives
+of the reported objective function for NONMEM-compatible R and S matrices.
+`"likelihood"` uses one-half of those derivatives and retains the former
+log-likelihood convention.}
 }
 \value{
 Covariance, correlation, standard errors, relative standard errors,
