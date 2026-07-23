@@ -1,3 +1,8 @@
+# LibeRation 0.9.2
+
+- Updates the exact ecosystem compatibility manifest for the LibeRties 0.7.4
+  durable queue race correction in research beta 3.
+
 # LibeRation 0.9.1
 
 - Updates the ecosystem compatibility manifest for the cross-platform
