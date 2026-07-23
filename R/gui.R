@@ -948,6 +948,12 @@
                 message = paste("NONMEM control stream written to", result$path),
                 path = result$path))
   }
+  if (inherits(result, "liber_gui_support_bundle")) {
+    return(list(
+      status = "completed", kind = "support_bundle",
+      message = "Redacted support bundle created", path = result$path
+    ))
+  }
   if (inherits(result, "liber_gui_queued")) {
     return(list(
       status = "queued", message = paste("Queued job", result$id), job_id = result$id
@@ -1995,6 +2001,20 @@ renderLiberWorkbench <- function(expr, env = parent.frame(), quoted = FALSE) {
     })
     shiny::observeEvent(input$liber_workbench_event, {
       event <- input$liber_workbench_event
+      if (identical(event$action, "support_bundle")) {
+        state$result <- tryCatch({
+          destination <- file.path(
+            workspace$path, ".liberation", "support-bundles",
+            paste0("LibeR-support-", format(Sys.time(), "%Y%m%d-%H%M%S"), ".zip")
+          )
+          path <- liber_support_bundle(
+            destination, workspace = workspace, model = state$model,
+            data = state$data,
+            fit = if (inherits(state$result, "nm_fit")) state$result else NULL
+          )
+          structure(list(path = path), class = "liber_gui_support_bundle")
+        }, error = identity)
+      }
       if (identical(event$action, "validate")) {
         state$result <- tryCatch({
           if (is.null(state$model)) .nm_stop("Load a model before validation.")

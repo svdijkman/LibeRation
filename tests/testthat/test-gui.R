@@ -606,7 +606,17 @@ test_that("workbench content remains scrollable in short viewports", {
     "htmlwidgets", "liberWorkbench.yaml", package = "LibeRation"
   )
   dependency <- paste(readLines(dependency_path, warn = FALSE), collapse = "\n")
-  expect_match(dependency, "version: 0.8.3", fixed = TRUE)
+  expect_match(dependency, "version: 0.9.0", fixed = TRUE)
+})
+
+test_that("workbench exposes the privacy-preserving support workflow", {
+  javascript_path <- system.file(
+    "htmlwidgets", "liberWorkbench.js", package = "LibeRation"
+  )
+  javascript <- paste(readLines(javascript_path, warn = FALSE), collapse = "\n")
+  expect_match(javascript, 'emit(props,"support_bundle")', fixed = TRUE)
+  expect_match(javascript, "Redacted support bundle created", fixed = TRUE)
+  expect_match(javascript, "no dataset values", fixed = TRUE)
 })
 
 test_that("hosted GUI sessions receive different ephemeral workspaces", {

@@ -41,9 +41,27 @@
 }
 
 .nm_workspace_read <- function(path) {
-  candidate <- if (file.exists(path)) path else paste0(path, ".previous")
-  if (!file.exists(candidate)) .nm_stop("Workspace file does not exist: ", path)
-  readRDS(candidate)
+  candidates <- c(path, paste0(path, ".previous"))
+  candidates <- unique(candidates[file.exists(candidates)])
+  if (!length(candidates)) .nm_stop("Workspace file does not exist: ", path)
+  last <- NULL
+  for (candidate in candidates) {
+    value <- tryCatch(readRDS(candidate), error = function(error) {
+      last <<- error
+      NULL
+    })
+    if (!is.null(value)) {
+      if (!identical(candidate, path)) {
+        warning("Recovered interrupted workspace write from ",
+                basename(candidate), ".", call. = FALSE)
+      }
+      return(value)
+    }
+  }
+  .nm_stop(
+    "Unable to read workspace file ", path, ": ",
+    if (inherits(last, "condition")) conditionMessage(last) else "unknown read failure"
+  )
 }
 
 .nm_workspace_now <- function() {

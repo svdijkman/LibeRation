@@ -1008,6 +1008,10 @@ nm_support_matrix <- function() {
       values %in% experimental, "experimental-smoke-tested",
       ifelse(values %in% reference_validated, "reference-validated", "unit/integration-tested")
     ),
+    evidence_tier = ifelse(
+      values %in% experimental, "experimental",
+      ifelse(values %in% reference_validated, "validated", "verified")
+    ),
     recommended_use = ifelse(values %in% experimental,
                              "experimental research only", "research and teaching"),
     stringsAsFactors = FALSE

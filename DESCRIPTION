@@ -1,7 +1,7 @@
 Package: LibeRation
 Type: Package
 Title: Population Pharmacometric Simulation and Estimation
-Version: 0.8.3
+Version: 0.9.0
 Authors@R: person("Sven C.", "van Dijkman",
     email = "svdijkman@users.noreply.github.com", role = c("aut", "cre"))
 Author: Sven C. van Dijkman [aut, cre]
@@ -30,22 +30,23 @@ Imports:
     htmltools,
     htmlwidgets,
     jsonlite,
-    LibeRtAD (>= 0.7.7),
+    LibeRtAD (>= 0.7.9),
     parallel,
     R6,
     Rcpp,
     reactR,
     shiny,
     stats,
-    utils
+    utils,
+    zip
 LinkingTo:
     Rcpp,
     LibeRtAD
 Suggests:
     callr,
     knitr,
-    LibeRary (>= 0.7.3),
-    LibeRties (>= 0.7.1),
+    LibeRary (>= 0.7.5),
+    LibeRties (>= 0.7.3),
     pdftools,
     rmarkdown,
     shinytest2,

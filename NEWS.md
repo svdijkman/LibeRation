@@ -1,3 +1,16 @@
+# LibeRation 0.9.0
+
+- Adds a machine-readable ecosystem support matrix with validated, verified,
+  and experimental evidence tiers exposed through `liber_support_matrix()`.
+- Adds `liber_support_bundle()` and a GUI Support action that create
+  inspectable, privacy-preserving diagnostic archives without dataset values,
+  estimates, ETAs, environment variables, workspace contents, or model code
+  by default.
+- Recovers interrupted workspace writes from the durable previous generation,
+  with regression coverage for corrupt primary records.
+- Adds three runnable onboarding workflows and scheduled 1,000-subject
+  benchmarks that record cold/core time, payload sizes, and peak R heap.
+
 # LibeRation 0.8.3
 
 - Restores the established high-resolution LibeR dove and visibly aligns the

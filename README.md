@@ -6,6 +6,11 @@ The numerical model, event, ADVAN, ODE, likelihood, and automatic-
 differentiation paths run in C++; models can be specified with established
 LibeRation R syntax or the restricted C++ expression form.
 
+LibeRation 0.9 is a research beta. Install the exact
+[ecosystem compatibility set](../docs/INSTALL.md), run `liber_doctor()`, and
+use `liber_support_matrix("LibeRation")` to distinguish externally validated,
+internally verified, and experimental workflows.
+
 Implemented model paths include ADVAN1-4/11/12, ADVAN6, ADVAN13, arbitrary
 linear matrix propagation, infusions, analytical and nonlinear periodic
 steady state, correlated OMEGA, IOV, priors, mixtures, BLQ likelihoods,

@@ -1620,20 +1620,23 @@
 
   function LibeRWorkbench(props) {
     var ribbon = React.useState("home"), theme = React.useState(function () { return initialDarkTheme("liberationDarkTheme"); });
+    var supportModal = React.useState(false);
     React.useEffect(function(){
       if(localAI.status.stage==="error"&&!Object.keys(localAI.pending).length)localAIShutdown();
       if(window.Shiny&&window.Shiny.addCustomMessageHandler){window.Shiny.addCustomMessageHandler("liber-report-document",function(message){window.dispatchEvent(new CustomEvent("liber-report-document",{detail:message||{}}));});window.Shiny.addCustomMessageHandler("liber-report-directory",function(message){window.dispatchEvent(new CustomEvent("liber-report-directory",{detail:message||{}}));});}
     },[]);
     React.useEffect(function () { storeTheme(theme[0], "liberationDarkTheme", true); }, [theme[0]]);
+    React.useEffect(function(){if(props.result&&props.result.kind==="support_bundle")supportModal[1](true);},[props.result&&props.result.path]);
     function toggleTheme() { theme[1](!theme[0]); }
     function changeRibbon(next){ribbon[1](next);emit(props,"page_change",{page:next});}
     var ribbonItems = [{id:"home",label:"Home"},{id:"jobs",label:"Jobs"},{id:"data",label:"Data"}];
     return e("div", { className: "lw-legacy-shell " + (theme[0] ? "theme-dark" : "theme-light") },
       e("header", { className: "lw-app-header" }, e("div", {className:"lw-app-brand"}, props.server&&props.server.icon?e("img",{className:"lw-app-icon",src:props.server.icon,alt:""}):null, e("div",{className:"lw-app-title"},e("strong", null, "LibeRation"), e("span", null, "Population PK/PD modelling"))),
-        e("div", { className: "lw-app-header-right" },e(AIActivation,props), e("span", {className:"lw-app-version"}, "v"+value(props.server&&props.server.package_version,"unknown")), e("label", { className: "lw-theme-toggle" }, e("span", null, theme[0] ? "Dark" : "Light"), e("input", { type: "checkbox", checked: theme[0], onChange: toggleTheme }), e("i", null)), e("span", { className: "lw-workspace-path" }, value(props.workspace && props.workspace.path, "No workspace selected")))),
+        e("div", { className: "lw-app-header-right" },e(AIActivation,props),e(Button,{className:"lw-button-quiet lw-support-button",title:"Create a redacted diagnostic support bundle",onClick:function(){emit(props,"support_bundle");}},"Support"), e("span", {className:"lw-app-version"}, "v"+value(props.server&&props.server.package_version,"unknown")), e("label", { className: "lw-theme-toggle" }, e("span", null, theme[0] ? "Dark" : "Light"), e("input", { type: "checkbox", checked: theme[0], onChange: toggleTheme }), e("i", null)), e("span", { className: "lw-workspace-path" }, value(props.workspace && props.workspace.path, "No workspace selected")))),
       e("div", { className: "lw-ribbon" }, e(Tabs, { value: ribbon[0], onChange: changeRibbon, items: ribbonItems, className: "lw-ribbon-tabs" })),
       e(LogBanner, props),
       e("div", { className: "lw-page-host" }, ribbon[0] === "home" ? e(HomePage, props) : ribbon[0] === "jobs" ? e(JobsPage, props) : e(DataPage, props)),
+      e(Modal,{open:supportModal[0]&&props.result&&props.result.kind==="support_bundle",onClose:function(){supportModal[1](false);},title:"Redacted support bundle created",footer:e(Button,{className:"lw-button-primary",onClick:function(){supportModal[1](false);}},"Done")},e("p",null,"The archive contains runtime and structural diagnostics but no dataset values, parameter estimates, ETAs, environment variables, workspace contents, or model code."),e(Field,{label:"Saved location"},e("input",{readOnly:true,value:value(props.result&&props.result.path,"")})),e("p",{className:"lw-help-text"},"Inspect every file before sharing it in a bug report.")),
       e("footer", { className: "lw-statusbar" }, e("span", null, e(StatusDot, { status: props.result && props.result.status === "error" ? "error" : "ready" }), value(props.result && props.result.message, "Engine ready")), e("span", null, value(props.server && props.server.mode, "local") + " | C++17 | Exact AD")));
   }
 

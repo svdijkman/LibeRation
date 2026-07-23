@@ -1,2 +1,4 @@
 ^\.gitignore$
 ^src/.*[.](o|obj|dll|so|dylib|a|def)$
+^ENGINE_MODEL_ROADMAP[.]md$
+^TODO[.]md$

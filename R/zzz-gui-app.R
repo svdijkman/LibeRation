@@ -667,6 +667,19 @@ liber_gui <- function(model = NULL, data = NULL, queue = NULL,
       event <- input$liber_workbench_event
       action <- as.character(event$action %||% "")
 
+      if (identical(action, "support_bundle")) {
+        return(record("Redacted support bundle created", {
+          destination <- file.path(
+            workspace$path, ".liberation", "support-bundles",
+            paste0("LibeR-support-", format(Sys.time(), "%Y%m%d-%H%M%S"), ".zip")
+          )
+          path <- liber_support_bundle(
+            destination, workspace = workspace, model = state$model,
+            data = state$data, fit = state$fit
+          )
+          structure(list(path = path), class = "liber_gui_support_bundle")
+        }))
+      }
       if (identical(action, "ai_settings")) {
         allowed_models <- vapply(ai_models, `[[`, character(1), "id")
         requested_help <- as.character(event$help_model %||% event$model %||%

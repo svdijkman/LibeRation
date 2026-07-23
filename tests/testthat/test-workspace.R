@@ -87,6 +87,17 @@ test_that("legacy workspace manifests and snapshots migrate explicitly", {
   expect_s3_class(nm_project_load(workspace, project$id, id)$model, "nm_model")
 })
 
+test_that("workspace reads recover a valid previous generation after interruption", {
+  path <- tempfile(fileext = ".rds")
+  saveRDS(list(schema = "valid", version = 2L), paste0(path, ".previous"))
+  writeBin(charToRaw("partial-rds"), path)
+  expect_warning(
+    recovered <- LibeRation:::.nm_workspace_read(path),
+    "Recovered interrupted workspace write"
+  )
+  expect_identical(recovered, list(schema = "valid", version = 2L))
+})
+
 test_that("integrated package provenance is retained without replacing runtime provenance", {
   root <- tempfile("liber-provenance-")
   on.exit(unlink(root, recursive = TRUE, force = TRUE), add = TRUE)

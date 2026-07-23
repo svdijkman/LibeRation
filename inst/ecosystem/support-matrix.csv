@@ -1,0 +1,31 @@
+package,capability,status,evidence_tier,reference,gate,last_verified,recommended_use
+LibeRtAD,Scalar and vector automatic differentiation,implemented,verified,Analytic and finite-difference derivative fixtures,LibeRtAD test-engine and test-properties,2026-07-23,Research and teaching
+LibeRtAD,Sparse Jacobian and Hessian execution,implemented,verified,Dense derivative path and finite differences,LibeRtAD sparse derivative tests,2026-07-23,Research and teaching
+LibeRtAD,Persistent portable CppAD graph cache,implemented,verified,Round-trip and provenance rejection fixtures,LibeRtAD cache tests,2026-07-23,Research and teaching
+LibeRtAD,CppAD and Eigen bundled provenance,implemented,verified,Installed header and engine provenance checks,LibeRtAD installed-header tests,2026-07-23,Research and teaching
+LibeRation,ADVAN1/2/3/4/11/12 predictions,implemented,validated,NONMEM 7.3 generated fixtures,NONMEM prediction gate,2026-07-23,Research and teaching
+LibeRation,ADVAN6 and ADVAN13 predictions,implemented,validated,NONMEM 7.3 generated fixtures and closed-form systems,NONMEM prediction gate,2026-07-23,Research and teaching
+LibeRation,Bolus and intermittent-infusion steady state,implemented,validated,NONMEM 7.3 and analytic accumulation fixtures,NONMEM steady-state gate,2026-07-23,Research and teaching
+LibeRation,Modelled infusion rate and duration,implemented,validated,NONMEM 7.3 generated fixtures,NONMEM infusion gate,2026-07-23,Research and teaching
+LibeRation,FOCEI estimation and covariance,implemented,validated,NONMEM 7.3 compact population fixture,NONMEM FOCEI gate,2026-07-23,Research and teaching
+LibeRation,FO/FOCE/Laplace/ITS/GQ estimation,implemented,verified,Derivative checks and deterministic recovery fixtures,LibeRation estimation tests,2026-07-23,Research and teaching
+LibeRation,IMP/SAEM/BAYES estimation,implemented,verified,Seeded deterministic and recovery fixtures,LibeRation stochastic estimation tests,2026-07-23,Research and teaching
+LibeRation,HMC/NUTS and NPML/NPAG estimation,implemented,verified,Native/reference target and sampler fixtures,LibeRation HMC and nonparametric tests,2026-07-23,Research and teaching
+LibeRation,Full OMEGA IOV BLQ mixtures priors and correlated endpoints,implemented,verified,Unit derivative and integration fixtures,LibeRation model and likelihood tests,2026-07-23,Research and teaching
+LibeRation,HMM CT-HMM HSMM filtering smoothing and Viterbi,implemented,verified,Exact enumeration and finite-difference fixtures,LibeRation HMM tests,2026-07-23,Research and teaching
+LibeRation,Kalman EKF UKF and particle state-space inference,implemented,verified,Closed-form and seeded state-space fixtures,LibeRation state-space tests,2026-07-23,Research and teaching
+LibeRation,SDE DDE DAE QSP and hybrid model families,experimental,experimental,Analytic smoke and gradient fixtures,LibeRation experimental-family tests,2026-07-23,Experimental research only
+LibeRation,Local and remote graphical workflow,implemented,verified,Browser and queue integration fixtures,Ecosystem integration and browser CI,2026-07-23,Research and teaching
+LibeRties,Typed job and result wire contracts,implemented,verified,Round-trip malformed-input and fuzz fixtures,LibeRties wire and contract tests,2026-07-23,Research and teaching
+LibeRties,Durable local queue cancellation and restart recovery,implemented,verified,Subprocess cancellation checksum and recovery fixtures,LibeRties local-worker tests,2026-07-23,Research and teaching
+LibeRties,Remote authentication quotas and audit trail,implemented,verified,API security and persistence fixtures,LibeRties server and security tests,2026-07-23,Research deployments with external TLS and OS isolation
+LibeRties,Hostile-code isolation,external-control,experimental,Deployment-specific container or OS account sandbox,Strict server preflight plus independent penetration testing,2026-07-23,Not supplied by the built-in R subprocess
+LibeRality,Matched population-FO Fisher information,implemented,validated,PopED 0.7.0 and PFIM 7.0.3,Hosted external-validation gate,2026-07-23,Research and teaching
+LibeRality,D-optimal candidate ranking,implemented,validated,PopED 0.7.0 and PFIM 7.0.3,Hosted external-validation gate,2026-07-23,Research and teaching
+LibeRality,Advanced criteria constraints and trial simulation,implemented,verified,Analytic and deterministic simulation fixtures,LibeRality criteria and simulation tests,2026-07-23,Research and teaching
+LibeRator,Longitudinal patient evidence and parameter updating,implemented,verified,Deterministic virtual-patient fixtures,LibeRator analytic validation gate,2026-07-23,Research and teaching only
+LibeRator,Endpoint-aware regimen optimisation and prediction,implemented,verified,Analytic virtual-patient and constraint fixtures,LibeRator analytic validation gate,2026-07-23,Research and teaching only
+LibeRator,Autonomous clinical recommendation,not-qualified,experimental,None,Separate clinical validation and quality system required,2026-07-23,Do not use
+LibeRary,Synthetic catalogue search and LibeRation import,implemented,verified,Packaged synthetic catalogue fixtures,LibeRary catalogue tests,2026-07-23,Research and teaching
+LibeRary,Deliberative text/vision literature extraction,experimental,experimental,AED reference-corpus development benchmark,LibeRary reference release gate,2026-07-23,Human-reviewed research workflow
+LibeRary,Machine-qualified gold-standard evidence,not-qualified,experimental,None,Independent human curation required,2026-07-23,Do not claim
