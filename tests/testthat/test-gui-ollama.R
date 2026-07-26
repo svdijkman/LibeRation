@@ -116,12 +116,14 @@ test_that("hosted sessions reject a crafted Ollama settings event", {
 })
 
 test_that("hosted deployment explicitly disables Ollama", {
-  app <- readLines(
-    file.path(
-      testthat::test_path(), "..", "..", "..", "deploy", "shinyapps",
-      "liberation", "app.R"
-    ),
-    warn = FALSE
+  launcher <- file.path(
+    testthat::test_path(), "..", "..", "..", "deploy", "shinyapps",
+    "liberation", "app.R"
   )
+  skip_if_not(
+    file.exists(launcher),
+    "The shinyapps launcher is validated by the monorepo CI preflight."
+  )
+  app <- readLines(launcher, warn = FALSE)
   expect_match(paste(app, collapse = "\n"), "allow_ollama = FALSE", fixed = TRUE)
 })
