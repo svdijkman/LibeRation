@@ -984,6 +984,8 @@
   print_every <- as.integer(print_every)
   evaluations <- 0L
   gradient_evaluations <- 0L
+  gradient_fallbacks <- 0L
+  gradient_fallback_evaluations <- 0L
   pending_log <- NULL
   objective_scale <- 1
   raw <- function(parameters) {
@@ -1011,6 +1013,45 @@
     }
     value
   }
+  finite_difference_gradient <- function(parameters, baseline = NULL) {
+    baseline <- baseline %||% raw(parameters)
+    valid <- function(value) {
+      length(value) == 1L && is.finite(value) && value < 1e99
+    }
+    result <- rep(NA_real_, length(parameters))
+    for (index in seq_along(parameters)) {
+      step <- 1e-5 * max(abs(parameters[[index]]), 1)
+      low <- high <- parameters
+      low[[index]] <- max(map$lower[[index]], parameters[[index]] - step)
+      high[[index]] <- min(map$upper[[index]], parameters[[index]] + step)
+      low_value <- if (low[[index]] < parameters[[index]]) {
+        gradient_fallback_evaluations <<- gradient_fallback_evaluations + 1L
+        raw(low)
+      } else baseline
+      high_value <- if (high[[index]] > parameters[[index]]) {
+        gradient_fallback_evaluations <<- gradient_fallback_evaluations + 1L
+        raw(high)
+      } else baseline
+      result[[index]] <- if (
+        low[[index]] < parameters[[index]] &&
+          high[[index]] > parameters[[index]] &&
+          valid(low_value) && valid(high_value)
+      ) {
+        (high_value - low_value) / (high[[index]] - low[[index]])
+      } else if (
+        high[[index]] > parameters[[index]] &&
+          valid(baseline) && valid(high_value)
+      ) {
+        (high_value - baseline) / (high[[index]] - parameters[[index]])
+      } else if (
+        low[[index]] < parameters[[index]] &&
+          valid(baseline) && valid(low_value)
+      ) {
+        (baseline - low_value) / (parameters[[index]] - low[[index]])
+      } else NA_real_
+    }
+    result
+  }
   safe_gradient <- if (is.function(gradient) || compiled) function(parameters) {
     gradient_evaluations <<- gradient_evaluations + 1L
     value <- tryCatch(
@@ -1036,7 +1077,14 @@
           return(objective_scale * inward / largest)
         }
       }
-      .nm_stop("The population objective gradient is not finite.")
+      fallback <- finite_difference_gradient(parameters, point_value)
+      if (length(fallback) == length(parameters) &&
+          all(is.finite(fallback))) {
+        gradient_fallbacks <<- gradient_fallbacks + 1L
+        value <- fallback
+      } else {
+        .nm_stop("The population objective gradient is not finite.")
+      }
     }
     if (!is.null(pending_log) &&
         identical(as.numeric(parameters), as.numeric(pending_log$parameters))) {
@@ -1054,6 +1102,7 @@
       counts = c(`function` = 1L, gradient = NA_integer_),
       iterations = 0L, objective_evaluations = 1L,
       gradient_evaluations = 0L, backend = "fixed-parameters",
+      gradient_fallbacks = 0L, gradient_fallback_evaluations = 0L,
       elapsed_seconds = unname(proc.time()[["elapsed"]] - started),
       message = NULL,
       objective_backend = if (compiled) "persistent-cpp-population-objective" else
@@ -1085,6 +1134,10 @@
         result$objective_backend
     }
     result$elapsed_seconds <- unname(proc.time()[["elapsed"]] - started)
+    result$gradient_fallbacks <- as.integer(gradient_fallbacks)
+    result$gradient_fallback_evaluations <- as.integer(
+      gradient_fallback_evaluations
+    )
     return(result)
   }
   bounded <- any(is.finite(map$lower)) || any(is.finite(map$upper))
@@ -1127,6 +1180,10 @@
   } else iterations
   result$objective_evaluations <- as.integer(evaluations)
   result$gradient_evaluations <- as.integer(gradient_evaluations)
+  result$gradient_fallbacks <- as.integer(gradient_fallbacks)
+  result$gradient_fallback_evaluations <- as.integer(
+    gradient_fallback_evaluations
+  )
   result$backend <- if (compiled) {
     paste0("r-", tolower(arguments$method), "-cpp-objective")
   } else if (is.function(safe_gradient)) "r-optim-gradient" else "r-optim"
@@ -1672,6 +1729,9 @@
     elapsed_seconds = optimizer$elapsed_seconds %||% NA_real_,
     objective_evaluations = objective_evaluations,
     gradient_evaluations = optimizer$gradient_evaluations %||% NA_integer_,
+    gradient_fallbacks = optimizer$gradient_fallbacks %||% 0L,
+    gradient_fallback_evaluations =
+      optimizer$gradient_fallback_evaluations %||% 0L,
     trace = optimizer$telemetry %||% NULL,
     population_objective = optimizer$population_objective %||% NULL
   )

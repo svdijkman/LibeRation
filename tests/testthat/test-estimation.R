@@ -463,6 +463,32 @@ test_that("native population optimizer and structural tape pool report telemetry
   expect_true(fit$diagnostics$conditional_modes$evaluations > 0L)
 })
 
+test_that("outer optimization recovers from an isolated non-finite AD gradient", {
+  map <- list(
+    start = 10,
+    lower = -Inf,
+    upper = Inf,
+    names = "x",
+    in_bounds = function(parameters) all(is.finite(parameters)),
+    decode = identity
+  )
+  result <- LibeRation:::.nm_outer_optim(
+    map = map,
+    objective = function(parameters) (parameters[[1L]] - 2)^2,
+    gradient = function(parameters) {
+      if (parameters[[1L]] > 5) return(NaN)
+      2 * (parameters[[1L]] - 2)
+    },
+    maxit = 100L,
+    tolerance = 1e-8,
+    optimizer_backend = "r"
+  )
+
+  expect_equal(result$par, 2, tolerance = 1e-5)
+  expect_gte(result$gradient_fallbacks, 1L)
+  expect_gte(result$gradient_fallback_evaluations, 2L)
+})
+
 test_that("L-BFGS-B uses the persistent C++ population objective and same-point cache", {
   fixture <- estimation_fixture(FALSE)
   context <- LibeRation:::.nm_estimation_context(fixture$model, fixture$data)
