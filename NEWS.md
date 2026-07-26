@@ -1,3 +1,14 @@
+# LibeRation 0.9.4
+
+- Updates GOF, saved diagnostics, comparison, and queue views through targeted
+  React messages while leaving the surrounding Shiny interface interactive.
+- Automatically refreshes the active GOF view when switching completed runs
+  and removes the global faded-busy overlay from routine output updates.
+- Recovers an isolated non-finite AD gradient with a bounded, telemetered
+  finite-difference step instead of aborting an otherwise valid LAPLACE fit.
+- Increments the workbench asset version to invalidate browser caches from
+  earlier research-beta installations.
+
 # LibeRation 0.9.3
 
 - Adds three explicit model-definition routes: conventional ADVAN/PREDPP

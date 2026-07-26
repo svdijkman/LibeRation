@@ -761,7 +761,10 @@
   }
   index <- unname(lapply(names(database), function(topic) {
     text <- tryCatch(
-      paste(capture.output(tools::Rd2txt(database[[topic]])), collapse = "\n"),
+      paste(
+        utils::capture.output(tools::Rd2txt(database[[topic]])),
+        collapse = "\n"
+      ),
       error = function(error) ""
     )
     text <- gsub(".\b", "", text)
