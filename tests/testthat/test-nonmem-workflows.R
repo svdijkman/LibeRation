@@ -95,6 +95,55 @@ test_that("NONMEM likelihood records round-trip through the compiled path", {
   expect_identical(nm_control_read(written)$model$LIK_CONFIG$error, "likelihood")
 })
 
+test_that("direct PRED and combined PK-PRED modes round-trip explicitly", {
+  direct <- nm_model(
+    INPUT = c("ID", "TIME", "DV", "MDV"), PRED_MODE = "pred",
+    PRED_SOURCE = "F=THETA(1)*TIME", ERROR = "Y=F+ERR(1)",
+    THETAS = data.frame(THETA = 1, Value = 2),
+    SIGMAS = data.frame(SIGMA = 1, Value = 0.1)
+  )
+  direct_text <- nm_control_write(direct)
+  expect_false(grepl("$SUBROUTINES", direct_text, fixed = TRUE))
+  direct_rebuilt <- nm_control_read(direct_text)$model
+  expect_identical(direct_rebuilt$PRED_MODE, "pred")
+  expect_identical(direct_rebuilt$PRED_SOURCE, direct$PRED_SOURCE)
+
+  combined <- nm_model(
+    INPUT = c("ID", "TIME", "EVID", "AMT", "DV", "MDV"), ADVAN = 1,
+    PRED_MODE = "pk_pred",
+    PK_SOURCE = "CL=THETA(1);V=THETA(2);S1=V",
+    PRED_SOURCE = "RAW=F_ADVAN;F=RAW+A(1)/100",
+    ERROR = "Y=F",
+    THETAS = data.frame(THETA = 1:2, Value = c(2, 20))
+  )
+  combined_text <- nm_control_write(combined)
+  expect_match(combined_text, "LIBERATION_POST_PRED_BEGIN", fixed = TRUE)
+  expect_false(grepl("\n$PRED", combined_text, fixed = TRUE))
+  combined_rebuilt <- nm_control_read(combined_text)$model
+  expect_identical(combined_rebuilt$PRED_MODE, "pk_pred")
+  expect_identical(combined_rebuilt$PK_SOURCE, combined$PK_SOURCE)
+  expect_identical(combined_rebuilt$PRED_SOURCE, combined$PRED_SOURCE)
+})
+
+test_that("a conventional monolithic NONMEM PRED is split at residual code", {
+  control <- paste(
+    "$PROBLEM Monolithic direct model",
+    "$INPUT ID TIME DV MDV",
+    "$PRED",
+    "F=THETA(1)*TIME",
+    "Y=F+EPS(1)",
+    "$THETA 2",
+    "$SIGMA 1",
+    sep = "\n"
+  )
+  imported <- nm_control_read(control)$model
+  expect_identical(imported$PRED_MODE, "pred")
+  expect_match(imported$PRED_SOURCE, "F=THETA", fixed = TRUE)
+  expect_false(grepl("Y=", imported$PRED_SOURCE, fixed = TRUE))
+  expect_match(imported$ERROR, "Y=F+ERR(1)", fixed = TRUE)
+  expect_s3_class(nm_compile(imported), "NMEngine")
+})
+
 test_that("CWRES are generated and remain aligned with fitted records", {
   fixture <- estimation_fixture()
   fit <- nm_est(fixture$model, fixture$data, method = "FOCEI", maxit = 2, eta_maxit = 5)

@@ -107,7 +107,7 @@ test_that("single-model AI settings migrate without losing the old choice", {
     )
   ), path)
   settings <- LibeRation:::.liber_client_settings_read(workspace)
-  expect_equal(settings$version, 5L)
+  expect_equal(settings$version, 6L)
   expect_equal(
     settings$ai$help_model,
     "Qwen2.5-1.5B-Instruct-q4f16_1-MLC"
@@ -128,7 +128,8 @@ test_that("Help and Report generation route through separate lazy models", {
   script <- paste(script, collapse = "\n")
   expect_match(script, 'purpose:"help"', fixed = TRUE)
   expect_match(script, 'purpose:"report"', fixed = TRUE)
-  expect_match(script, "Only one model is held in GPU memory", fixed = TRUE)
+  expect_match(script, "WebLLM - in this browser", fixed = TRUE)
+  expect_match(script, "Ollama - local R backend", fixed = TRUE)
   expect_match(script, "same_as_help", fixed = TRUE)
   expect_match(script, "Local AI settings", fixed = TRUE)
   expect_match(script, "lw-ai-settings-button", fixed = TRUE)
@@ -157,7 +158,7 @@ test_that("code editor exposes resizable synchronized parameter tables", {
   expect_match(script, "function maximumCodeReference", fixed = TRUE)
   expect_match(script, "function synchronizedParameters", fixed = TRUE)
   expect_match(script, 'unitLabel:"THETA"', fixed = TRUE)
-  expect_match(script, 'unitLabel:"ETA"', fixed = TRUE)
+  expect_match(script, 'unitLabel:"OMEGA"', fixed = TRUE)
   expect_match(script, 'unitLabel:"SIGMA"', fixed = TRUE)
 })
 
@@ -191,6 +192,7 @@ test_that("GUI report workflow renders without a selected estimation", {
       formats = list("pdf"), blocks = blocks, nonce = 1
     ))
     session$flushReact()
+    wait_for_gui_task(session, tasks)
     expect_s3_class(state$report, "nm_report_bundle")
     expect_s3_class(state$report_design, "nm_report_design")
     expect_true(file.exists(state$report$pdf))

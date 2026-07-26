@@ -1,15 +1,16 @@
 Package: LibeRation
 Type: Package
 Title: Population Pharmacometric Simulation and Estimation
-Version: 0.9.2
+Version: 0.9.3
 Authors@R: person("Sven C.", "van Dijkman",
     email = "svdijkman@users.noreply.github.com", role = c("aut", "cre"))
 Author: Sven C. van Dijkman [aut, cre]
 Maintainer: Sven C. van Dijkman <svdijkman@users.noreply.github.com>
 Description: NONMEM-compatible population PK/PD model specification,
     simulation, estimation, diagnostics, and graphical workflow management
-    with one C++ numerical runtime. Implements ADVAN1-4, ADVAN6, ADVAN11-13,
-    arbitrary linear matrix propagation, analytical and nonlinear periodic
+    with one C++ numerical runtime. Implements ADVAN1-14 through analytical,
+    arbitrary linear matrix, explicit/stiff ODE, Michaelis-Menten, and
+    equilibrium-DAE paths, plus analytical and nonlinear periodic
     steady state, exact automatic differentiation, thirteen population
     estimation methods, declarative continuous, categorical, count,
     event-time, competing-risk, arbitrary-state continuous-time and
@@ -24,7 +25,10 @@ License: MIT + file LICENSE
 Encoding: UTF-8
 Depends: R (>= 4.1.0)
 Imports:
+    callr,
+    coro,
     digest,
+    ellmer (>= 0.4.2),
     graphics,
     grDevices,
     htmltools,
@@ -32,6 +36,7 @@ Imports:
     jsonlite,
     LibeRtAD (>= 0.7.9),
     parallel,
+    promises,
     R6,
     Rcpp,
     reactR,
@@ -43,7 +48,6 @@ LinkingTo:
     Rcpp,
     LibeRtAD
 Suggests:
-    callr,
     knitr,
     LibeRary (>= 0.7.5),
     LibeRties (>= 0.7.3),
@@ -52,6 +56,7 @@ Suggests:
     shinytest2,
     testthat (>= 3.0.0)
 VignetteBuilder: knitr
-SystemRequirements: C++17; optional WebGPU-capable browser for local AI
+SystemRequirements: C++17; optional WebGPU-capable browser or local Ollama
+    service for AI assistance
 Config/testthat/edition: 3
 Config/roxygen2/version: 8.0.0

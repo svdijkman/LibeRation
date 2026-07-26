@@ -98,6 +98,22 @@ test_that("automatic and sandwich covariance expose R and S diagnostics", {
   expect_equal(dim(sandwich$bread), c(1L, 1L))
   expect_equal(dim(sandwich$meat), c(1L, 1L))
   expect_true(is.finite(sandwich$se[[1L]]))
+  expect_true(automatic$eta_warm_start)
+  expect_true(sandwich$eta_warm_start)
+})
+
+test_that("FOCE and ITS covariance start from fitted conditional modes", {
+  fixture <- estimation_fixture()
+  fixture$model$THETAS$FIX <- c(FALSE, TRUE)
+  for (method in c("FOCE", "ITS")) {
+    fit <- nm_est(
+      fixture$model, fixture$data, method = method,
+      maxit = 8, eta_maxit = 60, tolerance = 1e-6
+    )
+    covariance <- nm_cov_step(fit, type = "hessian")
+    expect_equal(covariance$status, "completed", info = method)
+    expect_true(covariance$eta_warm_start, info = method)
+  }
 })
 
 test_that("NONMEM and likelihood covariance conventions have explicit scaling", {
@@ -132,6 +148,8 @@ test_that("IMP and SAEM covariance use marginal importance information", {
   expect_equal(
     imp$covariance$objective_backend, "fixed-proposal-importance-score"
   )
+  expect_true(imp$covariance$eta_warm_start)
+  expect_true(imp$covariance$objective_telemetry$eta_warm_start)
   expect_equal(imp$covariance$objective_telemetry$proposals, 3L)
   expect_equal(imp$covariance$sampling, "tensor-gauss-hermite")
   expect_equal(
@@ -153,6 +171,8 @@ test_that("IMP and SAEM covariance use marginal importance information", {
   expect_equal(
     saem$covariance$objective_backend, "fixed-proposal-importance-score"
   )
+  expect_true(saem$covariance$eta_warm_start)
+  expect_true(saem$covariance$objective_telemetry$eta_warm_start)
 })
 
 test_that("fixed-proposal importance gradients match their marginal objective", {
@@ -161,9 +181,13 @@ test_that("fixed-proposal importance gradients match their marginal objective", 
   context <- LibeRation:::.nm_estimation_context(fixture$model, fixture$data)
   map <- LibeRation:::.nm_outer_map(context$model)
   normals <- LibeRation:::.nm_imp_normals(context, 30L, 91L)
+  initial_eta <- matrix(c(-0.15, 0.05, 0.2), ncol = context$n_eta)
   objective <- LibeRation:::.nm_imp_information_objective(
-    context, map, normals, map$start, eta_maxit = 60L, tolerance = 1e-7
+    context, map, normals, map$start, eta_maxit = 60L, tolerance = 1e-7,
+    initial_eta = initial_eta
   )
+  expect_true(attr(objective, "eta_warm_start"))
+  expect_true(attr(objective, "telemetry")()$eta_warm_start)
   analytic <- attr(objective, "gradient")(map$start)
   numerical <- LibeRation:::.nm_numeric_gradient(
     objective, map$start, relative_step = 1e-5
@@ -171,6 +195,67 @@ test_that("fixed-proposal importance gradients match their marginal objective", 
   expect_equal(analytic, numerical, tolerance = 2e-4)
   scores <- attr(objective, "subject_scores")(map$start)
   expect_equal(colSums(scores), -0.5 * analytic, tolerance = 1e-10)
+})
+
+test_that("adaptive proposal construction receives each fitted ETA start", {
+  starts_seen <- new.env(parent = emptyenv())
+  evaluators <- lapply(seq_len(3L), function(subject) {
+    list(
+      n_eta = 1L,
+      eta_mode = local({
+        index <- subject
+        function(theta, sigma, omega, start, maxit, tolerance) {
+          starts_seen[[as.character(index)]] <- start
+          list(
+            par = start, convergence = 0L, hessian = matrix(2),
+            iterations = 0L, evaluations = 1L
+          )
+        }
+      })
+    )
+  })
+  context <- list(
+    subjects = evaluators, n_subjects = 3L, n_eta = 1L, parallel = NULL
+  )
+  parameters <- list(theta = 1, sigma = 1, omega = 1)
+  normals <- rep(list(matrix(c(-1, 0, 1), ncol = 1L)), 3L)
+  initial_eta <- matrix(c(-0.3, 0.1, 0.45), ncol = 1L)
+
+  proposals <- LibeRation:::.nm_imp_prepare_proposals(
+    context, parameters, normals, eta_maxit = 10L, tolerance = 1e-7,
+    adaptive = TRUE, initial_eta = initial_eta
+  )
+
+  expect_equal(
+    vapply(seq_len(3L), function(index) starts_seen[[as.character(index)]][[1L]],
+           numeric(1)),
+    initial_eta[, 1L]
+  )
+  expect_equal(
+    vapply(proposals, function(proposal) proposal$mode$par[[1L]], numeric(1)),
+    initial_eta[, 1L]
+  )
+})
+
+test_that("LAPLACE covariance reuses fitted conditional modes for large Theo data", {
+  model <- LibeRation:::.liber_model_template(2L, trans = 2L)
+  data <- LibeRation:::.liber_builtin_dataset(
+    model, "theophylline", n_subjects = 100L, seed = 31L
+  )
+  fit <- nm_est(
+    model, data, method = "LAPLACE", maxit = 100L,
+    eta_maxit = 100L, tolerance = 1e-6
+  )
+  covariance <- nm_cov_step(fit, type = "hessian")
+
+  expect_equal(covariance$status, "completed")
+  expect_equal(
+    covariance$objective_backend,
+    "persistent-cpp-population-objective"
+  )
+  expect_true(covariance$eta_warm_start)
+  expect_true(length(covariance$se) > 0L)
+  expect_true(all(is.finite(covariance$se)))
 })
 
 test_that("marginal covariance designs use bounded quadrature and random fallback", {

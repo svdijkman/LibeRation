@@ -22,7 +22,9 @@ nm_model_diagram(
 \item{parameters}{Optional parameter settings. Missing referenced parameters
 are added with positive initials and log-normal IIV.}
 
-\item{advan}{ODE solver, ADVAN6 or ADVAN13.}
+\item{advan}{General ODE solver: ADVAN6, 8, 9, 13, or 14. ADVAN9 diagrams
+generate the differential portion; add equilibrium `ALG` and
+`DAE_CONFIG` declarations in the code editor when required.}
 
 \item{residual}{Residual-error scaffold: additive, proportional, or combined.}
 

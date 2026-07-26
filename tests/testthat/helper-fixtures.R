@@ -20,3 +20,19 @@ estimation_fixture <- function(fix = TRUE) {
   }))
   list(model = model, data = data)
 }
+
+wait_for_gui_task <- function(session, tasks, timeout = 60) {
+  deadline <- Sys.time() + timeout
+  while (LibeRation:::.liber_shared_task_active(tasks) &&
+         Sys.time() < deadline) {
+    Sys.sleep(0.05)
+    if (is.function(session$elapse)) session$elapse(100)
+    session$flushReact()
+  }
+  if (is.function(session$elapse)) session$elapse(100)
+  session$flushReact()
+  if (LibeRation:::.liber_shared_task_active(tasks)) {
+    stop("Timed out waiting for the non-blocking GUI task.", call. = FALSE)
+  }
+  invisible(TRUE)
+}

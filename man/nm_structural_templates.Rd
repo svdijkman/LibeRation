@@ -2,7 +2,7 @@
 % Please edit documentation in R/model-templates.R
 \name{nm_structural_templates}
 \alias{nm_structural_templates}
-\title{Catalogue of advanced structural model templates}
+\title{Catalogue of editable model templates}
 \usage{
 nm_structural_templates()
 }
@@ -11,5 +11,5 @@ A data frame describing templates accepted by
   [nm_model_template()].
 }
 \description{
-Catalogue of advanced structural model templates
+Catalogue of editable model templates
 }

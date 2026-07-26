@@ -35,7 +35,7 @@
   list(theta = theta, omega = omega, code = code)
 }
 
-#' Catalogue of advanced structural model templates
+#' Catalogue of editable model templates
 #'
 #' @return A data frame describing templates accepted by
 #'   [nm_model_template()].
@@ -45,49 +45,249 @@ nm_structural_templates <- function() {
     template = c(
       "nonlinear_elimination", "transit_absorption", "dual_absorption",
       "parent_metabolite", "effect_compartment", "indirect_response",
-      "tumour_growth", "tmdd"
+      "tumour_growth", "tmdd", "bernoulli", "categorical", "ordinal",
+      "poisson", "negative_binomial", "time_to_event", "recurrent_event",
+      "competing_risks", "markov", "continuous_time_markov",
+      "hidden_markov", "continuous_time_hidden_markov"
     ),
     model = c(
       "Michaelis-Menten elimination", "Transit-compartment absorption",
       "Parallel first-order absorption", "Parent-metabolite PK",
       "PK with effect compartment", "Indirect-response turnover",
-      "PK-tumour growth/inhibition", "Full target-mediated disposition"
+      "PK-tumour growth/inhibition", "Full target-mediated disposition",
+      "Binary outcome (Bernoulli)", "Multicategory outcome",
+      "Ordered categorical outcome", "Count outcome (Poisson)",
+      "Overdispersed count outcome", "Time to first event",
+      "Recurrent-event intensity", "Competing-risks hazards",
+      "Discrete-time Markov model", "Continuous-time Markov model",
+      "Hidden Markov model", "Continuous-time hidden Markov model"
     ),
-    initial_state = c(FALSE, FALSE, FALSE, FALSE, FALSE, TRUE, TRUE, TRUE),
+    initial_state = c(
+      FALSE, FALSE, FALSE, FALSE, FALSE, TRUE, TRUE, TRUE,
+      rep(FALSE, 12L)
+    ),
     notes = c(
       "One-compartment IV model", "Configurable number of transit compartments",
       "Dose fractions use F1/F2", "Observe parent/metabolite using CMT 1/2",
       "Observe plasma/effect-site using CMT 1/2",
       "Initialize response compartment to KIN/KOUT",
       "Initialize tumour compartment with baseline size",
-      "Initialize free target compartment to KSYN/KDEG"
+      "Initialize free target compartment to KSYN/KDEG",
+      "DV must be coded 0/1", "DV defaults to categories 0, 1, and 2",
+      "DV defaults to ordered categories 0, 1, and 2",
+      "DV must be a non-negative integer count",
+      "DV must be a non-negative integer count",
+      "DV=1 denotes the event; rows define risk intervals",
+      "DV=1 denotes each recurrent event",
+      "DV=0 is no event; DV=1/2 are the competing causes",
+      "DV is the observed state coded 0/1",
+      "DV is the observed state coded 0/1; irregular times are supported",
+      "A two-state binary-emission HMM with smoothing/Viterbi support",
+      "A two-state binary-emission CT-HMM with irregular observation times"
     ),
     stringsAsFactors = FALSE
   )
 }
 
-#' Create an editable advanced structural model
+.nm_likelihood_model_template <- function(template, iiv = TRUE) {
+  input <- c("ID", "TIME", "DV", "MDV", "DVID", "EVID", "AMT", "CMT")
+  eta <- if (isTRUE(iiv)) " + ETA(1)" else ""
+  omega <- if (isTRUE(iiv)) {
+    data.frame(OMEGA = 1L, Value = 0.1, FIX = FALSE)
+  } else NULL
+  theta <- function(values) data.frame(
+    THETA = seq_along(values), Value = as.numeric(values),
+    LOWER = rep(-10, length(values)), UPPER = rep(10, length(values)),
+    FIX = FALSE
+  )
+  build <- function(pred, values, outcomes = NULL, error = NULL,
+                    hmm = NULL, output = NULL) {
+    arguments <- list(
+      INPUT = input, OUTPUT = output, ADVAN = 1L, TRANS = 1L,
+      DOSECMP = 1L, OBSCMP = 1L, PRED = pred,
+      THETAS = theta(values), OMEGAS = omega
+    )
+    if (!is.null(outcomes)) arguments$OUTCOMES <- outcomes
+    if (!is.null(error)) arguments$ERROR <- error
+    if (!is.null(hmm)) arguments$HMM_CONFIG <- hmm
+    model <- do.call(nm_model, arguments)
+    catalogue <- nm_structural_templates()
+    row <- match(template, catalogue$template)
+    attr(model, "name") <- catalogue$model[[row]]
+    attr(model, "template") <- template
+    attr(model, "template_notes") <- catalogue$notes[[row]]
+    model
+  }
+  base <- "CL=1\nV=1\nS1=V"
+  if (template == "bernoulli") {
+    return(build(
+      paste0("LP=THETA(1)", eta, "\nP=1/(1+exp(-LP))\nF=P\n", base),
+      0, nm_outcome("bernoulli", prediction = "P"), output = c("LP", "P")
+    ))
+  }
+  if (template %in% c("categorical", "ordinal")) {
+    pred <- paste0(
+      "L1=THETA(1)", eta, "\nL2=THETA(2)\n",
+      "E1=exp(L1)\nE2=exp(L2)\nDEN=1+E1+E2\n",
+      "P0=1/DEN\nP1=E1/DEN\nP2=E2/DEN\nF=P1\n", base
+    )
+    return(build(
+      pred, c(0, 0),
+      nm_outcome(
+        template, prediction = "P1",
+        probabilities = c("P0", "P1", "P2"), categories = 0:2
+      ),
+      output = c("P0", "P1", "P2")
+    ))
+  }
+  if (template == "poisson") {
+    return(build(
+      paste0("LOGMU=THETA(1)", eta, "\nMU=exp(LOGMU)\nF=MU\n", base),
+      log(2), nm_outcome("poisson", prediction = "MU", max_count = 100L),
+      output = c("LOGMU", "MU")
+    ))
+  }
+  if (template == "negative_binomial") {
+    return(build(
+      paste0(
+        "LOGMU=THETA(1)", eta,
+        "\nMU=exp(LOGMU)\nSIZE=exp(THETA(2))\nF=MU\n", base
+      ),
+      log(c(2, 3)),
+      nm_outcome(
+        "negative_binomial", prediction = "MU",
+        dispersion = "SIZE", max_count = 100L
+      ),
+      output = c("LOGMU", "MU", "SIZE")
+    ))
+  }
+  if (template %in% c("time_to_event", "recurrent_event")) {
+    family <- if (template == "time_to_event") "tte" else "recurrent_event"
+    return(build(
+      paste0("LOGHAZ=THETA(1)", eta, "\nHAZ=exp(LOGHAZ)\nF=HAZ\n", base),
+      log(0.1), nm_outcome(family, prediction = "HAZ"),
+      output = c("LOGHAZ", "HAZ")
+    ))
+  }
+  if (template == "competing_risks") {
+    return(build(
+      paste0(
+        "LOGH1=THETA(1)", eta,
+        "\nH1=exp(LOGH1)\nH2=exp(THETA(2))\nF=H1+H2\n", base
+      ),
+      log(c(0.1, 0.05)),
+      nm_outcome(
+        "competing_risks", prediction = "H1",
+        cause_hazards = c(`1` = "H1", `2` = "H2")
+      ),
+      output = c("H1", "H2")
+    ))
+  }
+  if (template == "markov") {
+    pred <- paste0(
+      "P0=1/(1+exp(-THETA(1)))\nP1=1-P0\n",
+      "T00=1/(1+exp(-(THETA(2)", eta, ")))\nT01=1-T00\n",
+      "T10=1/(1+exp(-THETA(3)))\nT11=1-T10\nF=P1\n", base
+    )
+    return(build(
+      pred, stats::qlogis(c(0.6, 0.8, 0.3)),
+      nm_outcome(
+        "markov", prediction = "P1", categories = c(0, 1),
+        initial = c("P0", "P1"),
+        transition = matrix(
+          c("T00", "T01", "T10", "T11"), 2, 2, byrow = TRUE
+        )
+      ),
+      output = c("P0", "P1", "T00", "T01", "T10", "T11")
+    ))
+  }
+  if (template == "continuous_time_markov") {
+    pred <- paste0(
+      "PI0=1/(1+exp(-THETA(1)))\nPI1=1-PI0\n",
+      "Q01=exp(THETA(2)", eta, ")\nQ10=exp(THETA(3))\nF=PI1\n", base
+    )
+    return(build(
+      pred, c(stats::qlogis(0.7), log(0.2), log(0.4)),
+      nm_outcome(
+        "continuous_time_markov", prediction = "PI1",
+        categories = c(0, 1), initial = c("PI0", "PI1"),
+        rates = c("Q01", "Q10")
+      ),
+      output = c("PI0", "PI1", "Q01", "Q10")
+    ))
+  }
+  if (template == "hidden_markov") {
+    error <- paste0(
+      "I1=1/(1+exp(-THETA(1)))\nI2=1-I1\n",
+      "T11=1/(1+exp(-(THETA(2)", eta, ")))\nT12=1-T11\n",
+      "T21=1/(1+exp(-THETA(3)))\nT22=1-T21\n",
+      "E10=1/(1+exp(-THETA(4)))\nE20=1/(1+exp(-THETA(5)))\n",
+      "E1=ifelse(DV==0,E10,1-E10)\nE2=ifelse(DV==0,E20,1-E20)"
+    )
+    return(build(
+      paste("F=0", base, sep = "\n"),
+      stats::qlogis(c(0.6, 0.8, 0.3, 0.9, 0.2)),
+      error = error,
+      hmm = nm_hmm_config(
+        states = c("low", "high"), initial = c("I1", "I2"),
+        transition = matrix(
+          c("T11", "T12", "T21", "T22"), 2, 2, byrow = TRUE
+        ),
+        emission = c("E1", "E2"), by_dvid = TRUE
+      )
+    ))
+  }
+  if (template == "continuous_time_hidden_markov") {
+    error <- paste0(
+      "I1=1/(1+exp(-THETA(1)))\nI2=1-I1\n",
+      "Q12=exp(THETA(2)", eta, ")\nQ21=exp(THETA(3))\n",
+      "E10=1/(1+exp(-THETA(4)))\nE20=1/(1+exp(-THETA(5)))\n",
+      "E1=ifelse(DV==0,E10,1-E10)\nE2=ifelse(DV==0,E20,1-E20)"
+    )
+    return(build(
+      paste("F=0", base, sep = "\n"),
+      c(stats::qlogis(0.6), log(0.2), log(0.4),
+        stats::qlogis(0.9), stats::qlogis(0.2)),
+      error = error,
+      hmm = nm_cthmm_config(
+        states = c("low", "high"), initial = c("I1", "I2"),
+        generator = matrix(c("", "Q12", "Q21", ""), 2, 2, byrow = TRUE),
+        emission = c("E1", "E2"), by_dvid = TRUE
+      )
+    ))
+  }
+  .nm_stop("Unknown likelihood model template: ", template, ".")
+}
+
+#' Create an editable model from a first-class template
 #'
 #' These are ordinary [nm_model()] objects, not a second modelling language.
-#' The generated `$PK/$PRED` and `$DES` blocks remain fully editable and run
-#' through the same C++/CppAD ODE, likelihood, simulation, and estimation paths.
+#' Structural templates generate editable `$PK/$PRED` and `$DES` blocks.
+#' Outcome, event, Markov, and hidden-Markov templates add their corresponding
+#' likelihood configuration. Every template runs through the same C++/CppAD
+#' compilation, likelihood, simulation, and estimation paths.
 #'
 #' @param template Template identifier from [nm_structural_templates()].
-#' @param iiv Add log-normal ETA variability to generated parameters.
-#' @param residual Residual model.
+#' @param iiv Add ETA variability to generated parameters or linear predictors.
+#' @param residual Residual model for structural PK/PD templates.
 #' @param n_transit Number of transit compartments for `transit_absorption`.
 #' @param ode_control Optional ADVAN13 solver controls.
 #' @return An editable `nm_model` with template notes attached.
 #' @export
 nm_model_template <- function(
-    template = c(
-      "nonlinear_elimination", "transit_absorption", "dual_absorption",
-      "parent_metabolite", "effect_compartment", "indirect_response",
-      "tumour_growth", "tmdd"
-    ),
+    template = "nonlinear_elimination",
     iiv = TRUE, residual = c("proportional", "additive", "combined", "lognormal", "none"),
     n_transit = 3L, ode_control = NULL) {
-  template <- match.arg(template)
+  template <- match.arg(template, nm_structural_templates()$template)
+  likelihood_templates <- c(
+    "bernoulli", "categorical", "ordinal", "poisson",
+    "negative_binomial", "time_to_event", "recurrent_event",
+    "competing_risks", "markov", "continuous_time_markov",
+    "hidden_markov", "continuous_time_hidden_markov"
+  )
+  if (template %in% likelihood_templates) {
+    return(.nm_likelihood_model_template(template, iiv = iiv))
+  }
   residual <- .nm_template_residual(match.arg(residual))
   input <- c("ID", "TIME", "EVID", "AMT", "RATE", "CMT", "DV", "MDV", "DVID")
   build <- function(names, values, des, obs, dose = 1L, bounded = character(),

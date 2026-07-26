@@ -79,6 +79,7 @@
 .nm_model_spec <- function(model) {
   list(
     version = model$version,
+    pred_mode = model$PRED_MODE %||% "pk",
     advan = model$ADVAN,
     trans = model$TRANS,
     model_ss = model$SS,
@@ -92,6 +93,7 @@
     omega_row = model$OMEGAS$ROW,
     omega_col = model$OMEGAS$COL,
     pred_ir = model$pred_ir,
+    post_pred_ir = model$post_pred_ir %||% NULL,
     error_ir = model$error_ir %||% NULL,
     likelihood_output = model$likelihood_output %||% NULL,
     likelihood_scale = model$likelihood_scale %||% NULL,
@@ -102,7 +104,11 @@
     experimental = model$EXPERIMENTAL %||% NULL,
     re_config = model$RE_CONFIG %||% NULL,
     output_names = intersect(
-      model$OUTPUT %||% character(), model$pred_ir$output_names %||% character()
+      model$OUTPUT %||% character(),
+      unique(c(
+        model$pred_ir$output_names %||% character(),
+        model$post_pred_ir$output_names %||% character()
+      ))
     ),
     des_ir = model$des_ir,
     alg_ir = model$alg_ir %||% NULL,

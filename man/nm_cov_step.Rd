@@ -43,7 +43,8 @@ log-likelihood convention.}
 }
 \value{
 Covariance, correlation, standard errors, relative standard errors,
-  eigenvalues, and conditioning diagnostics.
+  eigenvalues, conditioning diagnostics, and whether fitted conditional
+  modes warm-started the covariance calculation.
 }
 \description{
 Covariance step for a fitted model

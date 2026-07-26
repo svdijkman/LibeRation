@@ -2,12 +2,10 @@
 % Please edit documentation in R/model-templates.R
 \name{nm_model_template}
 \alias{nm_model_template}
-\title{Create an editable advanced structural model}
+\title{Create an editable model from a first-class template}
 \usage{
 nm_model_template(
-  template = c("nonlinear_elimination", "transit_absorption", "dual_absorption",
-    "parent_metabolite", "effect_compartment", "indirect_response", "tumour_growth",
-    "tmdd"),
+  template = "nonlinear_elimination",
   iiv = TRUE,
   residual = c("proportional", "additive", "combined", "lognormal", "none"),
   n_transit = 3L,
@@ -17,9 +15,9 @@ nm_model_template(
 \arguments{
 \item{template}{Template identifier from [nm_structural_templates()].}
 
-\item{iiv}{Add log-normal ETA variability to generated parameters.}
+\item{iiv}{Add ETA variability to generated parameters or linear predictors.}
 
-\item{residual}{Residual model.}
+\item{residual}{Residual model for structural PK/PD templates.}
 
 \item{n_transit}{Number of transit compartments for `transit_absorption`.}
 
@@ -30,6 +28,8 @@ An editable `nm_model` with template notes attached.
 }
 \description{
 These are ordinary [nm_model()] objects, not a second modelling language.
-The generated `$PK/$PRED` and `$DES` blocks remain fully editable and run
-through the same C++/CppAD ODE, likelihood, simulation, and estimation paths.
+Structural templates generate editable `$PK/$PRED` and `$DES` blocks.
+Outcome, event, Markov, and hidden-Markov templates add their corresponding
+likelihood configuration. Every template runs through the same C++/CppAD
+compilation, likelihood, simulation, and estimation paths.
 }

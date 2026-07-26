@@ -36,6 +36,149 @@ test_that("DDE method-of-steps simulates and differentiates", {
   expect_identical(attr(simulation, "solver"), "dde")
 })
 
+test_that("DDE delay sensitivities retain the interpolation-node derivative", {
+  times <- seq(0, 0.4, by = 0.05)
+  data <- data.frame(
+    ID = 1, TIME = c(0, times),
+    EVID = c(1, rep(0, length(times))),
+    AMT = c(10, rep(0, length(times))),
+    CMT = 1, DV = NA_real_, MDV = c(1, rep(0, length(times)))
+  )
+  theta <- c(k = 0.4, feedback = 0.05, delay = 0.2)
+  model <- nm_model(
+    INPUT = names(data), ADVAN = 6, DOSECMP = 1, OBSCMP = 1,
+    PRED = "K=THETA(1);B=THETA(2);TAU=THETA(3);S1=1",
+    DES = "DADT(1)=-K*A(1)+B*LAG(A(1),TAU)",
+    THETAS = experimental_theta(theta),
+    DDE_CONFIG = nm_dde_config(
+      history = 10, step = 0.00625, minimum_delay = theta[["delay"]]
+    ),
+    EXPERIMENTAL = nm_experimental_config(TRUE, label = "test")
+  )
+  jacobian <- tail(nm_prediction_derivatives(model, data)$jacobian, length(times))
+  interval <- pmax(times - theta[["delay"]], 0)
+  active <- times > theta[["delay"]]
+  equilibrium <- theta[["feedback"]] * 10 / theta[["k"]]
+  displacement <- 10 - equilibrium
+  expected_delay <- ifelse(
+    active,
+    exp(-theta[["k"]] * interval) * (
+      (theta[["k"]] - theta[["feedback"]]) * equilibrium +
+        theta[["feedback"]] * displacement *
+          (-1 + theta[["k"]] * interval)
+    ),
+    0
+  )
+  compared <- active & abs(times - theta[["delay"]]) > 1e-12
+  expect_equal(
+    unname(jacobian[compared, 3]), unname(expected_delay[compared]),
+    tolerance = 1.5e-2
+  )
+})
+
+test_that("DDE delay sensitivities include delayed bolus discontinuities", {
+  times <- c(0, 0.1, 0.2, 0.25, 0.3, 0.4)
+  data <- data.frame(
+    ID = 1, TIME = c(0, times),
+    EVID = c(1, rep(0, length(times))),
+    AMT = c(10, rep(0, length(times))),
+    CMT = 1, DV = NA_real_, MDV = c(1, rep(0, length(times)))
+  )
+  theta <- c(k = 0.4, feedback = 0.05, delay = 0.2)
+  model <- nm_model(
+    INPUT = names(data), ADVAN = 6,
+    PRED = "K=THETA(1);B=THETA(2);TAU=THETA(3);S1=1",
+    DES = "DADT(1)=-K*A(1)+B*LAG(A(1),TAU)",
+    THETAS = experimental_theta(theta),
+    DDE_CONFIG = nm_dde_config(
+      history = 0, step = 0.002, minimum_delay = 0.2
+    ),
+    EXPERIMENTAL = nm_experimental_config(TRUE, label = "test")
+  )
+  jacobian <- tail(nm_prediction_derivatives(model, data)$jacobian, length(times))
+  interval <- pmax(times - theta[["delay"]], 0)
+  expected <- ifelse(
+    times > theta[["delay"]],
+    -theta[["feedback"]] * 10 * exp(-theta[["k"]] * interval) *
+      (1 - theta[["k"]] * interval),
+    0
+  )
+  compared <- times > theta[["delay"]]
+  expect_equal(
+    unname(jacobian[compared, 3]), unname(expected[compared]),
+    tolerance = 8e-3
+  )
+})
+
+test_that("SDE process covariance is propagated through subsequent drift", {
+  data <- data.frame(
+    ID = "A", TIME = c(0, 0.5, 1.5, 3),
+    DV = c(1.1, 0.7, 0.4, 0.25), MDV = 0
+  )
+  theta <- c(k = 0.4, diffusion = 0.3, observation_variance = 0.05)
+  make_model <- function(substeps) {
+    nm_model(
+      INPUT = names(data), ADVAN = 1,
+      PRED = "CL=1;V=1;S1=1;F=0",
+      ERROR = paste(
+        "M0=1", "P0=.2", "DRIFT=-THETA(1)*STATE_x",
+        "G0=THETA(2)", "HX=STATE_x", "R0=THETA(3)", sep = "\n"
+      ),
+      THETAS = experimental_theta(theta),
+      KALMAN_CONFIG = nm_sde_config(
+        states = "x", initial_mean = "M0",
+        initial_covariance = matrix("P0", 1),
+        drift = "DRIFT", diffusion = matrix("G0", 1),
+        observation = "HX", observation_variance = "R0",
+        baseline = "zero", by_dvid = FALSE, filter = "ekf",
+        method = "euler", substeps = substeps
+      )
+    )
+  }
+  exact_objective <- function() {
+    mean <- 1
+    variance <- 0.2
+    value <- 0
+    for (index in seq_along(data$TIME)) {
+      if (index > 1) {
+        interval <- data$TIME[index] - data$TIME[index - 1]
+        transition <- exp(-theta[["k"]] * interval)
+        process_variance <- theta[["diffusion"]]^2 /
+          (2 * theta[["k"]]) *
+          (1 - exp(-2 * theta[["k"]] * interval))
+        mean <- transition * mean
+        variance <- transition^2 * variance + process_variance
+      }
+      innovation <- data$DV[index] - mean
+      innovation_variance <- variance + theta[["observation_variance"]]
+      value <- value + log(innovation_variance) +
+        innovation^2 / innovation_variance
+      gain <- variance / innovation_variance
+      mean <- mean + gain * innovation
+      variance <- (1 - gain)^2 * variance +
+        gain^2 * theta[["observation_variance"]]
+    }
+    value
+  }
+  coarse <- nm_objective(make_model(16), data, gradient = FALSE)$value
+  fine_model <- make_model(256)
+  fine <- nm_objective(fine_model, data, gradient = TRUE)
+  expected <- exact_objective()
+  expect_lt(abs(fine$value - expected), abs(coarse - expected))
+  expect_equal(fine$value, expected, tolerance = 3e-3)
+  step <- 1e-5
+  numerical <- vapply(seq_along(theta), function(index) {
+    plus <- minus <- theta
+    plus[index] <- plus[index] + step
+    minus[index] <- minus[index] - step
+    (
+      nm_objective(fine_model, data, theta = plus, gradient = FALSE)$value -
+        nm_objective(fine_model, data, theta = minus, gradient = FALSE)$value
+    ) / (2 * step)
+  }, numeric(1))
+  expect_equal(unname(fine$gradient), unname(numerical), tolerance = 8e-5)
+})
+
 test_that("block-sparse index-1 DAE remains on the AD path", {
   model <- nm_model(
     INPUT = c("ID", "TIME", "EVID", "AMT"), ADVAN = 6,
@@ -75,6 +218,39 @@ test_that("QSP networks and DES-scoped learned components compile", {
   expect_true(all(is.finite(nm_simulate(hybrid, experimental_data())$IPRED)))
   expect_identical(hybrid$DES, "DADT(1)=-LOSS")
   expect_identical(hybrid$COMPONENTS[[1]]$scope, "des")
+})
+
+test_that("hybrid softplus is stable and component payloads are immutable", {
+  acknowledgement <- nm_experimental_config(TRUE)
+  component <- nm_component(
+    "softplus", "dense_nn", scope = "pred",
+    inputs = "X", outputs = "SOFT",
+    weights = list(matrix(1, 1, 1), matrix(1, 1, 1)),
+    biases = list(0, 0), activation = "softplus"
+  )
+  data <- data.frame(
+    ID = 1, TIME = 1:2, X = c(-1000, 1000), DV = NA_real_, MDV = 0
+  )
+  model <- nm_model(
+    INPUT = names(data), OUTPUT = "SOFT", ADVAN = 1,
+    PRED = "CL=1;V=1;S1=1;F=SOFT",
+    THETAS = experimental_theta(1),
+    COMPONENTS = component, EXPERIMENTAL = acknowledgement
+  )
+  output <- nm_simulate(model, data, residual = FALSE)
+  expect_true(all(is.finite(output$SOFT)))
+  expect_equal(output$SOFT, c(0, 1000), tolerance = 1e-10)
+
+  component$payload$weights[[1]][1, 1] <- 2
+  expect_error(
+    nm_model(
+      INPUT = names(data), ADVAN = 1,
+      PRED = "CL=1;V=1;S1=1;F=SOFT",
+      THETAS = experimental_theta(1),
+      COMPONENTS = component, EXPERIMENTAL = acknowledgement
+    ),
+    "immutable hash"
+  )
 })
 
 test_that("factorial HMM configuration retains chain structure", {

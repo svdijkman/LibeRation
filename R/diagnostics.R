@@ -511,15 +511,23 @@ nm_etab <- function(fit) {
   jacobian
 }
 
+.nm_covariance_eta_start <- function(fit, context) {
+  if (!context$n_eta || !is.matrix(fit$eta)) return(NULL)
+  expected <- c(context$n_subjects, context$n_eta)
+  if (!identical(dim(fit$eta), expected) || any(!is.finite(fit$eta))) return(NULL)
+  fit$eta
+}
+
 .nm_imp_information_objective <- function(context, map, normals, anchor,
                                           eta_maxit, tolerance,
-                                          adaptive = TRUE) {
+                                          adaptive = TRUE,
+                                          initial_eta = NULL) {
   anchor <- as.numeric(anchor)
   parameters <- map$decode(anchor)
   proposal_started <- proc.time()[["elapsed"]]
   proposals <- .nm_imp_prepare_proposals(
     context, parameters, normals, eta_maxit, tolerance,
-    adaptive = adaptive
+    adaptive = adaptive, initial_eta = initial_eta
   )
   if (any(!vapply(proposals, function(proposal) isTRUE(proposal$valid), logical(1)))) {
     .nm_stop("Unable to construct finite importance proposals for covariance.")
@@ -529,6 +537,15 @@ nm_etab <- function(fit) {
   telemetry$parameter_evaluations <- 0L
   telemetry$cache_hits <- 0L
   telemetry$sample_evaluations <- 0
+  telemetry$eta_warm_start <- !is.null(initial_eta) && isTRUE(adaptive)
+  telemetry$proposal_mode_iterations <- sum(vapply(
+    proposals, function(proposal) as.integer(proposal$mode$iterations %||% 0L),
+    integer(1)
+  ))
+  telemetry$proposal_mode_evaluations <- sum(vapply(
+    proposals, function(proposal) as.integer(proposal$mode$evaluations %||% 0L),
+    integer(1)
+  ))
   cache <- new.env(parent = emptyenv())
   cache$key <- NULL
   evaluate <- function(outer) {
@@ -575,8 +592,12 @@ nm_etab <- function(fit) {
   attr(objective, "gradient") <- function(outer) evaluate(outer)$gradient
   attr(objective, "subject_scores") <- function(outer) evaluate(outer)$scores
   attr(objective, "objective_backend") <- "fixed-proposal-importance-score"
+  attr(objective, "eta_warm_start") <- telemetry$eta_warm_start
   attr(objective, "telemetry") <- function() list(
     proposal_seconds = telemetry$proposal_seconds,
+    eta_warm_start = telemetry$eta_warm_start,
+    proposal_mode_iterations = telemetry$proposal_mode_iterations,
+    proposal_mode_evaluations = telemetry$proposal_mode_evaluations,
     parameter_evaluations = telemetry$parameter_evaluations,
     cache_hits = telemetry$cache_hits,
     sample_evaluations = telemetry$sample_evaluations,
@@ -590,13 +611,23 @@ nm_etab <- function(fit) {
                               anchor = NULL, eta_maxit = 100L,
                               tolerance = 1e-7, adaptive = TRUE) {
   method <- fit$method
+  fitted_eta <- .nm_covariance_eta_start(fit, context)
   deterministic <- switch(
     method, FO = "fo", FOCE = "foce", FOCEI = "focei",
     LAPLACE = "laplace", ITS = "its", NULL
   )
   if (!is.null(deterministic)) {
+    # Covariance probes are local to the final fit. Record the persistent
+    # population objective at that point, including any fitted conditional
+    # modes, rather than at the model's original initials. This
+    # keeps optimHess perturbations inside the relevant tape domain and leaves
+    # the population object's automatic retaping as a genuine path-change
+    # fallback instead of making it recover the whole fitted displacement.
+    compiled_map <- map
+    compiled_map$start <- as.numeric(anchor %||% map$start)
     compiled <- .nm_cpp_population_objective(
-      context, map, deterministic, eta_maxit, tolerance
+      context, compiled_map, deterministic, eta_maxit, tolerance,
+      initial_eta = if (identical(method, "FO")) NULL else fitted_eta
     )
     if (!is.null(compiled$pointer)) {
       result <- function(outer) {
@@ -606,6 +637,8 @@ nm_etab <- function(fit) {
         .liberation_population_objective_gradient(compiled$pointer, outer)
       }
       attr(result, "compiled_objective") <- compiled
+      attr(result, "eta_warm_start") <- !identical(method, "FO") &&
+        !is.null(fitted_eta)
       return(result)
     }
   }
@@ -619,7 +652,8 @@ nm_etab <- function(fit) {
   if (method %in% c("GQ", "IMP", "SAEM")) {
     return(.nm_imp_information_objective(
       context, map, normals, anchor %||% map$start, eta_maxit, tolerance,
-      adaptive = adaptive
+      adaptive = adaptive,
+      initial_eta = if (isTRUE(adaptive)) fitted_eta else NULL
     ))
   }
   approximation <- switch(
@@ -630,7 +664,8 @@ nm_etab <- function(fit) {
     .nm_stop("Covariance is available for FO, FOCE, FOCEI, LAPLACE, ITS, GQ, IMP, and SAEM fits.")
   }
   objective <- .nm_nested_objective(
-    context, approximation, eta_maxit = eta_maxit, tolerance = tolerance
+    context, approximation, eta_maxit = eta_maxit, tolerance = tolerance,
+    initial_eta = fitted_eta
   )
   result <- function(outer) objective(map$decode(outer))
   attr(result, "gradient") <- function(outer) {
@@ -639,6 +674,7 @@ nm_etab <- function(fit) {
       context, map, objective, parameters, approximation
     )
   }
+  attr(result, "eta_warm_start") <- !is.null(fitted_eta)
   result
 }
 
@@ -762,7 +798,8 @@ nm_etab <- function(fit) {
 #' @param eta_maxit Maximum conditional ETA iterations for GQ/IMP/SAEM
 #'   information.
 #' @return Covariance, correlation, standard errors, relative standard errors,
-#'   eigenvalues, and conditioning diagnostics.
+#'   eigenvalues, conditioning diagnostics, and whether fitted conditional
+#'   modes warm-started the covariance calculation.
 #' @export
 nm_cov_step <- function(fit,
                         type = c("auto", "hessian", "opg", "sandwich", "r", "s"),
@@ -960,6 +997,7 @@ nm_cov_step <- function(fit,
       if (!is.null(bread_compiled$pointer)) {
         "persistent-cpp-population-objective"
       } else "r-orchestrated-population-objective",
+    eta_warm_start = isTRUE(attr(objective, "eta_warm_start", exact = TRUE)),
     objective_telemetry = {
       importance_telemetry <- attr(objective, "telemetry", exact = TRUE)
       if (is.function(importance_telemetry)) importance_telemetry()

@@ -1,3 +1,44 @@
+# LibeRation 0.9.3
+
+- Adds three explicit model-definition routes: conventional ADVAN/PREDPP
+  `$PK`, row-wise direct `$PRED`, and a LibeRation extension that runs
+  `$PK -> ADVAN/$DES -> $PRED -> $ERROR` in one differentiable C++ path.
+  The combined layer can consume `F_ADVAN`, `A(i)`, `$PK` assignments, and
+  row covariates before assigning the final `F`.
+- Preserves separate `$PK` and `$PRED` editor drafts in model contract v3 and
+  remote jobs, discovers generated columns from both programs, and folds the
+  combined extension into a marked NONMEM `$ERROR` block for round-tripping.
+- Completes the ADVAN1-14 model surface: arbitrary linear ADVAN5/7,
+  stiff ADVAN8, equilibrium-capable ADVAN9, integrated Michaelis--Menten
+  ADVAN10, and stiff/nonstiff ADVAN14 now have native model contracts,
+  C++ dispatch, GUI templates, and exact CppAD prediction paths.
+- Adds direct generated NONMEM fixtures for ADVAN5/7/8/9/10, including an
+  ADVAN9 equilibrium compartment. ADVAN14 remains internally verified because
+  the available NONMEM 7.3 installation predates that subroutine.
+- Adds a standalone non-PK validation campaign for categorical/count,
+  event-time, observed/hidden Markov, continuous-time Markov, and Gaussian
+  state-space models. Exact/analytic references are supplemented by paired
+  NONMEM 7.3 likelihood fixtures where a faithful counterpart exists.
+- Adds a 19-check numerical validation campaign for canonical SDE, DDE,
+  nonlinear index-1 DAE, QSP reaction-network, and offline hybrid-component
+  contracts, with analytic, convergence, conservation, derivative, and seeded
+  Monte Carlo evidence.
+- Adds a complementary 27-check edge campaign covering multiplicative and
+  nonlinear SDE simulation, particle convergence, delayed bolus boundaries,
+  stiff DDEs, larger/coupled DAEs, larger/stiff QSP systems, compact parameter
+  recovery, and hybrid numerical/immutability edges.
+- Corrects continuous-discrete SDE EKF/UKF covariance propagation so process
+  noise introduced during a substep is transported through subsequent drift,
+  and retains differentiable DDE history interpolation at stored time nodes.
+- Retains left/right DDE event history, splits integration at parameterized
+  delayed discontinuities, and propagates the right-limit sensitivity across
+  observation records.
+- Compiles prediction-scoped hybrid components before user `$PK/$PRED`, uses a
+  stable softplus expression for extreme inputs, and rejects modified component
+  payloads whose immutable hash no longer matches.
+- Imports and round-trips ADVAN5/7 `$MODEL` graphs and emits valid unique
+  eight-character compartment identifiers for generated NONMEM streams.
+
 # LibeRation 0.9.2
 
 - Updates the exact ecosystem compatibility manifest for the LibeRties 0.7.4

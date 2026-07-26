@@ -238,6 +238,7 @@
     `2` = c("DEPOT", "CENTRAL"),
     `3` = c("CENTRAL", "PERIPHERAL1"),
     `4` = c("DEPOT", "CENTRAL", "PERIPHERAL1"),
+    `10` = "CENTRAL",
     `11` = c("CENTRAL", "PERIPHERAL1", "PERIPHERAL2"),
     `12` = c("DEPOT", "CENTRAL", "PERIPHERAL1", "PERIPHERAL2"),
     character()
@@ -258,6 +259,42 @@
     as.character(covariates %||% character())
   )
   LibeRtAD::ad_ir(pred, inputs = declared)
+}
+
+.nm_compile_post_pred_ir <- function(pred, pk_ir, n_state, n_theta, n_eta,
+                                     covariates) {
+  rewritten <- .nm_rewrite_ode_indexing(paste(pred, collapse = "\n"))
+  declared <- unique(c(
+    pk_ir$output_names %||% character(),
+    "F_ADVAN", "T", "TIME",
+    if (n_state > 0L) paste0("A_", seq_len(n_state)) else character(),
+    if (n_theta > 0L) paste0("THETA_", seq_len(n_theta)) else character(),
+    if (n_eta > 0L) paste0("ETA_", seq_len(n_eta)) else character(),
+    as.character(covariates %||% character())
+  ))
+  ir <- LibeRtAD::ad_ir(rewritten, inputs = declared)
+  state_inputs <- grep("^A_[0-9]+$", ir$input_names, value = TRUE)
+  state_index <- suppressWarnings(as.integer(sub("^A_", "", state_inputs)))
+  if (length(state_index) && any(state_index > n_state)) {
+    .nm_stop(
+      "The post-ADVAN $PRED block references A(",
+      max(state_index), ") but this model has ", n_state, " state(s)."
+    )
+  }
+  if (!"F" %in% ir$output_names) {
+    .nm_stop(
+      "A combined $PK + $PRED model requires the post-ADVAN $PRED block ",
+      "to assign `F`. Use `F_ADVAN` for the untransformed ADVAN prediction."
+    )
+  }
+  collision <- setdiff(intersect(pk_ir$output_names, ir$output_names), "F")
+  if (length(collision)) {
+    .nm_stop(
+      "The post-ADVAN $PRED block cannot overwrite $PK assignment(s): ",
+      paste(collision, collapse = ", "), "."
+    )
+  }
+  ir
 }
 
 .nm_rewrite_ode_indexing <- function(code) {
@@ -335,9 +372,10 @@
 }
 
 .nm_ode_control <- function(control = NULL, advan) {
+  implicit <- advan %in% c(8L, 9L, 13L, 14L)
   defaults <- list(
-    rtol = if (advan == 13L) 1e-7 else 1e-8,
-    atol = if (advan == 13L) 1e-9 else 1e-10,
+    rtol = if (implicit) 1e-7 else 1e-8,
+    atol = if (implicit) 1e-9 else 1e-10,
     max_steps = 100000L,
     initial_step = 0
   )
@@ -426,15 +464,29 @@
   do.call(rbind, rows)
 }
 
-.nm_output_catalog <- function(pred_ir, n_state, n_eta, input = character()) {
+.nm_output_catalog <- function(pred_ir, n_state, n_eta, input = character(),
+                               post_pred_ir = NULL) {
   standard <- .nm_standard_output_catalog(n_state, n_eta)
-  assigned <- setdiff(
+  pk_assigned <- setdiff(
     as.character(pred_ir$output_names %||% character()),
     c(standard$name, grep("^[.]value[0-9]+$", pred_ir$output_names %||% character(), value = TRUE))
   )
+  post_assigned <- setdiff(
+    as.character(post_pred_ir$output_names %||% character()),
+    c(standard$name, grep("^[.]value[0-9]+$", post_pred_ir$output_names %||% character(),
+                          value = TRUE))
+  )
+  assigned <- unique(c(pk_assigned, post_assigned))
+  source <- ifelse(assigned %in% post_assigned, "post-ADVAN prediction", "model assignment")
   generated <- data.frame(
-    name = assigned, source = "model assignment", availability = "all",
-    description = if (length(assigned)) paste("Assigned in $PK/$PRED:", assigned) else character(),
+    name = assigned, source = source, availability = "all",
+    description = if (length(assigned)) {
+      ifelse(
+        assigned %in% post_assigned,
+        paste("Assigned in post-ADVAN $PRED:", assigned),
+        paste("Assigned in $PK/direct $PRED:", assigned)
+      )
+    } else character(),
     stringsAsFactors = FALSE
   )
   output <- rbind(standard, generated)
@@ -465,9 +517,9 @@
 
 #' Define a NONMEM-style pharmacometric model
 #'
-#' The established LibeRation `PRED` and `ERROR` strings are retained. They are
-#' compiled to C++ expression IR; they are not evaluated inside the numerical
-#' loop by R.
+#' `$PK`, direct `$PRED`, and the combined post-ADVAN prediction route are
+#' compiled to C++ expression IR; no model program is evaluated by R inside
+#' the numerical loop.
 #'
 #' @param INPUT Required dataset column names.
 #' @param OUTPUT Optional generated run columns. Available names are discovered
@@ -478,21 +530,26 @@
 #' @param SS Model-level steady-state default.
 #' @param DOSECMP Default dosing compartment.
 #' @param OBSCMP Default observation compartment.
-#' @param PRED Parameter/model assignment code.
+#' @param PRED Backward-compatible active model-assignment source. For new
+#'   code, use `PK_SOURCE` and/or `PRED_SOURCE` with `PRED_MODE` to make the
+#'   intended route explicit.
 #' @param ERROR Residual-error or user-likelihood assignment code. With
 #'   `LIK_CONFIG = nm_lik_config(error = "likelihood")`, assign either `LIK`
 #'   (a positive row probability/density) or `LOGLIK` (its logarithm). The
 #'   compiled block may use `DV`, `F`/`PRED`/`IPRED`, model assignments,
 #'   parameters, numeric input columns, and the Markov helpers `PREV_DV`,
 #'   `PREV_TIME`, `DT`, and `FIRST`.
-#' @param DES ODE derivative code for ADVAN6/13.
+#' @param DES ODE derivative code for ADVAN6/8/9/13/14. ADVAN10 supplies its
+#'   standard Michaelis--Menten equation automatically from `VM` and `KM`
+#'   assignments in `PRED`.
 #' @param ALG Algebraic residual equations for an experimental index-1 DAE.
 #' @param THETAS,OMEGAS,SIGMAS Parameter tables.
 #' @param COVARIATES Dataset covariates exposed to `PRED`.
 #' @param USE_ODE Whether an ODE solver is explicitly requested.
 #' @param ODE_CONTROL Named list with `rtol`, `atol`, `max_steps`, and optional
-#'   `initial_step`. ADVAN6 uses adaptive Dormand-Prince 5(4); ADVAN13 uses an
-#'   A-stable adaptive implicit trapezoidal method.
+#'   `initial_step`. ADVAN6 and ADVAN10 use adaptive Dormand-Prince 5(4).
+#'   ADVAN8/9/13/14 use an A-stable adaptive implicit trapezoidal method;
+#'   ADVAN9 additionally accepts equilibrium constraints through `ALG`.
 #' @param IOV Number of trailing inter-occasion ETAs.
 #' @param LIK_CONFIG Reserved likelihood configuration.
 #' @param HMM_CONFIG Optional finite-state hidden Markov configuration created
@@ -511,6 +568,16 @@
 #' @param COMPONENTS Optional list of immutable offline [nm_component()]
 #'   declarations expanded into compiled `$PK/$PRED` or `$DES` IR according
 #'   to each component's scope.
+#' @param PRED_MODE Model-definition route. `"pk"` uses `PRED` as a
+#'   PREDPP/ADVAN-style `$PK` block; `"pred"` uses it as a row-wise direct
+#'   `$PRED` block; `"pk_pred"` runs `$PK`, ADVAN/`$DES`, and then a
+#'   LibeRation post-ADVAN `$PRED` layer. Direct and post-ADVAN prediction
+#'   code must assign `F`; the latter can read the raw ADVAN prediction as
+#'   `F_ADVAN`. LibeRation keeps residual or likelihood code in `ERROR`.
+#' @param PK_SOURCE,PRED_SOURCE Optional retained editor sources for the `$PK`
+#'   and direct `$PRED` routes. They allow the GUI to switch routes without
+#'   discarding either draft. `PRED` remains the active source for backward
+#'   compatibility.
 #' @param EXPERIMENTAL Explicit experimental-engine acknowledgement and policy.
 #' @param RE_CONFIG Optional nested/crossed random-effect design created by
 #'   [nm_re_config()]. Every ETA is assigned to a grouping block; connected
@@ -519,7 +586,8 @@
 #'   [nm_outcome()] or [nm_outcomes()]. When `ERROR` is omitted, LibeRation
 #'   generates an editable normalized likelihood block. The declaration is
 #'   also used for stochastic outcome simulation and family diagnostics.
-#' @param SOLVER `auto`, `advan`, `matrix`, `ode`, `dde`, or `dae`.
+#' @param SOLVER `auto`, `advan`, `matrix`, `ode`, `dde`, `dae`, or the
+#'   automatically selected `direct` route for `PRED_MODE = "pred"`.
 #' @param ERROR_TYPE Standard residual-error form, or `auto`.
 #' @param GRAPH Optional semantic compartment graph.
 #' @param LAYOUT Optional graphical layout, stored separately from `GRAPH`.
@@ -562,29 +630,51 @@ nm_model <- function(INPUT,
                      DAE_CONFIG = NULL,
                      RE_CONFIG = NULL,
                      COMPONENTS = NULL,
+                     PRED_MODE = c("pk", "pred", "pk_pred"),
+                     PK_SOURCE = NULL,
+                     PRED_SOURCE = NULL,
                      EXPERIMENTAL = NULL,
                      OUTCOMES = NULL,
-                     SOLVER = c("auto", "advan", "matrix", "ode", "dde", "dae"),
+                     SOLVER = c("auto", "advan", "matrix", "ode", "dde", "dae", "direct"),
                      ERROR_TYPE = c("auto", "none", "additive", "proportional", "combined", "exponential", "power", "likelihood"),
                      GRAPH = NULL,
                      LAYOUT = NULL,
                      LANGUAGE = c("R", "C++")) {
   error_was_missing <- missing(ERROR)
   advan <- as.integer(ADVAN)
-  supported <- c(1L, 2L, 3L, 4L, 6L, 11L, 12L, 13L)
+  supported <- 1:14
   if (length(advan) != 1L || is.na(advan) || !advan %in% supported) {
     .nm_stop("ADVAN must be one of: ", paste(supported, collapse = ", "), ".")
   }
   solver <- match.arg(SOLVER)
   language <- match.arg(LANGUAGE)
-  pred_source <- paste(PRED, collapse = "\n")
+  pred_mode <- match.arg(PRED_MODE)
+  if (identical(pred_mode, "pred")) solver <- "direct"
+  else if (identical(solver, "direct")) {
+    .nm_stop("SOLVER = 'direct' requires PRED_MODE = 'pred'.")
+  }
+  legacy_pred_source <- paste(PRED, collapse = "\n")
+  pk_source <- if (is.null(PK_SOURCE)) {
+    if (pred_mode %in% c("pk", "pk_pred")) legacy_pred_source else ""
+  } else paste(PK_SOURCE, collapse = "\n")
+  direct_pred_source <- if (is.null(PRED_SOURCE)) {
+    if (identical(pred_mode, "pred")) legacy_pred_source else ""
+  } else paste(PRED_SOURCE, collapse = "\n")
+  pred_source <- if (identical(pred_mode, "pred")) {
+    direct_pred_source
+  } else pk_source
+  if (!nzchar(trimws(pred_source)) && nzchar(trimws(legacy_pred_source))) {
+    pred_source <- legacy_pred_source
+    if (pred_mode %in% c("pk", "pk_pred")) pk_source <- pred_source
+    else direct_pred_source <- pred_source
+  }
   des_source <- paste(DES, collapse = "\n")
   components <- .nm_components(COMPONENTS)
   pred_components <- Filter(function(value) identical(value$scope %||% "pred", "pred"), components)
   des_components <- Filter(function(value) identical(value$scope %||% "pred", "des"), components)
   if (length(pred_components)) {
-    PRED <- paste(c(pred_source,
-                    vapply(pred_components, nm_component_code, character(1))),
+    PRED <- paste(c(vapply(pred_components, nm_component_code, character(1)),
+                    pred_source),
                   collapse = "\n")
   } else PRED <- pred_source
   if (length(des_components)) {
@@ -593,11 +683,34 @@ nm_model <- function(INPUT,
   } else DES <- des_source
   dde_config <- .nm_dde_config(DDE_CONFIG)
   dae_config <- .nm_dae_config(DAE_CONFIG)
+  if (identical(pred_mode, "pred") &&
+      (!is.null(dde_config) || !is.null(dae_config))) {
+    .nm_stop("Direct $PRED models cannot also declare DDE_CONFIG or DAE_CONFIG.")
+  }
+  if (identical(pred_mode, "pred") && length(des_components)) {
+    .nm_stop("Direct $PRED models cannot use COMPONENTS with scope = 'des'.")
+  }
   if (!is.null(dde_config) && !is.null(dae_config)) {
     .nm_stop("A model cannot currently combine DDE_CONFIG and DAE_CONFIG.")
   }
-  if ((!is.null(dde_config) || !is.null(dae_config)) && !advan %in% c(6L, 13L)) {
-    .nm_stop("DDE/DAE models require ADVAN6 or ADVAN13.")
+  if (!is.null(dde_config) && !advan %in% c(6L, 13L)) {
+    .nm_stop("DDE models require ADVAN6 or ADVAN13.")
+  }
+  if (!is.null(dae_config) && !advan %in% c(6L, 9L, 13L)) {
+    .nm_stop("DAE models require ADVAN6, ADVAN9, or ADVAN13.")
+  }
+  if (!identical(pred_mode, "pred") && advan %in% c(5L, 7L) &&
+      !inherits(GRAPH, "nm_matrix_model")) {
+    .nm_stop(
+      "ADVAN", advan, " requires an arbitrary linear GRAPH created by ",
+      "`nm_matrix_model()`."
+    )
+  }
+  if (!identical(pred_mode, "pred") && advan == 10L) {
+    if (nzchar(trimws(DES))) {
+      .nm_stop("ADVAN10 defines its Michaelis-Menten equation internally; omit DES.")
+    }
+    DES <- "DADT(1) = -VM * A(1) / (KM + A(1))"
   }
   hmm_config <- .nm_hmm_config(HMM_CONFIG)
   generated_hmm_error <- attr(hmm_config, "generated_error", exact = TRUE)
@@ -687,10 +800,21 @@ nm_model <- function(INPUT,
   if (!error_type %in% c("none", "likelihood") && nrow(sigma) == 0L) {
     .nm_stop("Residual error type '", error_type, "' requires SIGMAS.")
   }
-  if (advan %in% c(6L, 13L) && !nzchar(trimws(DES))) {
+  general_ode <- c(6L, 8L, 9L, 13L, 14L)
+  if (!identical(pred_mode, "pred") && advan %in% general_ode &&
+      !nzchar(trimws(DES))) {
     .nm_stop("ADVAN", advan, " requires a DES block.")
   }
-  if (!nzchar(trimws(PRED))) .nm_stop("PRED code must not be empty.")
+  if (!nzchar(trimws(PRED))) {
+    .nm_stop(if (identical(pred_mode, "pred")) "$PRED" else "$PK",
+             " code must not be empty.")
+  }
+  if (identical(pred_mode, "pk_pred") &&
+      !nzchar(trimws(direct_pred_source))) {
+    .nm_stop(
+      "PRED_MODE = 'pk_pred' requires a post-ADVAN $PRED source that assigns F."
+    )
+  }
   n_eta <- .nm_n_eta(omega)
   re_config <- .nm_re_config(RE_CONFIG, n_eta)
   if (!is.null(re_config) && lik_config$iov > 0L) {
@@ -728,11 +852,27 @@ nm_model <- function(INPUT,
     COVARIATES, if (!is.null(lik_config$mixtures)) "MIXNUM" else character()
   ))
   pred_ir <- .nm_compile_pred_ir(PRED, nrow(theta), n_eta, compiler_covariates)
+  if (identical(pred_mode, "pred") && !"F" %in% pred_ir$output_names) {
+    .nm_stop(
+      "A direct $PRED block must assign `F`, the deterministic row-wise ",
+      "prediction. Put residual variability or a user likelihood in $ERROR."
+    )
+  }
+  if (identical(pred_mode, "pred")) {
+    direct_states <- grep("^A_[0-9]+$", pred_ir$input_names, value = TRUE)
+    if (length(direct_states)) {
+      .nm_stop(
+        "A direct $PRED block cannot reference compartment amounts with A(i); ",
+        "use PRED_MODE = 'pk_pred' for an ADVAN prediction layer."
+      )
+    }
+  }
   error_info <- .nm_compile_error_ir(
     ERROR, pred_ir, nrow(theta), n_eta, INPUT, compiler_covariates, error_type,
     hmm_config, kalman_config
   )
-  des_info <- if (advan %in% c(6L, 13L)) {
+  des_info <- if (!identical(pred_mode, "pred") &&
+                  advan %in% c(general_ode, 10L)) {
     .nm_compile_des_ir(
       DES, pred_ir, nrow(theta), n_eta, compiler_covariates,
       dde_config = dde_config,
@@ -763,9 +903,39 @@ nm_model <- function(INPUT,
   )
   experimental <- .nm_experimental_config(EXPERIMENTAL, experimental_features)
   ode_control <- .nm_ode_control(ODE_CONTROL, advan)
-  graph <- GRAPH %||% if (is.null(des_info)) .nm_known_graph(advan) else .nm_ode_graph(des_info$n_state)
+  graph <- if (identical(pred_mode, "pred")) {
+    list(
+      compartments = data.frame(
+        id = 1L, name = "DIRECT_PRED", state = "F",
+        stringsAsFactors = FALSE
+      ),
+      source = "direct-prediction"
+    )
+  } else GRAPH %||% if (is.null(des_info)) {
+    .nm_known_graph(advan)
+  } else .nm_ode_graph(des_info$n_state)
   n_state <- des_info$n_state %||% nrow(graph$compartments %||% data.frame())
-  output_catalog <- .nm_output_catalog(pred_ir, n_state, n_eta, INPUT)
+  post_pred_ir <- if (identical(pred_mode, "pk_pred")) {
+    .nm_compile_post_pred_ir(
+      direct_pred_source, pred_ir, n_state, nrow(theta), n_eta,
+      compiler_covariates
+    )
+  } else NULL
+  if (!is.null(error_info$ir) && !is.null(post_pred_ir)) {
+    unsupported_error_inputs <- setdiff(
+      intersect(error_info$ir$input_names, post_pred_ir$output_names), "F"
+    )
+    if (length(unsupported_error_inputs)) {
+      .nm_stop(
+        "A likelihood $ERROR block may consume the final post-ADVAN F but not ",
+        "other $PRED outputs: ", paste(unsupported_error_inputs, collapse = ", "),
+        "."
+      )
+    }
+  }
+  output_catalog <- .nm_output_catalog(
+    pred_ir, n_state, n_eta, INPUT, post_pred_ir
+  )
   selected_output <- .nm_validate_outputs(OUTPUT, output_catalog)
   outcome_outputs <- .nm_outcome_symbols(outcomes)
   missing_outcome_outputs <- setdiff(outcome_outputs, output_catalog$name)
@@ -787,6 +957,9 @@ nm_model <- function(INPUT,
       DOSECMP = as.integer(DOSECMP),
       OBSCMP = as.integer(OBSCMP),
       PRED = pred_source,
+      PRED_MODE = pred_mode,
+      PK_SOURCE = pk_source,
+      PRED_SOURCE = direct_pred_source,
       ERROR = paste(ERROR, collapse = "\n"),
       DES = des_source,
       ALG = paste(ALG, collapse = "\n"),
@@ -794,7 +967,8 @@ nm_model <- function(INPUT,
       OMEGAS = omega,
       SIGMAS = sigma,
       COVARIATES = unique(as.character(COVARIATES %||% character())),
-      USE_ODE = isTRUE(USE_ODE) || advan %in% c(6L, 13L),
+      USE_ODE = !identical(pred_mode, "pred") &&
+        (isTRUE(USE_ODE) || advan %in% c(general_ode, 10L)),
       ODE_CONTROL = ode_control,
       IOV = as.integer(IOV),
       LIK_CONFIG = lik_config,
@@ -816,6 +990,7 @@ nm_model <- function(INPUT,
       error_ir = error_info$ir %||% NULL,
       likelihood_output = error_info$output %||% NULL,
       likelihood_scale = error_info$scale %||% NULL,
+      post_pred_ir = post_pred_ir,
       des_ir = des_info$ir %||% NULL,
       alg_ir = alg_ir,
       n_eta = n_eta,
@@ -840,7 +1015,8 @@ nm_model_outputs <- function(model) {
   if (inherits(model, "NMEngine")) model <- model$model
   if (!inherits(model, "nm_model")) .nm_stop("`model` must be an nm_model or NMEngine.")
   catalog <- model$output_catalog %||% .nm_output_catalog(
-    model$pred_ir, model$n_state, model$n_eta, model$INPUT
+    model$pred_ir, model$n_state, model$n_eta, model$INPUT,
+    model$post_pred_ir %||% NULL
   )
   catalog$selected <- catalog$name %in% (model$OUTPUT %||% character())
   catalog
@@ -931,7 +1107,14 @@ nm_matrix_model <- function(compartments, flows, observations = NULL,
 #' @export
 print.nm_model <- function(x, ...) {
   cat("LibeRation model\n")
-  cat("  ADVAN", x$ADVAN, " TRANS", x$TRANS, " solver:", x$SOLVER, "\n")
+  if (identical(x$PRED_MODE %||% "pk", "pred")) {
+    cat("  direct $PRED  solver:", x$SOLVER, "\n")
+  } else if (identical(x$PRED_MODE %||% "pk", "pk_pred")) {
+    cat("  ADVAN", x$ADVAN, " TRANS", x$TRANS,
+        " + post-ADVAN $PRED  solver:", x$SOLVER, "\n")
+  } else {
+    cat("  ADVAN", x$ADVAN, " TRANS", x$TRANS, " solver:", x$SOLVER, "\n")
+  }
   cat("  source:", x$LANGUAGE, "  THETA:", nrow(x$THETAS),
       " ETA:", x$n_eta, " OMEGA parameters:", nrow(x$OMEGAS),
       " SIGMA:", nrow(x$SIGMAS), "\n")
@@ -962,9 +1145,11 @@ print.nm_model <- function(x, ...) {
 #' Report implemented feature support
 #' @export
 nm_support_matrix <- function() {
-  feature <- c("ADVAN1", "ADVAN2", "ADVAN3", "ADVAN4", "ADVAN11", "ADVAN12",
+  feature <- c("ADVAN1", "ADVAN2", "ADVAN3", "ADVAN4", "ADVAN5", "ADVAN6",
+               "ADVAN7", "ADVAN8", "ADVAN9", "ADVAN10", "ADVAN11",
+               "ADVAN12", "ADVAN13", "ADVAN14",
                "matrix exponential", "steady-state bolus", "steady-state infusion",
-               "nonlinear ODE steady state", "ADVAN6", "ADVAN13",
+               "nonlinear ODE steady state",
                "FO", "FOCE", "FOCEI", "LAPLACE", "ITS", "GQ", "IMP", "SAEM", "BAYES",
                "HMC", "NUTS", "NPML", "NPAG",
                "full OMEGA", "IOV", "M3/M4 BLQ", "finite mixtures", "priors",
@@ -997,9 +1182,11 @@ nm_support_matrix <- function() {
   )
   values <- c(feature, experimental)
   reference_validated <- c(
-    "ADVAN1", "ADVAN2", "ADVAN3", "ADVAN4", "ADVAN11", "ADVAN12",
+    "ADVAN1", "ADVAN2", "ADVAN3", "ADVAN4", "ADVAN5", "ADVAN6",
+    "ADVAN7", "ADVAN8", "ADVAN9", "ADVAN10", "ADVAN11", "ADVAN12",
+    "ADVAN13",
     "matrix exponential", "steady-state bolus", "steady-state infusion",
-    "ADVAN6", "ADVAN13", "FO", "FOCEI"
+    "FO", "FOCEI"
   )
   data.frame(
     feature = values,

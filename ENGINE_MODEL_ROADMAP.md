@@ -129,9 +129,13 @@ adds a reusable engine abstraction rather than a one-off model implementation.
 
 **Acceptance gates**
 
-- Ornstein–Uhlenbeck likelihood and moment agreement.
-- Strong/weak convergence tests under time-step refinement.
-- Parameter-recovery and uncertainty coverage simulations.
+- [x] Ornstein–Uhlenbeck likelihood, gradient, filter-equivalence, and
+  fixed-step moment agreement.
+- [x] Additive-noise refinement and Euler/Milstein metamorphic checks.
+- [x] Named multiplicative/nonlinear fixed-step moment and independent
+  Monte Carlo campaigns.
+- [ ] Broader strong-convergence and adaptive-solver campaigns.
+- [ ] Parameter-recovery and uncertainty coverage simulations.
 
 ## Phase 4 — delayed, semi-Markov, and richer latent-state models
 
@@ -163,9 +167,12 @@ adds a reusable engine abstraction rather than a one-off model implementation.
 
 **Acceptance gates**
 
-- DDE convergence against high-accuracy reference solvers.
-- Exact enumeration agreement for small HSMM/factorial-HMM fixtures.
-- Simulation-estimation recovery for duration and switching parameters.
+- [x] Smooth-history DDE convergence and delay sensitivities against a
+  closed-form method-of-steps solution.
+- [x] Exact enumeration agreement for small HSMM/factorial-HMM fixtures.
+- [x] Explicit left/right history and sensitivity handling when a parameterized
+  delay moves an instantaneous event across the history boundary.
+- [ ] Simulation-estimation recovery for duration and switching parameters.
 
 ## Phase 5 — large mechanistic and hybrid models
 
@@ -199,10 +206,14 @@ adds a reusable engine abstraction rather than a one-off model implementation.
 
 **Acceptance gates**
 
-- Mass-balance and conservation tests.
-- Scaling benchmarks over state and parameter dimension.
-- Gradient agreement and end-to-end parameter recovery.
-- Hybrid components are opt-in and do not alter ordinary package dependencies.
+- [x] Canonical DAE reduction, QSP mass-balance, and conservation tests.
+- [x] Six-block DAE and ten-species QSP numerical fixtures.
+- [ ] Scaling benchmarks over substantially larger state and parameter
+  dimensions.
+- [x] Canonical DAE/QSP/hybrid gradient agreement.
+- [ ] End-to-end parameter recovery for larger mechanistic systems.
+- [x] Hybrid components are opt-in and do not alter ordinary package
+  dependencies.
 
 ## Recommended implementation order
 

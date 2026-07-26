@@ -6,15 +6,17 @@
 \alias{nm_model_from_contract}
 \title{Versioned semantic model contracts}
 \usage{
-nm_model_contract_fields(version = 2L)
+nm_model_contract_fields(version = 3L)
 
-nm_model_to_contract(model, version = 2L)
+nm_model_to_contract(model, version = 3L)
 
 nm_model_from_contract(contract)
 }
 \arguments{
 \item{version}{Contract version. Version 1 is retained for compatibility;
-version 2 contains every first-class model configuration in LibeRation.}
+version 2 contains the original first-class model configurations;
+version 3 additionally preserves the distinct `$PK` and direct `$PRED`
+sources and their active model-definition mode.}
 
 \item{model}{An [nm_model()] object.}
 

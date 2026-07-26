@@ -8,59 +8,29 @@
 }
 
 .nm_workspace_component <- function(value, what = "project id") {
-  value <- as.character(value)
-  if (length(value) != 1L || is.na(value) ||
-      !grepl("^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$", value) || value %in% c(".", "..")) {
-    .nm_stop("Invalid ", what, ".")
-  }
-  value
+  .liber_shared_component(
+    value, what = what, max_length = 128L,
+    error = function(message) .nm_stop(message)
+  )
 }
 
 .nm_workspace_atomic_save <- function(value, path) {
-  directory <- dirname(path)
-  if (!dir.exists(directory) && !dir.create(directory, recursive = TRUE, showWarnings = FALSE)) {
-    .nm_stop("Unable to create workspace directory: ", directory)
-  }
-  temporary <- tempfile("save-", tmpdir = directory, fileext = ".rds")
-  on.exit(unlink(temporary, force = TRUE), add = TRUE)
-  saveRDS(value, temporary, version = 3)
-  if (file.exists(path)) {
-    backup <- paste0(path, ".previous")
-    unlink(backup, force = TRUE)
-    if (!file.rename(path, backup)) .nm_stop("Unable to rotate workspace file: ", path)
-    if (!file.rename(temporary, path)) {
-      file.rename(backup, path)
-      .nm_stop("Unable to publish workspace file: ", path)
-    }
-    unlink(backup, force = TRUE)
-  } else if (!file.rename(temporary, path)) {
-    .nm_stop("Unable to publish workspace file: ", path)
-  }
-  if (.Platform$OS.type != "windows") Sys.chmod(path, mode = "0600")
-  invisible(path)
+  .liber_shared_atomic_publish(
+    path,
+    writer = function(temporary) saveRDS(value, temporary, version = 3),
+    prefix = "save-", fileext = ".rds",
+    error = function(message) .nm_stop(message)
+  )
 }
 
 .nm_workspace_read <- function(path) {
-  candidates <- c(path, paste0(path, ".previous"))
-  candidates <- unique(candidates[file.exists(candidates)])
-  if (!length(candidates)) .nm_stop("Workspace file does not exist: ", path)
-  last <- NULL
-  for (candidate in candidates) {
-    value <- tryCatch(readRDS(candidate), error = function(error) {
-      last <<- error
-      NULL
-    })
-    if (!is.null(value)) {
-      if (!identical(candidate, path)) {
-        warning("Recovered interrupted workspace write from ",
-                basename(candidate), ".", call. = FALSE)
-      }
-      return(value)
-    }
+  if (!file.exists(path) && !file.exists(paste0(path, ".previous"))) {
+    .nm_stop("Workspace file does not exist: ", path)
   }
-  .nm_stop(
-    "Unable to read workspace file ", path, ": ",
-    if (inherits(last, "condition")) conditionMessage(last) else "unknown read failure"
+  .liber_shared_durable_read(
+    path, reader = readRDS,
+    recovery_label = "workspace",
+    error = function(message) .nm_stop(message)
   )
 }
 
@@ -71,30 +41,17 @@
 .nm_workspace_lock <- function(workspace, name, timeout = 10, stale = 300) {
   root <- .nm_workspace_path(workspace)
   lock_root <- file.path(root, ".locks")
-  if (!dir.exists(lock_root)) dir.create(lock_root, recursive = TRUE, showWarnings = FALSE)
   name <- .nm_workspace_component(name, "lock name")
   path <- file.path(lock_root, paste0(name, ".lock"))
-  deadline <- Sys.time() + as.numeric(timeout)
-  repeat {
-    if (dir.create(path, showWarnings = FALSE)) {
-      writeLines(c(paste0("pid=", Sys.getpid()), paste0("created=", .nm_workspace_now())),
-                 file.path(path, "owner"), useBytes = TRUE)
-      return(path)
-    }
-    info <- suppressWarnings(file.info(path))
-    if (nrow(info) && !is.na(info$mtime) &&
-        as.numeric(difftime(Sys.time(), info$mtime, units = "secs")) > stale) {
-      unlink(path, recursive = TRUE, force = TRUE)
-      next
-    }
-    if (Sys.time() >= deadline) .nm_stop("Timed out waiting for workspace lock: ", name, ".")
-    Sys.sleep(0.025)
-  }
+  .liber_shared_lock_acquire(
+    path, timeout = timeout, stale_after = stale, poll = 0.025,
+    owner = c(paste0("pid=", Sys.getpid()), paste0("created=", .nm_workspace_now())),
+    error = function(message) .nm_stop(message)
+  )
 }
 
 .nm_workspace_unlock <- function(path) {
-  if (!is.null(path) && dir.exists(path)) unlink(path, recursive = TRUE, force = TRUE)
-  invisible(TRUE)
+  .liber_shared_lock_release(path)
 }
 
 .nm_object_reference <- function(hash, kind) {

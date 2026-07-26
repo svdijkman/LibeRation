@@ -8,11 +8,27 @@ test_that("versioned model contracts rebuild semantic models", {
   contract <- nm_model_to_contract(model)
   rebuilt <- nm_model_from_contract(contract)
   expect_identical(contract$schema, "liberation.model")
-  expect_identical(contract$version, 2L)
+  expect_identical(contract$version, 3L)
   expect_s3_class(rebuilt, "nm_model")
   expect_equal(rebuilt$PRED, model$PRED)
   expect_equal(rebuilt$THETAS, model$THETAS)
   expect_false(any(c("pred_ir", "des_ir", "error_ir") %in% names(contract$fields)))
+})
+
+test_that("contract v3 preserves combined PK and post-ADVAN PRED sources", {
+  model <- nm_model(
+    INPUT = c("ID", "TIME", "EVID", "AMT"), ADVAN = 1,
+    PRED_MODE = "pk_pred",
+    PK_SOURCE = "CL=THETA(1);V=THETA(2);S1=V",
+    PRED_SOURCE = "F=F_ADVAN+A(1)/100",
+    THETAS = data.frame(THETA = 1:2, Value = c(2, 20))
+  )
+  contract <- nm_model_to_contract(model)
+  rebuilt <- nm_model_from_contract(contract)
+  expect_identical(rebuilt$PRED_MODE, "pk_pred")
+  expect_identical(rebuilt$PK_SOURCE, model$PK_SOURCE)
+  expect_identical(rebuilt$PRED_SOURCE, model$PRED_SOURCE)
+  expect_null(contract$fields$post_pred_ir)
 })
 
 test_that("contracts retain every advanced semantic configuration", {

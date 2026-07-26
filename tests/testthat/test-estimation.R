@@ -172,18 +172,22 @@ test_that("Laplace curvature tapes are anchored at conditional modes", {
   )
   context <- LibeRation:::.nm_estimation_context(model, data)
   map <- LibeRation:::.nm_outer_map(context$model)
-
-  expect_error(
-    context$subjects[[2L]]$ensure_curvature_tape(
-      model$THETAS$Value, rep(0, context$n_eta), model$SIGMAS$Value,
-      model$OMEGAS$Value, "laplace"
-    ),
-    "not positive definite"
+  parameters <- map$decode(map$start)
+  modes <- LibeRation:::.nm_subject_modes(
+    context, parameters, starts = NULL, maxit = 100L, tolerance = 1e-7,
+    interaction = TRUE, exact_hessian = TRUE
   )
   compiled <- LibeRation:::.nm_cpp_population_objective(
     context, map, "laplace", eta_maxit = 100L, tolerance = 1e-7
   )
   expect_false(is.null(compiled$pointer), info = compiled$reason)
+  for (subject in seq_along(context$subjects)) {
+    expect_equal(
+      context$subjects[[subject]]$curvature_tapes$laplace$anchor,
+      modes[[subject]]$par,
+      tolerance = 1e-7
+    )
+  }
   fit <- nm_est(
     model, data, method = "LAPLACE", maxit = 2L,
     eta_maxit = 100L, tolerance = 1e-7
@@ -245,6 +249,7 @@ test_that("ITS and IMP use the exact conditional objective", {
   expect_true(is.finite(imp$objective))
   expect_equal(imp$diagnostics$n_imp, 20)
   expect_equal(imp$diagnostics$imp_gradient, "score")
+  expect_true(is.logical(imp$diagnostics$finite_crn_fallback))
 })
 
 test_that("GQ integrates the exact joint objective deterministically", {
@@ -322,6 +327,19 @@ test_that("GQ exposes adaptive and fixed integration with covariance support", {
   ))))
   expect_identical(optimized$covariance$status, "completed")
   expect_true(all(is.finite(optimized$covariance$se)))
+  expect_true(optimized$covariance$eta_warm_start)
+
+  context <- LibeRation:::.nm_estimation_context(optimized$model, optimized$data)
+  map <- LibeRation:::.nm_outer_map(context$model)
+  fixed_design <- LibeRation:::.nm_gq_design(
+    context, order = optimized$diagnostics$quadrature_order
+  )
+  fixed_objective <- LibeRation:::.nm_cov_objective(
+    optimized, context, map, normals = fixed_design$normals,
+    anchor = map$encode(LibeRation:::.nm_fit_parameters(optimized)),
+    eta_maxit = 80L, tolerance = 1e-7, adaptive = FALSE
+  )
+  expect_false(attr(fixed_objective, "eta_warm_start"))
 })
 
 test_that("GQ selects and evaluates Smolyak sparse grids", {
@@ -411,6 +429,7 @@ test_that("SAEM and BAYES return reproducible stochastic diagnostics", {
   expect_true(all(saem$diagnostics$step_scale_trace > 0))
   expect_equal(nrow(bayes$chain), 10)
   expect_true(all(is.finite(bayes$posterior$mean)))
+  expect_true(is.finite(bayes$objective))
   expect_true(bayes$diagnostics$eta_acceptance >= 0 &&
                 bayes$diagnostics$eta_acceptance <= 1)
 })

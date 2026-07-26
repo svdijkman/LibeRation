@@ -26,6 +26,10 @@ test_that("legacy workbench layout and workflow controls are present", {
     system.file("htmlwidgets", "liberWorkbench.css", package = "LibeRation"),
     warn = FALSE
   ), collapse = "\n")
+  shared_style <- paste(readLines(
+    system.file("htmlwidgets", "liber-design-system.css", package = "LibeRation"),
+    warn = FALSE
+  ), collapse = "\n")
   expect_match(source, 'label:"Home"', fixed = TRUE)
   expect_match(source, 'label:"Jobs"', fixed = TRUE)
   expect_match(source, 'label:"Data"', fixed = TRUE)
@@ -69,6 +73,9 @@ test_that("legacy workbench layout and workflow controls are present", {
   expect_match(source, 'lw-modal-comparison', fixed = TRUE)
   expect_match(source, 'lw-run-flag-cov', fixed = TRUE)
   expect_match(source, 'load_payload', fixed = TRUE)
+  expect_match(source, 'function requestCenterPayload', fixed = TRUE)
+  expect_match(source, 'liber-workbench-patch', fixed = TRUE)
+  expect_match(shared_style, '.shiny-bound-output.recalculating', fixed = TRUE)
   expect_match(source, 'function HmmPane', fixed = TRUE)
   expect_match(source, 'Retrospective smoothed', fixed = TRUE)
   expect_match(source, 'kind:"hmm"', fixed = TRUE)
@@ -98,7 +105,12 @@ test_that("legacy workbench layout and workflow controls are present", {
   expect_match(source, 'context compacted', fixed = TRUE)
   expect_match(source, 'helpQuestionScope', fixed = TRUE)
   expect_match(source, 'scope:projectScope', fixed = TRUE)
+  expect_match(source, 'question:question', fixed = TRUE)
   expect_match(source, 'Evidence scope selected for this question', fixed = TRUE)
+  expect_match(source, 'Model-fit interpretation guide', fixed = TRUE)
+  expect_match(source, 'Relevant installed LibeRation/LibeRtAD documentation', fixed = TRUE)
+  expect_match(source, 'unitLabel:"OMEGA"', fixed = TRUE)
+  expect_match(source, 'continuous_time_hidden_markov', fixed = TRUE)
   expect_match(source, 'report_ai_context_request', fixed = TRUE)
   expect_match(source, 'reportSelections', fixed = TRUE)
   expect_match(source, 'reportEvidenceText', fixed = TRUE)
@@ -156,6 +168,9 @@ test_that("Help AI receives compact saved-run evidence on demand", {
   expect_equal(context$runs[[1L]]$objective, fit$objective)
   expect_true(context$runs[[1L]]$diagnostics$gof)
   expect_true(length(context$runs[[1L]]$parameters) > 0L)
+  expect_true(context$runs[[1L]]$fit_quality$available)
+  expect_true(is.finite(context$runs[[1L]]$fit_quality$aic))
+  expect_match(context$fit_quality_guide, "CWRES", fixed = TRUE)
   expect_false(any(c("data", "output", "gof") %in% names(context$runs[[1L]])))
 
   index_context <- LibeRation:::.liber_gui_ai_context(
@@ -176,9 +191,11 @@ test_that("Help AI receives compact saved-run evidence on demand", {
     session$flushReact()
     session$setInputs(liber_workbench_event = list(
       action = "ai_context_request", project = project$id,
-      requestId = "help-request-1", scope = "index", nonce = 1
+      requestId = "help-request-1", scope = "index",
+      question = "How do I configure an HMM?", nonce = 1
     ))
     session$flushReact()
+    wait_for_gui_task(session, tasks)
     supplied <<- shiny::isolate(state$ai_context)
   })
   expect_equal(supplied$request_id, "help-request-1")
@@ -186,6 +203,12 @@ test_that("Help AI receives compact saved-run evidence on demand", {
   expect_equal(supplied$scope, "index")
   expect_equal(supplied$runs[[1L]]$id, run)
   expect_false("parameters" %in% names(supplied$runs[[1L]]))
+  expect_true(length(supplied$documentation) > 0L)
+  expect_true(any(vapply(
+    supplied$documentation,
+    function(item) item$package %in% c("LibeRation", "LibeRtAD"),
+    logical(1)
+  )))
 
   second_run <- nm_project_save_run(
     workspace, project$id, version, fit, label = "Second FO estimation"
@@ -353,6 +376,32 @@ test_that("draft validation synchronizes THETA ETA and residual parameter tables
   expect_equal(nrow(full$OMEGAS), 3L)
   expect_equal(full$OMEGAS[, c("ROW", "COL")],
                data.frame(ROW = c(1L, 2L, 2L), COL = c(1L, 1L, 2L)))
+})
+
+test_that("GUI preserves separate PK and PRED drafts and validates combined parameters", {
+  model <- LibeRation:::.liber_model_template(1L)
+  combined <- LibeRation:::.liber_model_from_event(model, list(
+    pred_mode = "pk_pred",
+    pk_source = model$PRED,
+    pred_source = "ADJUST=THETA(3)*exp(ETA(2));F=F_ADVAN*ADJUST"
+  ))
+  expect_identical(combined$PRED_MODE, "pk_pred")
+  expect_identical(combined$PK_SOURCE, model$PRED)
+  expect_match(combined$PRED_SOURCE, "F_ADVAN", fixed = TRUE)
+  expect_equal(nrow(combined$THETAS), 3L)
+  expect_equal(combined$n_eta, 2L)
+
+  direct <- LibeRation:::.liber_model_from_event(combined, list(
+    pred_mode = "pred",
+    pred_source = "F=THETA(1)*TIME"
+  ))
+  expect_identical(direct$PRED_MODE, "pred")
+  expect_identical(direct$PK_SOURCE, model$PRED)
+  expect_identical(direct$PRED_SOURCE, "F=THETA(1)*TIME")
+  payload <- LibeRation:::.liber_gui_model(direct)
+  expect_identical(payload$pred_mode, "pred")
+  expect_identical(payload$pk_source, model$PRED)
+  expect_identical(payload$pred_source, "F=THETA(1)*TIME")
 })
 
 test_that("GUI parameter estimates use THETA OMEGA SIGMA presentation order", {
@@ -538,6 +587,19 @@ test_that("GUI example datasets contain reproducible between-subject variability
   expect_true(any(abs(as.matrix(truth[grep("^ETA", names(truth))])) > 0.05))
   expect_equal(first$DV, second$DV)
   expect_equal(attr(first, "simulation_eta"), attr(second, "simulation_eta"))
+  parameters <- attr(first, "simulation_parameters")
+  expect_equal(unname(parameters$theta), c(1.5, 3, 35))
+  expect_equal(unname(parameters$omega), c(0.20, 0.12, 0.10))
+  expect_equal(unname(parameters$sigma), c(0.15, 0.20))
+  expect_false(isTRUE(all.equal(unname(parameters$theta), model$THETAS$Value)))
+  expect_gt(parameters$realized$residual_sd, 0.25)
+  expect_gt(parameters$realized$individual_population_rmse, 0.25)
+  expect_equal(
+    attr(first, "simulation_parameters"),
+    attr(second, "simulation_parameters")
+  )
+  payload <- LibeRation:::.liber_gui_data(first, include_rows = FALSE)
+  expect_equal(unname(unlist(payload$simulation_parameters$theta)), c(1.5, 3, 35))
 })
 
 test_that("GUI uses the high-fidelity blue LibeRation dove favicon", {
@@ -562,7 +624,7 @@ test_that("GUI parameter names support models without random effects", {
 })
 
 test_that("all supported ADVAN templates are valid models", {
-  for (advan in c(1L, 2L, 3L, 4L, 6L, 11L, 12L, 13L)) {
+  for (advan in 1:14) {
     expect_s3_class(LibeRation:::.liber_model_template(advan), "nm_model")
   }
   ode <- LibeRation:::.liber_model_template(13L, n_state = 4L, problem = "Four-state ODE")
@@ -743,6 +805,7 @@ test_that("model comparison includes GOF and only diagnostics common to both run
       action = "project_compare", runs = c(first, second), nonce = 1
     ))
     session$flushReact()
+    wait_for_gui_task(session, tasks)
     comparison <<- shiny::isolate(state$result)
     session$setInputs(liber_workbench_event = list(
       action = "comparison_close", nonce = 2

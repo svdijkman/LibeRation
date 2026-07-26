@@ -101,7 +101,10 @@ nm_component_code <- function(component) {
       if (final) return(expression)
       switch(component$payload$activation,
              tanh = paste0("tanh(", expression, ")"),
-             softplus = paste0("log(1 + exp(", expression, "))"),
+             softplus = paste0(
+               "log(1 + exp(-abs(", expression, "))) + pmax(",
+               expression, ", 0)"
+             ),
              relu = paste0("pmax(", expression, ", 0)"))
     }
     for (layer in seq_along(component$payload$weights)) {
@@ -155,6 +158,19 @@ nm_component_code <- function(component) {
   if (inherits(components, "nm_component")) components <- list(components)
   if (!is.list(components) || any(!vapply(components, inherits, logical(1), "nm_component"))) {
     .nm_stop("COMPONENTS must contain nm_component objects.")
+  }
+  valid_hash <- vapply(components, function(component) {
+    recorded <- component$hash
+    payload <- unclass(component)
+    payload$hash <- NULL
+    length(recorded) == 1L && !is.na(recorded) &&
+      identical(unname(recorded), .nm_component_hash(payload))
+  }, logical(1))
+  if (any(!valid_hash)) {
+    .nm_stop(
+      "COMPONENTS contains a modified payload whose immutable hash no longer matches; ",
+      "recreate it with `nm_component()`."
+    )
   }
   names <- vapply(components, `[[`, character(1), "name")
   outputs <- unlist(lapply(components, `[[`, "outputs"), use.names = FALSE)

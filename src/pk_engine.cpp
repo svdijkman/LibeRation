@@ -6,7 +6,7 @@
 #include <LibeRtAD/sparse_hessian.hpp>
 #include <unsupported/Eigen/MatrixFunctions>
 #include <LibeRtAD/program.hpp>
-#include "eigen_solver.h"
+#include <LibeRtAD/eigen_solver.hpp>
 
 #include <algorithm>
 #include <cstdint>
@@ -358,6 +358,7 @@ class ModelEngine {
   int n_theta;
   int n_eta;
   int n_state;
+  bool direct_prediction = false;
   std::string solver;
   std::string error_type;
   std::string omega_type;
@@ -378,10 +379,12 @@ class ModelEngine {
   std::vector<double> mixture_probabilities;
   std::vector<ResidualGroupSpec> residual_groups;
   std::shared_ptr<const libertad::Program> pred;
+  std::shared_ptr<const libertad::Program> post_pred;
   std::shared_ptr<const libertad::Program> des;
   std::shared_ptr<const libertad::Program> alg;
   std::shared_ptr<const libertad::Program> error;
   std::vector<std::size_t> all_outputs;
+  std::vector<std::size_t> post_all_outputs;
   std::vector<std::size_t> likelihood_output;
   std::string likelihood_scale;
   bool hmm_enabled = false;
@@ -451,16 +454,38 @@ class ModelEngine {
         n_theta(Rcpp::as<int>(spec["n_theta"])),
         n_eta(Rcpp::as<int>(spec["n_eta"])),
         n_state(Rcpp::as<int>(spec["n_state"])),
+        direct_prediction(
+          spec.containsElementNamed("pred_mode") &&
+          Rcpp::as<std::string>(spec["pred_mode"]) == "pred"),
         solver(Rcpp::as<std::string>(spec["solver"])),
         error_type(Rcpp::as<std::string>(spec["error_type"])),
         pred(std::make_shared<const libertad::Program>(Rcpp::as<Rcpp::List>(spec["pred_ir"]))) {
     all_outputs.resize(pred->output_names.size());
     std::iota(all_outputs.begin(), all_outputs.end(), 0U);
+    Rcpp::RObject post_pred_ir = spec.containsElementNamed("post_pred_ir") ?
+      Rcpp::RObject(spec["post_pred_ir"]) : Rcpp::RObject(R_NilValue);
+    if (!Rf_isNull(post_pred_ir)) {
+      post_pred = std::make_shared<const libertad::Program>(
+        Rcpp::as<Rcpp::List>(post_pred_ir));
+      post_all_outputs.resize(post_pred->output_names.size());
+      std::iota(post_all_outputs.begin(), post_all_outputs.end(), 0U);
+    }
     if (spec.containsElementNamed("output_names")) {
       selected_output_names = Rcpp::as<std::vector<std::string>>(spec["output_names"]);
       // Validate the serialized selection at engine construction rather than
       // failing part-way through a long estimation or simulation.
-      pred->select_outputs(selected_output_names);
+      for (const std::string& name : selected_output_names) {
+        const bool in_pk = std::find(
+          pred->output_names.begin(), pred->output_names.end(), name
+        ) != pred->output_names.end();
+        const bool in_post = post_pred && std::find(
+          post_pred->output_names.begin(), post_pred->output_names.end(), name
+        ) != post_pred->output_names.end();
+        if (!in_pk && !in_post) {
+          throw std::invalid_argument(
+            "Selected model output '" + name + "' is not compiled.");
+        }
+      }
     }
     Rcpp::RObject des_ir = spec["des_ir"];
     if (!Rf_isNull(des_ir)) {
@@ -956,6 +981,21 @@ class ModelEngine {
   bool is_ode() const { return static_cast<bool>(des); }
 };
 
+inline bool implicit_ode_advan(int advan) {
+  return advan == 8 || advan == 9 || advan == 13 || advan == 14;
+}
+
+inline std::string ode_kernel_name(int advan) {
+  switch (advan) {
+    case 8: return "advan8-stiff-implicit";
+    case 9: return "advan9-dae-implicit";
+    case 10: return "advan10-michaelis-menten-rk45";
+    case 13: return "advan13-implicit";
+    case 14: return "advan14-stiff-nonstiff-implicit";
+    default: return "advan6-rk45";
+  }
+}
+
 bool starts_with(const std::string& value, const char* prefix) {
   return value.rfind(prefix, 0) == 0;
 }
@@ -1089,6 +1129,70 @@ Parameters evaluate_parameters(const ModelEngine& engine,
   return parameters;
 }
 
+double evaluate_post_prediction(
+    const ModelEngine& engine, const Rcpp::DataFrame& data,
+    int row, int subject, double time, const Vector& state,
+    const Rcpp::NumericVector& theta, const Rcpp::NumericMatrix& eta,
+    const Rcpp::NumericVector& sigma, double advan_prediction,
+    Parameters& parameters) {
+  if (!engine.post_pred) return advan_prediction;
+  std::vector<double> inputs(engine.post_pred->input_names.size(), 0.0);
+  for (std::size_t i = 0; i < engine.post_pred->input_names.size(); ++i) {
+    const std::string& name = engine.post_pred->input_names[i];
+    int index = indexed_name(name, "THETA_");
+    if (index >= 0) {
+      if (index >= theta.size()) throw std::out_of_range("THETA index exceeds values.");
+      inputs[i] = theta[index];
+      continue;
+    }
+    index = indexed_name(name, "ETA_");
+    if (index >= 0) {
+      inputs[i] = eta(subject, eta_column(engine, data, row, index, eta.ncol()));
+      continue;
+    }
+    index = indexed_name(name, "SIGMA_");
+    if (index >= 0) {
+      if (index >= sigma.size()) throw std::out_of_range("SIGMA index exceeds values.");
+      inputs[i] = sigma[index];
+      continue;
+    }
+    index = indexed_name(name, "A_");
+    if (index >= 0) {
+      if (index >= state.size()) throw std::out_of_range("$PRED A() index exceeds state dimension.");
+      inputs[i] = state[index];
+      continue;
+    }
+    if (name == "F_ADVAN") { inputs[i] = advan_prediction; continue; }
+    if (name == "T" || name == "TIME") { inputs[i] = time; continue; }
+    if (name == "MIXNUM") {
+      inputs[i] = data.containsElementNamed("MIXNUM") ?
+        data_value(data, "MIXNUM", row) : 1.0;
+      continue;
+    }
+    const auto assigned = parameters.find(name);
+    if (assigned != parameters.end()) {
+      inputs[i] = assigned->second;
+      continue;
+    }
+    inputs[i] = data_value(data, name, row);
+    if (!std::isfinite(inputs[i])) {
+      throw std::domain_error(
+        "Post-ADVAN $PRED input '" + name + "' is non-finite at row " +
+        std::to_string(row + 1) + ".");
+    }
+  }
+  const std::vector<double> output =
+    engine.post_pred->eval_outputs(inputs, engine.post_all_outputs);
+  for (std::size_t i = 0; i < output.size(); ++i) {
+    parameters[engine.post_pred->output_names[i]] = output[i];
+  }
+  const auto prediction = parameters.find("F");
+  if (prediction == parameters.end() || !std::isfinite(prediction->second)) {
+    throw std::domain_error("Post-ADVAN $PRED did not produce a finite F.");
+  }
+  return prediction->second;
+}
+
 Vector evaluate_algebraic_residuals(
     const ModelEngine& engine, const Rcpp::DataFrame& data,
     int row, int subject, double time, const Vector& state,
@@ -1195,30 +1299,68 @@ Vector solve_algebraic(
 }
 
 struct DdeHistory {
+  struct Jump {
+    double time;
+    Vector before;
+    Vector after;
+  };
+
   std::vector<double> time;
   std::vector<Vector> state;
   std::vector<double> baseline;
+  std::vector<Jump> jumps;
 
   void reset(double at, const Vector& value, const std::vector<double>& history) {
     time.assign(1U, at); state.assign(1U, value); baseline = history;
+    jumps.clear();
   }
   void append(double at, const Vector& value) {
     if (!time.empty() && std::abs(time.back() - at) <= 1e-12) {
+      if ((state.back() - value).cwiseAbs().maxCoeff() > 1e-14) {
+        if (!jumps.empty() && std::abs(jumps.back().time - at) <= 1e-12) {
+          jumps.back().after = value;
+        } else {
+          Vector before = state.back();
+          if (time.size() == 1U && jumps.empty() &&
+              baseline.size() == static_cast<std::size_t>(before.size())) {
+            for (Eigen::Index index = 0; index < before.size(); ++index) {
+              before[index] = baseline[static_cast<std::size_t>(index)];
+            }
+          }
+          jumps.push_back({at, before, value});
+        }
+      }
       state.back() = value; return;
     }
     time.push_back(at); state.push_back(value);
   }
-  double at(double target, int component) const {
+  const Jump* jump_at(double target) const {
+    for (auto jump = jumps.rbegin(); jump != jumps.rend(); ++jump) {
+      if (std::abs(jump->time - target) <= 1e-12) return &*jump;
+    }
+    return nullptr;
+  }
+  const Jump* jump_at_index(std::size_t index) const {
+    return jump_at(time[index]);
+  }
+  double at(double target, int component, bool left_limit = false) const {
     if (component < 0 || component >= static_cast<int>(baseline.size())) {
       throw std::out_of_range("DDE lag state is outside the state vector.");
     }
     if (time.empty() || target < time.front() - 1e-12) return baseline[static_cast<std::size_t>(component)];
+    if (const Jump* jump = jump_at(target)) {
+      return (left_limit ? jump->before : jump->after)[component];
+    }
     if (target >= time.back() - 1e-12) return state.back()[component];
     auto upper = std::upper_bound(time.begin(), time.end(), target);
     const std::size_t right = static_cast<std::size_t>(std::distance(time.begin(), upper));
     const std::size_t left = right - 1U;
     const double fraction = (target - time[left]) / (time[right] - time[left]);
-    return state[left][component] + fraction * (state[right][component] - state[left][component]);
+    const double left_state = state[left][component];
+    const Jump* right_jump = jump_at_index(right);
+    const double right_state = right_jump == nullptr ?
+      state[right][component] : right_jump->before[component];
+    return left_state + fraction * (right_state - left_state);
   }
 };
 
@@ -1403,12 +1545,12 @@ Vector integrate_implicit_trapezoid(const OdeRhs& rhs, Vector state,
   int attempts = 0;
   while (t < to) {
     if (++attempts > control.max_steps) {
-      throw std::runtime_error("ADVAN13 exceeded ODE_CONTROL$max_steps.");
+      throw std::runtime_error("Implicit ADVAN solver exceeded ODE_CONTROL$max_steps.");
     }
     h = std::min(h, to - t);
     const double minimum = 32.0 * std::numeric_limits<double>::epsilon() *
       std::max({1.0, std::abs(t), std::abs(to)});
-    if (h < minimum) throw std::runtime_error("ADVAN13 ODE step size underflow.");
+    if (h < minimum) throw std::runtime_error("Implicit ADVAN ODE step size underflow.");
 
     Vector full, half, two_half;
     const bool converged = implicit_trapezoid_step(rhs, state, t, h, control, full) &&
@@ -1540,8 +1682,27 @@ Vector propagate_ode_to(const ModelEngine& engine,
         if (++steps > engine.dde_max_steps) {
           throw std::runtime_error("DDE method-of-steps exceeded max_steps.");
         }
-        const double h = std::min(engine.dde_step, segment_end - time);
-        auto rhs = [&](double stage_time, const Vector& value) {
+        double step_end = time + std::min(engine.dde_step, segment_end - time);
+        bool ends_at_delayed_jump = false;
+        for (const auto& jump : dde_history->jumps) {
+          for (const std::string& delay_name : engine.dde_lag_delays) {
+            auto delay = parameters.find(delay_name);
+            if (delay == parameters.end()) continue;
+            const double boundary = jump.time + delay->second;
+            if (boundary > time + 1e-12 &&
+                boundary < step_end - 1e-12) {
+              step_end = boundary;
+              ends_at_delayed_jump = true;
+            } else if (boundary > time + 1e-12 &&
+                       std::abs(boundary - step_end) <= 1e-12) {
+              step_end = boundary;
+              ends_at_delayed_jump = true;
+            }
+          }
+        }
+        const double h = step_end - time;
+        auto rhs = [&](double stage_time, const Vector& value,
+                       bool left_limit = false) {
           Vector lag_values(static_cast<Eigen::Index>(engine.dde_lag_inputs.size()));
           for (std::size_t lag = 0; lag < engine.dde_lag_inputs.size(); ++lag) {
             auto delay = parameters.find(engine.dde_lag_delays[lag]);
@@ -1551,7 +1712,8 @@ Vector propagate_ode_to(const ModelEngine& engine,
                                       "' must be finite and at least the integration step.");
             }
             lag_values[static_cast<Eigen::Index>(lag)] = dde_history->at(
-              stage_time - delay->second, engine.dde_lag_states[lag]);
+              stage_time - delay->second, engine.dde_lag_states[lag],
+              left_limit);
           }
           Vector derivative = evaluate_derivatives(
             engine, data, row, subject, stage_time, value, parameters,
@@ -1562,9 +1724,10 @@ Vector propagate_ode_to(const ModelEngine& engine,
         const Vector k1 = rhs(time, state);
         const Vector k2 = rhs(time + 0.5 * h, state + 0.5 * h * k1);
         const Vector k3 = rhs(time + 0.5 * h, state + 0.5 * h * k2);
-        const Vector k4 = rhs(time + h, state + h * k3);
+        const Vector k4 = rhs(
+          time + h, state + h * k3, ends_at_delayed_jump);
         state += (h / 6.0) * (k1 + 2.0 * k2 + 2.0 * k3 + k4);
-        time += h;
+        time = step_end;
         dde_history->append(time, state);
       }
       cursor = segment_end;
@@ -1578,7 +1741,7 @@ Vector propagate_ode_to(const ModelEngine& engine,
       derivative += input;
       return derivative;
     };
-    state = engine.advan == 13 ?
+    state = implicit_ode_advan(engine.advan) ?
       integrate_implicit_trapezoid(rhs, state, cursor, segment_end, engine.ode_control) :
       integrate_dopri54(rhs, state, cursor, segment_end, engine.ode_control);
     cursor = segment_end;
@@ -1729,7 +1892,7 @@ Rcpp::List simulate(ModelEngine& engine,
       previous_subject = structural_subject;
       if (engine.dde_enabled) dde_history.reset(time[row], state, engine.dde_history);
     }
-    if (have_previous) {
+    if (have_previous && !engine.direct_prediction) {
       if (time[row] < previous_time - 1e-12) Rcpp::stop("Subject event times are decreasing.");
       if (engine.is_ode()) {
         state = propagate_ode_to(
@@ -1743,12 +1906,12 @@ Rcpp::List simulate(ModelEngine& engine,
     }
 
     Parameters parameters = evaluate_parameters(engine, data, row, subject, theta, eta, sigma);
-    for (std::size_t output = 0; output < engine.selected_output_names.size(); ++output) {
-      auto found = parameters.find(engine.selected_output_names[output]);
-      generated(row, static_cast<int>(output)) = found == parameters.end() ? NA_REAL : found->second;
-    }
     Topology topology;
-    if (engine.is_ode()) {
+    if (engine.direct_prediction) {
+      topology.k = Matrix::Zero(n_state, n_state);
+      topology.state_names = {"DIRECT_PRED"};
+      topology.default_scales.assign(static_cast<std::size_t>(n_state), 1.0);
+    } else if (engine.is_ode()) {
       topology.k = Matrix::Zero(n_state, n_state);
       topology.state_names = engine.state_names;
       topology.default_scales.assign(static_cast<std::size_t>(n_state), 1.0);
@@ -1766,7 +1929,8 @@ Rcpp::List simulate(ModelEngine& engine,
       active.clear();
       if (engine.dde_enabled) dde_history.reset(time[row], state, engine.dde_history);
     }
-    const bool dosing = amount[row] > 0.0 && (evid[row] == 1 || evid[row] == 4 || evid[row] == 0);
+    const bool dosing = !engine.direct_prediction && amount[row] > 0.0 &&
+      (evid[row] == 1 || evid[row] == 4 || evid[row] == 0);
     if (dosing) {
       const int dose_cmt = cmt[row] > 0 ? cmt[row] : engine.dose_cmp;
       const int dose_index = compartment_index(dose_cmt, topology.default_dose, n_state);
@@ -1818,14 +1982,33 @@ Rcpp::List simulate(ModelEngine& engine,
       if (engine.dde_enabled) dde_history.append(time[row], state);
     }
 
-    const int observation_cmt = cmt[row] > 0 && evid[row] == 0 ? cmt[row] : engine.obs_cmp;
-    const int observation_index = compartment_index(
-      observation_cmt, topology.default_observation, n_state
-    );
-    const double scale = observation_scale(parameters, data, row, observation_cmt, topology);
     const auto direct_prediction = parameters.find("F");
-    prediction[row] = direct_prediction == parameters.end() ?
-      state[observation_index] / scale : direct_prediction->second;
+    double raw_prediction = NA_REAL;
+    if (engine.direct_prediction) {
+      if (direct_prediction == parameters.end()) {
+        Rcpp::stop("Direct $PRED evaluation did not produce F.");
+      }
+      raw_prediction = direct_prediction->second;
+    } else {
+      const int observation_cmt =
+        cmt[row] > 0 && evid[row] == 0 ? cmt[row] : engine.obs_cmp;
+      const int observation_index = compartment_index(
+        observation_cmt, topology.default_observation, n_state
+      );
+      const double scale = observation_scale(
+        parameters, data, row, observation_cmt, topology);
+      raw_prediction = direct_prediction == parameters.end() ?
+        state[observation_index] / scale : direct_prediction->second;
+    }
+    prediction[row] = evaluate_post_prediction(
+      engine, data, row, subject, time[row], state, theta, eta, sigma,
+      raw_prediction, parameters);
+    for (std::size_t output = 0;
+         output < engine.selected_output_names.size(); ++output) {
+      const auto found = parameters.find(engine.selected_output_names[output]);
+      generated(row, static_cast<int>(output)) =
+        found == parameters.end() ? NA_REAL : found->second;
+    }
     for (int j = 0; j < n_state; ++j) amounts(row, j) = state[j];
 
     previous_k = topology.k;
@@ -1842,7 +2025,8 @@ Rcpp::List simulate(ModelEngine& engine,
     Rcpp::Named("output_names") = Rcpp::wrap(engine.selected_output_names),
     Rcpp::Named("state_names") = state_names,
     Rcpp::Named("solver") = engine.solver == "auto" ?
-      (engine.is_ode() ? (engine.advan == 13 ? "advan13-implicit" : "advan6-rk45") : "advan") :
+      (engine.is_ode() ? ode_kernel_name(engine.advan) :
+       (engine.matrix_graph.enabled ? "general-matrix-exponential" : "advan")) :
       engine.solver
   );
 }
@@ -2169,12 +2353,10 @@ inline bool use_specialized_advan(const ModelEngine& engine) {
 inline std::string propagation_kernel_name(const ModelEngine& engine) {
   if (engine.dde_enabled) return "dde-rk4-method-of-steps";
   if (engine.dae_enabled) {
-    return engine.advan == 13 ? "dae-advan13-implicit-newton" :
-      "dae-advan6-rk45-newton";
+    return "dae-advan" + std::to_string(engine.advan) +
+      (implicit_ode_advan(engine.advan) ? "-implicit-newton" : "-rk45-newton");
   }
-  if (engine.is_ode()) {
-    return engine.advan == 13 ? "advan13-implicit" : "advan6-rk45";
-  }
+  if (engine.is_ode()) return ode_kernel_name(engine.advan);
   if (use_specialized_advan(engine)) {
     return "specialized-advan" + std::to_string(engine.advan);
   }
@@ -2590,6 +2772,72 @@ ParametersT<Scalar> evaluate_parameters_t(
 }
 
 template <class Scalar>
+Scalar evaluate_post_prediction_t(
+    const ModelEngine& engine, const Rcpp::DataFrame& data,
+    int row, int subject, const Scalar& time, const VectorT<Scalar>& state,
+    const std::vector<Scalar>& theta, const std::vector<Scalar>& eta,
+    int eta_columns, const std::vector<Scalar>& sigma, int mixture_number,
+    const Scalar& advan_prediction, ParametersT<Scalar>& parameters,
+    const DynamicDataT<Scalar>* dynamic_data = nullptr) {
+  if (!engine.post_pred) return advan_prediction;
+  std::vector<Scalar> inputs(
+    engine.post_pred->input_names.size(), Scalar(0.0));
+  for (std::size_t i = 0; i < engine.post_pred->input_names.size(); ++i) {
+    const std::string& name = engine.post_pred->input_names[i];
+    int index = indexed_name(name, "THETA_");
+    if (index >= 0) {
+      inputs[i] = theta.at(static_cast<std::size_t>(index));
+      continue;
+    }
+    index = indexed_name(name, "ETA_");
+    if (index >= 0) {
+      const int column = eta_column(engine, data, row, index, eta_columns);
+      inputs[i] = eta.at(
+        static_cast<std::size_t>(subject * eta_columns + column));
+      continue;
+    }
+    index = indexed_name(name, "SIGMA_");
+    if (index >= 0) {
+      inputs[i] = sigma.at(static_cast<std::size_t>(index));
+      continue;
+    }
+    index = indexed_name(name, "A_");
+    if (index >= 0) {
+      if (index >= state.size()) {
+        throw std::out_of_range("$PRED A() index exceeds state dimension.");
+      }
+      inputs[i] = state[index];
+      continue;
+    }
+    if (name == "F_ADVAN") { inputs[i] = advan_prediction; continue; }
+    if (name == "T" || name == "TIME") { inputs[i] = time; continue; }
+    if (name == "MIXNUM") { inputs[i] = Scalar(mixture_number); continue; }
+    const auto assigned = parameters.find(name);
+    if (assigned != parameters.end()) {
+      inputs[i] = assigned->second;
+      continue;
+    }
+    inputs[i] = dynamic_row_value(data, name, row, dynamic_data);
+    if (!std::isfinite(scalar_value(inputs[i]))) {
+      throw std::domain_error(
+        "Post-ADVAN $PRED input '" + name + "' is non-finite at row " +
+        std::to_string(row + 1) + ".");
+    }
+  }
+  const std::vector<Scalar> output =
+    engine.post_pred->eval_outputs(inputs, engine.post_all_outputs);
+  for (std::size_t i = 0; i < output.size(); ++i) {
+    parameters[engine.post_pred->output_names[i]] = output[i];
+  }
+  const auto prediction = parameters.find("F");
+  if (prediction == parameters.end() ||
+      !std::isfinite(scalar_value(prediction->second))) {
+    throw std::domain_error("Post-ADVAN $PRED did not produce a finite F.");
+  }
+  return prediction->second;
+}
+
+template <class Scalar>
 VectorT<Scalar> evaluate_algebraic_residuals_t(
     const ModelEngine& engine, const Rcpp::DataFrame& data,
     int row, int subject, const Scalar& time, const VectorT<Scalar>& state,
@@ -2710,21 +2958,59 @@ VectorT<Scalar> solve_algebraic_t(
 
 template <class Scalar>
 struct DdeHistoryT {
+  struct Jump {
+    Scalar time;
+    VectorT<Scalar> before;
+    VectorT<Scalar> after;
+  };
+
   std::vector<Scalar> time;
   std::vector<VectorT<Scalar>> state;
   std::vector<double> baseline;
+  std::vector<Jump> jumps;
 
   void reset(const Scalar& at, const VectorT<Scalar>& value,
              const std::vector<double>& history) {
     time.assign(1U, at); state.assign(1U, value); baseline = history;
+    jumps.clear();
   }
   void append(const Scalar& at, const VectorT<Scalar>& value) {
     if (!time.empty() && std::abs(scalar_value(time.back() - at)) <= 1e-12) {
+      double maximum = 0.0;
+      for (Eigen::Index index = 0; index < value.size(); ++index) {
+        maximum = std::max(
+          maximum, std::abs(scalar_value(state.back()[index] - value[index])));
+      }
+      if (maximum > 1e-14) {
+        if (!jumps.empty() &&
+            std::abs(scalar_value(jumps.back().time - at)) <= 1e-12) {
+          jumps.back().after = value;
+        } else {
+          VectorT<Scalar> before = state.back();
+          if (time.size() == 1U && jumps.empty() &&
+              baseline.size() == static_cast<std::size_t>(before.size())) {
+            for (Eigen::Index index = 0; index < before.size(); ++index) {
+              before[index] = Scalar(
+                baseline[static_cast<std::size_t>(index)]);
+            }
+          }
+          jumps.push_back({at, before, value});
+        }
+      }
       state.back() = value; return;
     }
     time.push_back(at); state.push_back(value);
   }
-  Scalar at(const Scalar& target, int component) const {
+  const Jump* jump_at(const Scalar& target) const {
+    for (auto jump = jumps.rbegin(); jump != jumps.rend(); ++jump) {
+      if (std::abs(scalar_value(jump->time - target)) <= 1e-12) return &*jump;
+    }
+    return nullptr;
+  }
+  const Jump* jump_at_index(std::size_t index) const {
+    return jump_at(time[index]);
+  }
+  Scalar at(const Scalar& target, int component, bool left_limit = false) const {
     if (component < 0 || component >= static_cast<int>(baseline.size())) {
       throw std::out_of_range("DDE lag state is outside the state vector.");
     }
@@ -2732,12 +3018,26 @@ struct DdeHistoryT {
     if (time.empty() || target_value < scalar_value(time.front()) - 1e-12) {
       return Scalar(baseline[static_cast<std::size_t>(component)]);
     }
-    if (target_value >= scalar_value(time.back()) - 1e-12) return state.back()[component];
+    if (const Jump* jump = jump_at(target)) {
+      return (left_limit ? jump->before : jump->after)[component];
+    }
+    if (time.size() == 1U) return state.back()[component];
+    if (target_value >= scalar_value(time.back()) - 1e-12) {
+      const std::size_t right = time.size() - 1U;
+      const std::size_t left = right - 1U;
+      const Scalar fraction = (target - time[left]) / (time[right] - time[left]);
+      return state[left][component] +
+        fraction * (state[right][component] - state[left][component]);
+    }
     std::size_t right = 1U;
-    while (right < time.size() && scalar_value(time[right]) <= target_value) ++right;
+    while (right < time.size() && scalar_value(time[right]) < target_value) ++right;
     const std::size_t left = right - 1U;
     const Scalar fraction = (target - time[left]) / (time[right] - time[left]);
-    return state[left][component] + fraction * (state[right][component] - state[left][component]);
+    const Scalar left_state = state[left][component];
+    const Jump* right_jump = jump_at_index(right);
+    const Scalar right_state = right_jump == nullptr ?
+      state[right][component] : right_jump->before[component];
+    return left_state + fraction * (right_state - left_state);
   }
 };
 
@@ -2911,7 +3211,8 @@ bool implicit_trapezoid_step_t(const Rhs& rhs, const VectorT<Scalar>& before,
     MatrixT<Scalar> system = MatrixT<Scalar>::Identity(n, n) - Scalar(0.5 * h) * jacobian;
     MatrixT<Scalar> rhs_matrix(n, 1);
     rhs_matrix.col(0) = -residual;
-    const VectorT<Scalar> update = solve_linear(system, rhs_matrix, "ADVAN13 Newton").col(0);
+    const VectorT<Scalar> update =
+      solve_linear(system, rhs_matrix, "Implicit ADVAN Newton").col(0);
     after += update;
     if (path_lt(scaled_error_t(update, before, after, control),
                 Scalar(0.03))) return true;
@@ -2930,11 +3231,11 @@ VectorT<Scalar> integrate_implicit_trapezoid_t(
   h = std::max(h, std::min(span, 1e-8));
   int attempts = 0;
   while (time < to) {
-    if (++attempts > control.max_steps) throw std::runtime_error("ADVAN13 exceeded ODE_CONTROL$max_steps.");
+    if (++attempts > control.max_steps) throw std::runtime_error("Implicit ADVAN solver exceeded ODE_CONTROL$max_steps.");
     h = std::min(h, to - time);
     const double minimum = 32.0 * std::numeric_limits<double>::epsilon() *
       std::max({1.0, std::abs(time), std::abs(to)});
-    if (h < minimum) throw std::runtime_error("ADVAN13 ODE step size underflow.");
+    if (h < minimum) throw std::runtime_error("Implicit ADVAN ODE step size underflow.");
     VectorT<Scalar> full, half, two_half;
     const bool converged = implicit_trapezoid_step_t(rhs, state, time, h, control, full) &&
       implicit_trapezoid_step_t(rhs, state, time, h * 0.5, control, half) &&
@@ -3117,8 +3418,31 @@ VectorT<Scalar> propagate_ode_to_t(
           throw std::runtime_error("DDE method-of-steps exceeded max_steps.");
         }
         const double remaining = scalar_value(segment_end - time);
-        const double h = std::min(engine.dde_step, remaining);
-        auto rhs = [&](const Scalar& stage_time, const VectorT<Scalar>& value) {
+        Scalar step_end = remaining <= engine.dde_step + 1e-12 ?
+          segment_end : time + Scalar(engine.dde_step);
+        bool ends_at_delayed_jump = false;
+        for (const auto& jump : dde_history->jumps) {
+          for (const std::string& delay_name : engine.dde_lag_delays) {
+            auto delay = parameters.find(delay_name);
+            if (delay == parameters.end()) continue;
+            const Scalar boundary = jump.time + delay->second;
+            if (path_gt(boundary, time + Scalar(1e-12)) &&
+                path_lt(boundary, step_end - Scalar(1e-12))) {
+              step_end = boundary;
+              ends_at_delayed_jump = true;
+            } else if (
+              path_gt(boundary, time + Scalar(1e-12)) &&
+              std::abs(scalar_value(boundary - step_end)) <= 1e-12
+            ) {
+              step_end = boundary;
+              ends_at_delayed_jump = true;
+            }
+          }
+        }
+        const Scalar h = step_end - time;
+        auto rhs = [&](const Scalar& stage_time,
+                       const VectorT<Scalar>& value,
+                       bool left_limit = false) {
           VectorT<Scalar> lag_values(static_cast<Eigen::Index>(engine.dde_lag_inputs.size()));
           for (std::size_t lag = 0; lag < engine.dde_lag_inputs.size(); ++lag) {
             auto delay = parameters.find(engine.dde_lag_delays[lag]);
@@ -3130,7 +3454,8 @@ VectorT<Scalar> propagate_ode_to_t(
                                       "' must be finite and at least the integration step.");
             }
             lag_values[static_cast<Eigen::Index>(lag)] = dde_history->at(
-              stage_time - delay->second, engine.dde_lag_states[lag]);
+              stage_time - delay->second, engine.dde_lag_states[lag],
+              left_limit);
           }
           VectorT<Scalar> derivative = evaluate_derivatives_t(
             engine, data, row, subject, stage_time, value, parameters,
@@ -3139,11 +3464,23 @@ VectorT<Scalar> propagate_ode_to_t(
           return derivative;
         };
         const VectorT<Scalar> k1 = rhs(time, state);
-        const VectorT<Scalar> k2 = rhs(time + Scalar(0.5 * h), state + Scalar(0.5 * h) * k1);
-        const VectorT<Scalar> k3 = rhs(time + Scalar(0.5 * h), state + Scalar(0.5 * h) * k2);
-        const VectorT<Scalar> k4 = rhs(time + Scalar(h), state + Scalar(h) * k3);
-        state += Scalar(h / 6.0) * (k1 + Scalar(2.0) * k2 + Scalar(2.0) * k3 + k4);
-        time += Scalar(h);
+        const VectorT<Scalar> k2 = rhs(
+          time + Scalar(0.5) * h, state + Scalar(0.5) * h * k1);
+        const VectorT<Scalar> k3 = rhs(
+          time + Scalar(0.5) * h, state + Scalar(0.5) * h * k2);
+        const VectorT<Scalar> k4 = rhs(
+          time + h, state + h * k3, ends_at_delayed_jump);
+        state += (h / Scalar(6.0)) *
+          (k1 + Scalar(2.0) * k2 + Scalar(2.0) * k3 + k4);
+        if (ends_at_delayed_jump &&
+            std::abs(scalar_value(step_end - segment_end)) <= 1e-12) {
+          const VectorT<Scalar> right_derivative = rhs(
+            step_end, state, false);
+          state -= (
+            step_end - Scalar(scalar_value(step_end))
+          ) * right_derivative;
+        }
+        time = step_end;
         dde_history->append(time, state);
       }
       cursor = segment_end;
@@ -3157,7 +3494,7 @@ VectorT<Scalar> propagate_ode_to_t(
       derivative += input;
       return derivative;
     };
-    state = engine.advan == 13 ?
+    state = implicit_ode_advan(engine.advan) ?
       integrate_implicit_interval_t(rhs, state, cursor, segment_end, engine.ode_control) :
       integrate_dopri54_interval_t(rhs, state, cursor, segment_end, engine.ode_control);
     cursor = segment_end;
@@ -3337,7 +3674,7 @@ std::vector<Scalar> simulate_analytical_t(
       previous_subject = structural_subject;
       if (engine.dde_enabled) dde_history.reset(Scalar(time[row]), state, engine.dde_history);
     }
-    if (have_previous) {
+    if (have_previous && !engine.direct_prediction) {
       if (time[row] < previous_time - 1e-12) throw std::domain_error("Subject event times decrease.");
       if (engine.is_ode()) {
         state = propagate_ode_to_t(
@@ -3357,7 +3694,11 @@ std::vector<Scalar> simulate_analytical_t(
       engine, data, row, subject, theta, eta, eta_columns, sigma,
       mixture_number, dynamic_data);
     TopologyT<Scalar> topology;
-    if (engine.is_ode()) {
+    if (engine.direct_prediction) {
+      topology.k = MatrixT<Scalar>::Zero(n_state, n_state);
+      topology.default_scales.assign(
+        static_cast<std::size_t>(n_state), Scalar(1.0));
+    } else if (engine.is_ode()) {
       topology.k = MatrixT<Scalar>::Zero(n_state, n_state);
       topology.default_scales.assign(static_cast<std::size_t>(n_state), Scalar(1.0));
     } else {
@@ -3371,7 +3712,7 @@ std::vector<Scalar> simulate_analytical_t(
       active.clear();
       if (engine.dde_enabled) dde_history.reset(Scalar(time[row]), state, engine.dde_history);
     }
-    const bool dosing = amount[row] > 0.0 &&
+    const bool dosing = !engine.direct_prediction && amount[row] > 0.0 &&
       (evid[row] == 1 || evid[row] == 4 || evid[row] == 0);
     if (dosing) {
       const int dose_cmt = cmt[row] > 0 ? cmt[row] : engine.dose_cmp;
@@ -3423,14 +3764,28 @@ std::vector<Scalar> simulate_analytical_t(
       }
       if (engine.dde_enabled) dde_history.append(Scalar(time[row]), state);
     }
-    const int observation_cmt = cmt[row] > 0 && evid[row] == 0 ? cmt[row] : engine.obs_cmp;
-    const int observation_index = compartment_index(
-      observation_cmt, topology.default_observation, n_state);
-    const Scalar scale = observation_scale_t(
-      parameters, data, row, observation_cmt, topology, dynamic_data);
     const auto direct_prediction = parameters.find("F");
-    prediction[static_cast<std::size_t>(row)] = direct_prediction == parameters.end() ?
-      state[observation_index] / scale : direct_prediction->second;
+    Scalar raw_prediction = Scalar(0.0);
+    if (engine.direct_prediction) {
+      if (direct_prediction == parameters.end()) {
+        throw std::domain_error("Direct $PRED evaluation did not produce F.");
+      }
+      raw_prediction = direct_prediction->second;
+    } else {
+      const int observation_cmt =
+        cmt[row] > 0 && evid[row] == 0 ? cmt[row] : engine.obs_cmp;
+      const int observation_index = compartment_index(
+        observation_cmt, topology.default_observation, n_state);
+      const Scalar scale = observation_scale_t(
+        parameters, data, row, observation_cmt, topology, dynamic_data);
+      raw_prediction =
+        direct_prediction == parameters.end() ?
+        state[observation_index] / scale : direct_prediction->second;
+    }
+    prediction[static_cast<std::size_t>(row)] = evaluate_post_prediction_t(
+      engine, data, row, subject, Scalar(time[row]), state, theta, eta,
+      eta_columns, sigma, mixture_number, raw_prediction, parameters,
+      dynamic_data);
     previous_k = topology.k;
     previous_parameters = std::move(parameters);
     previous_row = row;
@@ -3525,6 +3880,7 @@ std::vector<std::string> prediction_dynamic_columns(
   };
   append(engine.pred->input_names);
   if (engine.des) append(engine.des->input_names);
+  if (engine.post_pred) append(engine.post_pred->input_names);
   return columns;
 }
 
@@ -4481,9 +4837,33 @@ NonlinearStateOutputs<Scalar> nonlinear_state_outputs_t(
         engine, data, row, subject, theta, eta, eta_columns, sigma,
         mixture_number, prediction, false, previous_dv,
         previous_time + substep * step, current);
-      current += Scalar(step) * local.transition;
-      covariance += Scalar(step) * local.process_covariance *
+      MatrixT<Scalar> drift_jacobian = MatrixT<Scalar>::Zero(
+        engine.kalman_states, engine.kalman_states);
+      for (int column = 0; column < engine.kalman_states; ++column) {
+        const double delta = engine.kalman_jacobian_step *
+          std::max(1.0, std::abs(scalar_value(current[column])));
+        VectorT<Scalar> plus = current;
+        VectorT<Scalar> minus = current;
+        plus[column] += Scalar(delta);
+        minus[column] -= Scalar(delta);
+        const NonlinearStateOutputs<Scalar> upper = nonlinear_state_raw_outputs_t(
+          engine, data, row, subject, theta, eta, eta_columns, sigma,
+          mixture_number, prediction, false, previous_dv,
+          previous_time + substep * step, plus);
+        const NonlinearStateOutputs<Scalar> lower = nonlinear_state_raw_outputs_t(
+          engine, data, row, subject, theta, eta, eta_columns, sigma,
+          mixture_number, prediction, false, previous_dv,
+          previous_time + substep * step, minus);
+        drift_jacobian.col(column) =
+          (upper.transition - lower.transition) / Scalar(2.0 * delta);
+      }
+      const MatrixT<Scalar> evolution =
+        MatrixT<Scalar>::Identity(engine.kalman_states, engine.kalman_states) +
+        Scalar(step) * drift_jacobian;
+      covariance = evolution * covariance * evolution.transpose() +
+        Scalar(step) * local.process_covariance *
         local.process_covariance.transpose();
+      current += Scalar(step) * local.transition;
     }
   }
   result.transition = current;
@@ -6812,7 +7192,7 @@ class PopulationObjective {
       std::vector<double> current_point = objective_point(parameters, eta_eigen);
       Matrix hessian = objective_eta_hessian(
         *primary_[index], current_point, positions);
-      auto eigen = liberation::detail::self_adjoint_eigen(hessian, false);
+      auto eigen = libertad::detail::self_adjoint_eigen(hessian, false);
       if (eigen.info != Eigen::Success) return;
       const double largest = std::max(eigen.values.cwiseAbs().maxCoeff(), 1.0);
       const double jitter = std::max(0.0, largest * 1e-12 -
@@ -7133,7 +7513,7 @@ class PopulationObjective {
           eta_hessian = Matrix::Zero(0, 0);
         }
         if (n_eta_) {
-          auto eigen = liberation::detail::self_adjoint_eigen(eta_hessian, false);
+          auto eigen = libertad::detail::self_adjoint_eigen(eta_hessian, false);
           if (eigen.info != Eigen::Success) {
             throw std::runtime_error("Conditional ETA curvature decomposition failed.");
           }
@@ -7760,7 +8140,7 @@ Rcpp::List kalman_filter(
 Matrix covariance_sampling_root(const Matrix& covariance,
                                 const std::string& context) {
   const Matrix symmetric = 0.5 * (covariance + covariance.transpose()).eval();
-  auto eigen = liberation::detail::self_adjoint_eigen(symmetric, true);
+  auto eigen = libertad::detail::self_adjoint_eigen(symmetric, true);
   if (eigen.info != Eigen::Success) {
     throw std::runtime_error(context + " eigen decomposition failed.");
   }
@@ -8740,7 +9120,7 @@ Rcpp::List liberation_nested_population_gradient(
     }
     double jitter = 0.0;
     if (n_eta) {
-      auto eigen = liberation::detail::self_adjoint_eigen(eta_hessian, false);
+      auto eigen = libertad::detail::self_adjoint_eigen(eta_hessian, false);
       if (eigen.info != Eigen::Success) {
         Rcpp::stop("Conditional ETA curvature eigen decomposition failed.");
       }

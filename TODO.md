@@ -116,7 +116,12 @@ retains an unchecked parent item with completed sub-items checked.
 
 ## 9. Validation and benchmark matrix - partial
 
-- [x] ~~Compare predictions with NONMEM for ADVAN1/2/3/4/11/12/6/13.~~
+- [x] ~~Implement the ADVAN1-14 model surface and GUI templates.~~
+- [x] ~~Compare predictions with NONMEM 7.3 for ADVAN1-13, including
+  ADVAN5/7 general linear, ADVAN8/9 stiff, ADVAN9 equilibrium DAE, and
+  ADVAN10 Michaelis--Menten fixtures.~~
+- [ ] Compare ADVAN14 predictions with NONMEM >=7.4; the installed NONMEM 7.3
+  reports ADVAN14 as an unknown subroutine.
 - [x] ~~Validate bolus, infusion, steady state, and modelled infusion
   rate/duration.~~
 - [x] ~~Measure paired core and end-to-end NONMEM/LibeRation times.~~
@@ -126,6 +131,15 @@ retains an unchecked parent item with completed sub-items checked.
   subject counts.~~
 - [x] ~~Unit-test BLQ, mixtures, IOV, priors, correlated OMEGA, covariates, and
   residual-error variants.~~
+- [x] ~~Add independent-reference validation campaigns for non-PK likelihood,
+  Markov/HMM/state-space, SDE, DDE, nonlinear DAE, QSP, and offline hybrid
+  model contracts.~~
+- [x] ~~Extend the experimental-family campaign to named
+  multiplicative/nonlinear SDEs, particle convergence, event-sensitive DDE
+  delays, stiff and larger DDE/DAE/QSP fixtures, compact QSP recovery, and
+  hybrid numerical/immutability edges.~~
+- [ ] Add broad simulation-estimation coverage studies and scaling campaigns
+  over substantially larger state, parameter, subject, and event dimensions.
 - [ ] Extend paired NONMEM timing scenarios to ADVAN4/12, BLQ, mixtures,
   covariates, combined error, and time-varying covariates.
 - [ ] Add a scenario-specific NONMEM control stream for paired IOV timing.

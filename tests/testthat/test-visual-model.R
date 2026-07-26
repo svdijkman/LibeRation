@@ -64,3 +64,29 @@ test_that("nonlinear and custom flows share the diagram code path", {
   expect_match(preview$DES, "KIN * (1 - IMAX * (A(1) / V)", fixed = TRUE)
   expect_s3_class(nm_compile(nm_diagram_generate(diagram)), "NMEngine")
 })
+
+test_that("visual diagrams can target every general ODE ADVAN", {
+  for (advan in c(6L, 8L, 9L, 13L, 14L)) {
+    diagram <- nm_model_diagram(
+      compartments = data.frame(
+        id = 1L, name = "CENTRAL", kind = "amount",
+        volume_parameter = "V", scale_parameter = "V",
+        dose = TRUE, observe = TRUE, x = 100, y = 100
+      ),
+      flows = data.frame(
+        id = "elimination", from = 1L, to = 0L, type = "clearance",
+        parameter = "CL", secondary_parameter = "", expression = "",
+        label = "Elimination"
+      ),
+      parameters = data.frame(
+        name = c("V", "CL"), initial = c(20, 2),
+        lower = NA_real_, upper = NA_real_, fixed = FALSE,
+        iiv = TRUE, eta_variance = .1
+      ),
+      advan = advan
+    )
+    model <- nm_diagram_generate(diagram)
+    expect_equal(model$ADVAN, advan)
+    expect_s3_class(model, "nm_model")
+  }
+})

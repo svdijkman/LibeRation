@@ -1,0 +1,36 @@
+:root {
+  --liber-font-sans: "Segoe UI", Arial, sans-serif;
+  --liber-font-mono: Consolas, "SFMono-Regular", monospace;
+  --liber-radius-control: 7px;
+  --liber-radius-panel: 10px;
+  --liber-danger: #b33f49;
+  --liber-danger-strong: #922f38;
+  --liber-focus: #2f78c4;
+  --liber-message-height: 32px;
+  --liber-header-height: 58px;
+}
+
+/*
+ * Shiny marks outputs as recalculating before their replacement is ready.
+ * Keep existing content fully visible while background and lazy updates run.
+ */
+.shiny-bound-output.recalculating {
+  opacity: 1 !important;
+}
+
+:where(button, a, input, select, textarea, [tabindex]):focus-visible {
+  outline: 2px solid var(--liber-focus);
+  outline-offset: 2px;
+}
+
+.liber-sr-only {
+  position: absolute !important;
+  width: 1px !important;
+  height: 1px !important;
+  padding: 0 !important;
+  margin: -1px !important;
+  overflow: hidden !important;
+  clip: rect(0, 0, 0, 0) !important;
+  white-space: nowrap !important;
+  border: 0 !important;
+}

@@ -156,6 +156,64 @@
   .nm_control_body(selected[[1L]])
 }
 
+.nm_control_program <- function(sections, name) {
+  section <- .nm_control_first_section(sections, name)
+  if (is.null(section)) return(character())
+  lines <- c(section$header, section$lines)
+  lines <- lines[!grepl("^\\s*;", lines)]
+  trimws(lines[nzchar(trimws(lines))])
+}
+
+.nm_control_first_section <- function(sections, name) {
+  selected <- Filter(function(section) identical(section$name, name), sections)
+  if (!length(selected)) NULL else selected[[1L]]
+}
+
+.nm_control_marked_block <- function(section, begin, end) {
+  if (is.null(section)) return(NULL)
+  lines <- c(section$header, section$lines)
+  upper <- toupper(trimws(lines))
+  first <- match(toupper(begin), upper)
+  last <- match(toupper(end), upper)
+  if (is.na(first) || is.na(last) || last <= first) return(NULL)
+  trimws(lines[seq.int(first + 1L, last - 1L)])
+}
+
+.nm_control_split_monolithic_pred <- function(code) {
+  statements <- trimws(unlist(
+    strsplit(paste(code, collapse = "\n"), "[;\r\n]+", perl = TRUE),
+    use.names = FALSE
+  ))
+  statements <- statements[nzchar(statements)]
+  if (!length(statements)) return(list(pred = "", error = ""))
+  assignment <- regexec(
+    "^\\s*([A-Za-z.][A-Za-z0-9_.]*)\\s*=", statements, perl = TRUE
+  )
+  lhs <- vapply(regmatches(statements, assignment), function(value) {
+    if (length(value) >= 2L) toupper(value[[2L]]) else ""
+  }, character(1))
+  residual <- lhs %in% c("Y", "LIK", "LOGLIK") |
+    grepl("\\b(?:EPS|ERR)\\s*\\(", statements, ignore.case = TRUE, perl = TRUE)
+  repeat {
+    residual_names <- lhs[residual & nzchar(lhs)]
+    dependent <- if (length(residual_names)) {
+      vapply(statements, function(statement) {
+        any(vapply(residual_names, function(name) {
+          grepl(paste0("\\b", name, "\\b"), sub("^[^=]*=", "", statement),
+                ignore.case = TRUE, perl = TRUE)
+        }, logical(1)))
+      }, logical(1))
+    } else rep(FALSE, length(statements))
+    next_residual <- residual | dependent
+    if (identical(next_residual, residual)) break
+    residual <- next_residual
+  }
+  list(
+    pred = paste(statements[!residual], collapse = "\n"),
+    error = paste(statements[residual], collapse = "\n")
+  )
+}
+
 .nm_control_table_columns <- function(sections) {
   tables <- Filter(function(section) identical(section$name, "TABLE"), sections)
   if (!length(tables)) return(character())
@@ -186,6 +244,62 @@
     )
   }
   code
+}
+
+.nm_control_general_linear_graph <- function(model_record, pred, advan) {
+  text <- paste(model_record, collapse = "\n")
+  matches <- regmatches(
+    text,
+    gregexpr("(?i)\\bCOMP(?:ARTMENT)?\\s*=\\s*\\([^)]*\\)", text, perl = TRUE)
+  )[[1L]]
+  if (!length(matches)) {
+    .nm_stop("ADVAN", advan, " import requires explicit COMP declarations in $MODEL.")
+  }
+  bodies <- sub("^[^(]*\\((.*)\\)$", "\\1", matches, perl = TRUE)
+  attributes <- lapply(bodies, function(value) {
+    trimws(strsplit(value, ",", fixed = TRUE)[[1L]])
+  })
+  compartment_names <- vapply(attributes, function(value) {
+    name <- gsub("^['\"]|['\"]$", "", value[[1L]])
+    if (!nzchar(name)) "COMPARTMENT" else toupper(name)
+  }, character(1))
+  compartment_names <- make.unique(compartment_names, sep = "_")
+  n_compartments <- length(compartment_names)
+  assignment_matches <- regmatches(
+    pred,
+    gregexpr("(?im)^\\s*K[0-9]+\\s*(?==)", pred, perl = TRUE)
+  )[[1L]]
+  assigned <- unique(toupper(trimws(assignment_matches)))
+  candidates <- do.call(rbind, lapply(seq_len(n_compartments), function(from) {
+    destinations <- setdiff(0:n_compartments, from)
+    data.frame(
+      from = from, to = destinations, type = "rate",
+      parameter = paste0("K", from, destinations),
+      stringsAsFactors = FALSE
+    )
+  }))
+  flows <- candidates[candidates$parameter %in% assigned, , drop = FALSE]
+  if (!nrow(flows)) {
+    .nm_stop(
+      "ADVAN", advan, " import could not infer any Kmn/Km0 rate assignments ",
+      "from $PK."
+    )
+  }
+  compartments <- data.frame(
+    id = seq_len(n_compartments), name = compartment_names,
+    volume_parameter = "", scale_parameter = "",
+    stringsAsFactors = FALSE
+  )
+  graph <- nm_matrix_model(compartments, flows)
+  flags <- lapply(attributes, function(value) toupper(value[-1L]))
+  dose <- which(vapply(flags, function(value) "DEFDOSE" %in% value, logical(1)))
+  observe <- which(vapply(flags, function(value) "DEFOBSERVATION" %in% value ||
+                           "DEFOBS" %in% value, logical(1)))
+  list(
+    graph = graph,
+    dose = if (length(dose)) dose[[1L]] else 1L,
+    observe = if (length(observe)) observe[[1L]] else 1L
+  )
 }
 
 #' Read and translate a NONMEM control stream
@@ -222,7 +336,7 @@ nm_control_read <- function(x, strict = TRUE) {
   trans_parts <- regmatches(subroutines, trans_match)[[1L]]
   advan <- if (length(advan_parts)) as.integer(advan_parts[[2L]]) else 2L
   trans <- if (length(trans_parts)) as.integer(trans_parts[[2L]]) else 2L
-  if (!advan %in% c(1L, 2L, 3L, 4L, 6L, 11L, 12L, 13L)) {
+  if (!advan %in% 1:14) {
     .nm_stop("The control stream requests unsupported ADVAN", advan, ".")
   }
   input <- .nm_control_input(sections)
@@ -233,10 +347,64 @@ nm_control_read <- function(x, strict = TRUE) {
   if (!nrow(theta)) .nm_stop("The control stream does not define $THETA values.")
   omega_result <- .nm_control_omega(sections)
   sigma <- .nm_control_parameter_table(.nm_control_parameter_records(sections, "SIGMA"), "SIGMA")
-  pred <- c(.nm_control_first(sections, "PK"), .nm_control_first(sections, "PRED"))
-  pred <- .nm_control_math_functions(paste(pred, collapse = "\n"))
-  des <- .nm_control_math_functions(paste(.nm_control_first(sections, "DES"), collapse = "\n"))
-  error <- .nm_control_math_functions(paste(.nm_control_first(sections, "ERROR"), collapse = "\n"))
+  pk_section <- .nm_control_first_section(sections, "PK")
+  pred_section <- .nm_control_first_section(sections, "PRED")
+  error_section <- .nm_control_first_section(sections, "ERROR")
+  pk_source <- .nm_control_math_functions(
+    paste(.nm_control_program(sections, "PK"), collapse = "\n")
+  )
+  direct_marked <- .nm_control_marked_block(
+    pred_section, "; LIBERATION_DIRECT_PRED_BEGIN",
+    "; LIBERATION_DIRECT_PRED_END"
+  )
+  residual_marked <- .nm_control_marked_block(
+    pred_section, "; LIBERATION_ERROR_BEGIN", "; LIBERATION_ERROR_END"
+  )
+  post_marked <- .nm_control_marked_block(
+    error_section, "; LIBERATION_POST_PRED_BEGIN",
+    "; LIBERATION_POST_PRED_END"
+  )
+  direct_source <- .nm_control_math_functions(paste(
+    direct_marked %||% .nm_control_program(sections, "PRED"),
+    collapse = "\n"
+  ))
+  if (is.null(direct_marked) && is.null(error_section) && is.null(post_marked) &&
+      nzchar(trimws(direct_source))) {
+    split_pred <- .nm_control_split_monolithic_pred(direct_source)
+    direct_source <- split_pred$pred
+    if (nzchar(trimws(split_pred$error))) {
+      residual_marked <- strsplit(split_pred$error, "\n", fixed = TRUE)[[1L]]
+    }
+  }
+  if (!is.null(post_marked)) {
+    post_marked <- post_marked[
+      !grepl("^\\s*F_ADVAN\\s*=\\s*F\\s*$", post_marked, ignore.case = TRUE)
+    ]
+    direct_source <- .nm_control_math_functions(paste(post_marked, collapse = "\n"))
+  }
+  has_pk <- nzchar(trimws(pk_source))
+  has_direct <- nzchar(trimws(direct_source))
+  pred_mode <- if (has_pk && (has_direct || !is.null(post_marked))) {
+    "pk_pred"
+  } else if (has_direct) {
+    "pred"
+  } else {
+    "pk"
+  }
+  pred <- if (identical(pred_mode, "pred")) direct_source else pk_source
+  des <- .nm_control_math_functions(paste(.nm_control_program(sections, "DES"), collapse = "\n"))
+  error_lines <- if (!is.null(residual_marked)) {
+    residual_marked
+  } else if (!is.null(post_marked)) {
+    raw <- c(error_section$header, error_section$lines)
+    upper <- toupper(trimws(raw))
+    finish <- match("; LIBERATION_POST_PRED_END", upper)
+    if (is.na(finish) || finish >= length(raw)) character() else
+      raw[seq.int(finish + 1L, length(raw))]
+  } else {
+    .nm_control_program(sections, "ERROR")
+  }
+  error <- .nm_control_math_functions(paste(error_lines, collapse = "\n"))
   error <- gsub("\\bEPS\\s*\\(", "ERR(", error, ignore.case = TRUE, perl = TRUE)
   error <- gsub("\\.EQ\\.", "==", error, ignore.case = TRUE, perl = TRUE)
   error <- gsub("\\.NE\\.", "!=", error, ignore.case = TRUE, perl = TRUE)
@@ -249,22 +417,50 @@ nm_control_read <- function(x, strict = TRUE) {
   covariates <- setdiff(input, c("ID", "TIME", "EVID", "AMT", "RATE", "II", "SS",
                                   "CMT", "DV", "MDV", "CENS", "LLOQ", "DVID"))
   obs_cmp <- if (advan %in% c(2L, 4L, 12L)) 2L else 1L
+  dose_cmp <- 1L
+  graph <- NULL
+  if (advan %in% c(5L, 7L)) {
+    general_linear <- .nm_control_general_linear_graph(
+      .nm_control_first(sections, "MODEL"), pk_source, advan
+    )
+    graph <- general_linear$graph
+    dose_cmp <- general_linear$dose
+    obs_cmp <- general_linear$observe
+  }
   warnings <- omega_result$warnings
+  if (has_pk && has_direct && is.null(post_marked)) {
+    warnings <- c(
+      warnings,
+      "Both $PK and $PRED were imported as LibeRation's post-ADVAN prediction extension; standard NONMEM normally treats these model-definition routes as alternatives."
+    )
+  }
   estimation <- paste(.nm_control_first(sections, "ESTIMATION"), collapse = " ")
   user_likelihood <- grepl("\\b(?:LIKE|LIKELIHOOD)\\b", estimation,
                            ignore.case = TRUE, perl = TRUE)
-  if (grepl("\\bIF\\s*\\(", paste(pred, des, error), ignore.case = TRUE)) {
+  if (grepl("\\bIF\\s*\\(", paste(pred, direct_source, des, error),
+            ignore.case = TRUE)) {
     warnings <- c(warnings, "Runtime IF statements require manual conversion to tape-safe ifelse().")
   }
   arguments <- list(
     INPUT = unique(c(input, "ID", "TIME", "EVID", "AMT", "RATE", "II", "SS", "CMT", "DV", "MDV")),
-    ADVAN = advan, TRANS = trans, OBSCMP = obs_cmp, PRED = pred, ERROR = error,
+    ADVAN = advan, TRANS = trans, DOSECMP = dose_cmp, OBSCMP = obs_cmp,
+    PRED = pred, PRED_MODE = pred_mode, PK_SOURCE = pk_source,
+    PRED_SOURCE = direct_source, ERROR = error,
     DES = des, THETAS = theta, OMEGAS = omega_result$table, SIGMAS = sigma,
-    COVARIATES = covariates,
+    COVARIATES = covariates, GRAPH = graph,
     LIK_CONFIG = if (user_likelihood) nm_lik_config(error = "likelihood") else NULL
   )
   model_error <- NULL
-  model <- tryCatch({
+  equilibrium_records <- intersect(
+    unique(names_present), c("AES", "AESINITIAL", "AES0")
+  )
+  if (advan == 9L && length(equilibrium_records)) {
+    model_error <- paste0(
+      "ADVAN9 $AES/$AESINITIAL blocks are preserved but require explicit ",
+      "translation to LibeRation ALG and DAE_CONFIG declarations."
+    )
+  }
+  model <- if (!is.null(model_error)) NULL else tryCatch({
     translated <- do.call(nm_model, arguments)
     requested <- table_columns[!toupper(table_columns) %in% toupper(input)]
     if (length(requested)) {
@@ -341,6 +537,39 @@ nm_control_read <- function(x, strict = TRUE) {
   }, character(1))
 }
 
+.nm_control_matrix_model_record <- function(model) {
+  if (!model$ADVAN %in% c(5L, 7L) ||
+      !inherits(model$GRAPH, "nm_matrix_model")) return("")
+  compartments <- model$GRAPH$compartments
+  used <- character()
+  nonmem_names <- vapply(seq_len(nrow(compartments)), function(index) {
+    base <- toupper(gsub("[^A-Za-z0-9_]", "", compartments$name[[index]]))
+    if (!nzchar(base)) base <- paste0("COMP", index)
+    candidate <- substr(base, 1L, 8L)
+    suffix <- 1L
+    while (candidate %in% used) {
+      ending <- as.character(suffix)
+      candidate <- paste0(
+        substr(base, 1L, max(1L, 8L - nchar(ending))), ending
+      )
+      suffix <- suffix + 1L
+    }
+    used <<- c(used, candidate)
+    candidate
+  }, character(1))
+  paste(vapply(seq_len(nrow(compartments)), function(index) {
+    flags <- c(
+      if (compartments$id[[index]] == model$DOSECMP) "DEFDOSE",
+      if (compartments$id[[index]] == model$OBSCMP) "DEFOBSERVATION"
+    )
+    paste0(
+      "COMP=(", nonmem_names[[index]],
+      if (length(flags)) paste0(",", paste(flags, collapse = ",")) else "",
+      ")"
+    )
+  }, character(1)), collapse = "\n")
+}
+
 #' Write a NONMEM control stream
 #'
 #' @param x An `nm_model`, `NMEngine`, or object returned by
@@ -375,17 +604,22 @@ nm_control_write <- function(x, file = NULL, data = NULL,
   problem <- metadata$problem %||% attr(model, "name", exact = TRUE) %||% "LibeRation model"
   input_record <- metadata$input_record %||% paste(model$INPUT, collapse = " ")
   if (is.null(data)) data <- metadata$data_record %||% metadata$data_path %||% "data.csv"
+  pred_mode <- model$PRED_MODE %||% "pk"
   lines <- c(
     paste("$PROBLEM", problem),
     paste("$INPUT", input_record),
-    paste("$DATA", data),
-    paste0("$SUBROUTINES ADVAN", model$ADVAN, " TRANS", model$TRANS)
+    paste("$DATA", data)
   )
-  if (nzchar(trimws(metadata$model_record %||% ""))) {
-    lines <- c(lines, "$MODEL", paste0("  ", strsplit(metadata$model_record, "\n", fixed = TRUE)[[1L]]))
+  if (!identical(pred_mode, "pred")) {
+    lines <- c(
+      lines,
+      paste0("$SUBROUTINES ADVAN", model$ADVAN, " TRANS", model$TRANS)
+    )
   }
-  lines <- c(lines, "$PK", paste0("  ", strsplit(model$PRED, "\n", fixed = TRUE)[[1L]]))
-  if (nzchar(trimws(model$DES))) lines <- c(lines, "$DES", paste0("  ", strsplit(model$DES, "\n", fixed = TRUE)[[1L]]))
+  model_record <- metadata$model_record %||% .nm_control_matrix_model_record(model)
+  if (!identical(pred_mode, "pred") && nzchar(trimws(model_record))) {
+    lines <- c(lines, "$MODEL", paste0("  ", strsplit(model_record, "\n", fixed = TRUE)[[1L]]))
+  }
   nonmem_error <- gsub("\\bERR\\s*\\(", "EPS(", model$ERROR,
                        ignore.case = TRUE, perl = TRUE)
   if (identical(model$LIK_CONFIG$error, "likelihood")) {
@@ -395,8 +629,48 @@ nm_control_write <- function(x, file = NULL, data = NULL,
       nonmem_error <- paste(nonmem_error, "Y = exp(LOGLIK)", sep = "\n")
     }
   }
-  lines <- c(lines, "$ERROR", paste0("  ", strsplit(nonmem_error, "\n", fixed = TRUE)[[1L]]),
-             "$THETA", paste0("  ", .nm_control_write_parameter(model$THETAS, "THETA")))
+  if (identical(pred_mode, "pred")) {
+    direct_source <- model$PRED_SOURCE %||% model$PRED
+    lines <- c(
+      lines, "$PRED",
+      "  ; LIBERATION_DIRECT_PRED_BEGIN",
+      paste0("  ", strsplit(direct_source, "\n", fixed = TRUE)[[1L]]),
+      "  ; LIBERATION_DIRECT_PRED_END",
+      "  ; LIBERATION_ERROR_BEGIN",
+      paste0("  ", strsplit(nonmem_error, "\n", fixed = TRUE)[[1L]]),
+      "  ; LIBERATION_ERROR_END"
+    )
+  } else {
+    pk_source <- model$PK_SOURCE %||% model$PRED
+    lines <- c(
+      lines, "$PK",
+      paste0("  ", strsplit(pk_source, "\n", fixed = TRUE)[[1L]])
+    )
+    if (nzchar(trimws(model$DES))) {
+      lines <- c(
+        lines, "$DES",
+        paste0("  ", strsplit(model$DES, "\n", fixed = TRUE)[[1L]])
+      )
+    }
+    if (identical(pred_mode, "pk_pred")) {
+      post_source <- model$PRED_SOURCE %||% ""
+      lines <- c(
+        lines, "$ERROR",
+        "  ; LIBERATION_POST_PRED_BEGIN",
+        "  F_ADVAN = F",
+        paste0("  ", strsplit(post_source, "\n", fixed = TRUE)[[1L]]),
+        "  ; LIBERATION_POST_PRED_END",
+        paste0("  ", strsplit(nonmem_error, "\n", fixed = TRUE)[[1L]])
+      )
+    } else {
+      lines <- c(
+        lines, "$ERROR",
+        paste0("  ", strsplit(nonmem_error, "\n", fixed = TRUE)[[1L]])
+      )
+    }
+  }
+  lines <- c(lines, "$THETA",
+             paste0("  ", .nm_control_write_parameter(model$THETAS, "THETA")))
   omega <- model$OMEGAS
   if (nrow(omega)) {
     correlated <- any(omega$ROW != omega$COL)

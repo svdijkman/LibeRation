@@ -11,8 +11,10 @@ test_that("support declarations include an evidence tier", {
   support <- nm_support_matrix()
   expect_true(all(c("status", "validation", "recommended_use") %in% names(support)))
   externally_checked <- c(
-    "ADVAN1", "ADVAN2", "ADVAN3", "ADVAN4", "ADVAN11", "ADVAN12",
-    "ADVAN6", "ADVAN13", "steady-state bolus", "steady-state infusion",
+    "ADVAN1", "ADVAN2", "ADVAN3", "ADVAN4", "ADVAN5", "ADVAN6",
+    "ADVAN7", "ADVAN8", "ADVAN9", "ADVAN10", "ADVAN11", "ADVAN12",
+    "ADVAN13",
+    "steady-state bolus", "steady-state infusion",
     "FO", "FOCEI"
   )
   expect_true(all(support$validation[match(externally_checked, support$feature)] ==

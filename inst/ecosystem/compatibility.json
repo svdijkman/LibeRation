@@ -1,9 +1,9 @@
 {
   "schema": "liber.ecosystem/1",
-  "release": "0.9.0-research-beta.3",
+  "release": "0.9.0-research-beta.4",
   "packages": {
     "LibeRtAD": {"version": "0.7.9", "required": true},
-    "LibeRation": {"version": "0.9.2", "required": true},
+    "LibeRation": {"version": "0.9.3", "required": true},
     "LibeRary": {"version": "0.7.5", "required": false},
     "LibeRator": {"version": "0.2.6", "required": false},
     "LibeRality": {"version": "0.2.4", "required": false},

@@ -11,8 +11,10 @@ LibeRation 0.9 is a research beta. Install the exact
 use `liber_support_matrix("LibeRation")` to distinguish externally validated,
 internally verified, and experimental workflows.
 
-Implemented model paths include ADVAN1-4/11/12, ADVAN6, ADVAN13, arbitrary
-linear matrix propagation, infusions, analytical and nonlinear periodic
+Implemented model paths include ADVAN1-14: analytical compartment kernels,
+arbitrary linear matrix propagation (ADVAN5/7), explicit and stiff general
+ODEs (ADVAN6/8/9/13/14), Michaelis--Menten elimination (ADVAN10), and
+equilibrium DAE constraints (ADVAN9), plus infusions and analytical/nonlinear periodic
 steady state, correlated OMEGA, IOV, priors, mixtures, BLQ likelihoods,
 compiled user-defined likelihoods plus declarative continuous, categorical,
 ordinal/IRT, count, event-time, recurrent-event, competing-risk, observed
@@ -33,18 +35,34 @@ include covariance, GOF/CWRES, family-specific outcome residuals/scores,
 VPC/NPDE/NPC, multicategory, count, time-to-event, recurrent-event, and
 competing-risk VPCs, bootstrap, profile likelihood, and SCM.
 
-The React workbench includes an explicit visual ADVAN6/13 model builder for
+The model editor exposes three definition routes:
+
+- **ADVAN/PREDPP (`$PK`)** for the conventional compartment workflow.
+- **Direct prediction (`$PRED`)** for row-wise models that assign `F` without
+  dose-event propagation.
+- **ADVAN + prediction layer (`$PK + $PRED`)**, a LibeRation extension in
+  which `$PK` and ADVAN/`$DES` run first and a post-ADVAN `$PRED` transforms
+  `F_ADVAN`, `A(i)`, model assignments, and row covariates into the final `F`.
+
+All three routes remain inside the C++/CppAD objective. `$ERROR` continues to
+define residual variability or a user likelihood. The combined route can be
+exported to NONMEM by folding its marked prediction layer into `$ERROR`;
+the marker lets LibeRation recover the two editable sources on re-import.
+
+The React workbench includes an explicit visual general-ODE model builder for
 linear and nonlinear compartment systems. It generates previewable
-`$PK/$PRED` and `$DES` code with log-normal ETA scaffolding while retaining the
+`$PK` and `$DES` code with log-normal ETA scaffolding while retaining the
 normal editable code windows. A separate drag-and-drop report workflow renders
 DOCX/PDF from user text, selected immutable model runs, comparisons, and saved
 diagnostics. Fitted hidden Markov models gain a lazy HMM results tab with
 filtered, retrospectively smoothed, Viterbi, and combined probability/path
 views by subject, sequence, and hidden state. State-space models gain a lazy
 States tab with filter/smoother trajectories, uncertainty bands, innovations,
-and likelihood contributions. Optional modelling help and report drafting use a consented,
-lazy-loaded WebGPU language model in a dedicated browser worker; inference is
-local and the worker's network APIs are disabled after its weights load.
+and likelihood contributions. Optional modelling help and report drafting use
+either a consented, lazy-loaded WebLLM model in a dedicated browser worker or
+an installed Ollama model streamed asynchronously through `ellmer`. Both are
+local-only: Ollama is loopback-restricted and unavailable to hosted or remote
+browser sessions.
 
 Advanced nonlinear model starts are available with `nm_model_template()` for
 nonlinear elimination, transit/dual absorption, parent-metabolite,
@@ -88,6 +106,30 @@ and retain divergence, acceptance, R-hat, and effective-sample-size
 diagnostics. `method = "NPML"` estimates weights on a fixed ETA support;
 `method = "NPAG"` expands and prunes the support grid. Bootstrap is the
 recommended uncertainty procedure for the nonparametric methods.
+
+## Validation
+
+Validation is not limited to continuous PK models. The standalone
+[`validation/nonpk`](../validation/nonpk/README.md) campaign checks normalized
+categorical/count and event-time likelihoods, observed Markov/CTMC models,
+exact HMM/CT-HMM likelihood and decoding, and linear Gaussian state-space
+inference against independent mathematical references. Bernoulli, interval-TTE,
+and observed Markov likelihoods are additionally compared row-for-row and by
+total objective with generated NONMEM 7.3 `LIKELIHOOD` fixtures.
+
+The separate
+[`validation/experimental-families`](../validation/experimental-families/README.md)
+campaign checks canonical SDE filtering/simulation, smooth-history DDE
+method-of-steps and delay sensitivities, nonlinear index-1 DAE constraints,
+QSP reaction conservation, and immutable hybrid components against independent
+analytic, convergence, finite-difference, metamorphic, and Monte Carlo
+references. These remain experimental research interfaces; the validated
+claims apply to the named canonical contracts, not every nonlinear system.
+The companion
+[`validation/edge-families`](../validation/edge-families/README.md) campaign
+adds multiplicative/nonlinear SDE simulation, particle convergence,
+delayed-dose discontinuities, stiff and larger DDE/DAE/QSP fixtures, compact
+QSP recovery, and hybrid numerical/immutability edge cases.
 
 Install LibeRtAD first, then install LibeRation with R 4.1 or newer and a
 C++17 toolchain. Install LibeRties as well to enable persistent local and

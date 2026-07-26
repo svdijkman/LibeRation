@@ -30,9 +30,12 @@ nm_model(
   DAE_CONFIG = NULL,
   RE_CONFIG = NULL,
   COMPONENTS = NULL,
+  PRED_MODE = c("pk", "pred", "pk_pred"),
+  PK_SOURCE = NULL,
+  PRED_SOURCE = NULL,
   EXPERIMENTAL = NULL,
   OUTCOMES = NULL,
-  SOLVER = c("auto", "advan", "matrix", "ode", "dde", "dae"),
+  SOLVER = c("auto", "advan", "matrix", "ode", "dde", "dae", "direct"),
   ERROR_TYPE = c("auto", "none", "additive", "proportional", "combined", "exponential",
     "power", "likelihood"),
   GRAPH = NULL,
@@ -57,7 +60,9 @@ from `$PK/$PRED` assignments and combined with standard engine outputs; see
 
 \item{OBSCMP}{Default observation compartment.}
 
-\item{PRED}{Parameter/model assignment code.}
+\item{PRED}{Backward-compatible active model-assignment source. For new
+code, use `PK_SOURCE` and/or `PRED_SOURCE` with `PRED_MODE` to make the
+intended route explicit.}
 
 \item{ERROR}{Residual-error or user-likelihood assignment code. With
 `LIK_CONFIG = nm_lik_config(error = "likelihood")`, assign either `LIK`
@@ -66,7 +71,9 @@ compiled block may use `DV`, `F`/`PRED`/`IPRED`, model assignments,
 parameters, numeric input columns, and the Markov helpers `PREV_DV`,
 `PREV_TIME`, `DT`, and `FIRST`.}
 
-\item{DES}{ODE derivative code for ADVAN6/13.}
+\item{DES}{ODE derivative code for ADVAN6/8/9/13/14. ADVAN10 supplies its
+standard Michaelis--Menten equation automatically from `VM` and `KM`
+assignments in `PRED`.}
 
 \item{ALG}{Algebraic residual equations for an experimental index-1 DAE.}
 
@@ -77,8 +84,9 @@ parameters, numeric input columns, and the Markov helpers `PREV_DV`,
 \item{USE_ODE}{Whether an ODE solver is explicitly requested.}
 
 \item{ODE_CONTROL}{Named list with `rtol`, `atol`, `max_steps`, and optional
-`initial_step`. ADVAN6 uses adaptive Dormand-Prince 5(4); ADVAN13 uses an
-A-stable adaptive implicit trapezoidal method.}
+`initial_step`. ADVAN6 and ADVAN10 use adaptive Dormand-Prince 5(4).
+ADVAN8/9/13/14 use an A-stable adaptive implicit trapezoidal method;
+ADVAN9 additionally accepts equilibrium constraints through `ALG`.}
 
 \item{IOV}{Number of trailing inter-occasion ETAs.}
 
@@ -109,6 +117,18 @@ components are evaluated as independent conditional-likelihood units.}
 declarations expanded into compiled `$PK/$PRED` or `$DES` IR according
 to each component's scope.}
 
+\item{PRED_MODE}{Model-definition route. `"pk"` uses `PRED` as a
+PREDPP/ADVAN-style `$PK` block; `"pred"` uses it as a row-wise direct
+`$PRED` block; `"pk_pred"` runs `$PK`, ADVAN/`$DES`, and then a
+LibeRation post-ADVAN `$PRED` layer. Direct and post-ADVAN prediction
+code must assign `F`; the latter can read the raw ADVAN prediction as
+`F_ADVAN`. LibeRation keeps residual or likelihood code in `ERROR`.}
+
+\item{PK_SOURCE, PRED_SOURCE}{Optional retained editor sources for the `$PK`
+and direct `$PRED` routes. They allow the GUI to switch routes without
+discarding either draft. `PRED` remains the active source for backward
+compatibility.}
+
 \item{EXPERIMENTAL}{Explicit experimental-engine acknowledgement and policy.}
 
 \item{OUTCOMES}{Optional first-class observation declaration created by
@@ -116,7 +136,8 @@ to each component's scope.}
 generates an editable normalized likelihood block. The declaration is
 also used for stochastic outcome simulation and family diagnostics.}
 
-\item{SOLVER}{`auto`, `advan`, `matrix`, `ode`, `dde`, or `dae`.}
+\item{SOLVER}{`auto`, `advan`, `matrix`, `ode`, `dde`, `dae`, or the
+automatically selected `direct` route for `PRED_MODE = "pred"`.}
 
 \item{ERROR_TYPE}{Standard residual-error form, or `auto`.}
 
@@ -130,9 +151,9 @@ also used for stochastic outcome simulation and family diagnostics.}
 A serializable `nm_model`.
 }
 \description{
-The established LibeRation `PRED` and `ERROR` strings are retained. They are
-compiled to C++ expression IR; they are not evaluated inside the numerical
-loop by R.
+`$PK`, direct `$PRED`, and the combined post-ADVAN prediction route are
+compiled to C++ expression IR; no model program is evaluated by R inside
+the numerical loop.
 }
 \examples{
 model <- nm_model(

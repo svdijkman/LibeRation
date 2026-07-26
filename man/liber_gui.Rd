@@ -11,6 +11,7 @@ liber_gui(
   workspace = NULL,
   project = NULL,
   session_workspace = FALSE,
+  allow_ollama = NULL,
   launch.browser = getOption("shiny.launch.browser", interactive()),
   ...
 )
@@ -33,6 +34,11 @@ workspace when LibeRties is installed. Use `FALSE` for in-process work.}
 \item{session_workspace}{Create a separate ephemeral workspace beneath
 `workspace` for every browser session. This is intended for hosted
 demonstrations where application users must not share project files.}
+
+\item{allow_ollama}{Whether the loopback-only Ollama backend may be offered.
+`NULL` enables it only for a locally bound, non-hosted application.
+Remote browser sessions are rejected even when this is `TRUE`. Set this
+to `FALSE` for cluster and hosted deployments.}
 
 \item{launch.browser}{Passed to [shiny::runApp()]. Use `NULL` to return the
 Shiny app object without launching it.}

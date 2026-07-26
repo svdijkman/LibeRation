@@ -206,7 +206,9 @@
 #' @param flows Data frame or list of flow rows.
 #' @param parameters Optional parameter settings. Missing referenced parameters
 #'   are added with positive initials and log-normal IIV.
-#' @param advan ODE solver, ADVAN6 or ADVAN13.
+#' @param advan General ODE solver: ADVAN6, 8, 9, 13, or 14. ADVAN9 diagrams
+#'   generate the differential portion; add equilibrium `ALG` and
+#'   `DAE_CONFIG` declarations in the code editor when required.
 #' @param residual Residual-error scaffold: additive, proportional, or combined.
 #' @param covariates Optional dataset covariates available to custom fluxes.
 #' @param title Diagram/model title.
@@ -225,8 +227,9 @@ nm_model_diagram <- function(compartments, flows = NULL, parameters = NULL,
     .nm_stop("A model diagram requires at least one structural parameter.")
   }
   advan <- as.integer(advan)
-  if (length(advan) != 1L || is.na(advan) || !advan %in% c(6L, 13L)) {
-    .nm_stop("A model diagram must use ADVAN6 or ADVAN13.")
+  if (length(advan) != 1L || is.na(advan) ||
+      !advan %in% c(6L, 8L, 9L, 13L, 14L)) {
+    .nm_stop("A model diagram must use ADVAN6, 8, 9, 13, or 14.")
   }
   covariates <- unique(toupper(trimws(as.character(covariates %||% character()))))
   covariates <- covariates[nzchar(covariates)]

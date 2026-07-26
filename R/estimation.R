@@ -281,7 +281,8 @@
             self$objective_tape$pointer, self$data, as.numeric(theta),
             as.numeric(eta), as.numeric(sigma), as.numeric(omega),
             approximation
-          )
+          ),
+          anchor = as.numeric(eta)
         )
       }
       invisible(self$curvature_tapes[[approximation]])

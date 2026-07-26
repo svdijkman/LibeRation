@@ -29,6 +29,7 @@ liber_workbench(
   data_payload = TRUE,
   gof_payload = TRUE,
   diagnostic_payload = names(diagnostics),
+  task = list(running = FALSE, id = "", label = "", cancellable = FALSE),
   input_id = "liber_workbench",
   width = NULL,
   height = "780px",
@@ -71,11 +72,12 @@ lazy.}
 
 \item{library}{Optional LibeRary catalogue payload.}
 
-\item{ai}{Optional browser-local WebGPU AI settings, independent Help and
-Report context-window choices, and model catalogue.}
+\item{ai}{Optional local AI settings for browser WebLLM and loopback-only
+Ollama/ellmer backends, independent Help and Report context-window
+choices, and model catalogues.}
 
 \item{ai_context}{Optional compact, on-demand summaries of saved project
-runs supplied to the browser-local Help model. Full result datasets are
+runs supplied to the selected local Help model. Full result datasets are
 never included in this payload.}
 
 \item{report_ai_context}{Optional detailed, on-demand summaries of the runs
@@ -98,6 +100,8 @@ When false, only dataset metadata and column names are included.}
 
 \item{diagnostic_payload}{Names of saved diagnostics whose plot data should
 be included. Availability metadata is always included.}
+
+\item{task}{Current non-blocking GUI task state.}
 
 \item{input_id}{Shiny event input prefix.}
 

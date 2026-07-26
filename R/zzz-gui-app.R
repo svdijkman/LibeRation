@@ -41,6 +41,10 @@
 #' @param session_workspace Create a separate ephemeral workspace beneath
 #'   `workspace` for every browser session. This is intended for hosted
 #'   demonstrations where application users must not share project files.
+#' @param allow_ollama Whether the loopback-only Ollama backend may be offered.
+#'   `NULL` enables it only for a locally bound, non-hosted application.
+#'   Remote browser sessions are rejected even when this is `TRUE`. Set this
+#'   to `FALSE` for cluster and hosted deployments.
 #' @param project Optional project id to open when the application starts.
 #' @param launch.browser Passed to [shiny::runApp()]. Use `NULL` to return the
 #'   Shiny app object without launching it.
@@ -50,6 +54,7 @@
 #' @export
 liber_gui <- function(model = NULL, data = NULL, queue = NULL,
                       workspace = NULL, project = NULL, session_workspace = FALSE,
+                      allow_ollama = NULL,
                       launch.browser = getOption("shiny.launch.browser", interactive()), ...) {
   dots <- list(...)
   model_input <- model
@@ -57,6 +62,11 @@ liber_gui <- function(model = NULL, data = NULL, queue = NULL,
   queue_input <- queue
   workspace_input <- workspace
   project_input <- project
+  ollama_runtime_allowed <- .liber_ollama_runtime_allowed(
+    allow_ollama = allow_ollama,
+    session_workspace = session_workspace,
+    host = dots$host %||% getOption("shiny.host", "127.0.0.1")
+  )
   favicon <- system.file("assets", "favicon.svg", package = "LibeRation")
   favicon_href <- if (nzchar(favicon) && file.exists(favicon)) {
     prefix <- paste0(
@@ -97,6 +107,11 @@ liber_gui <- function(model = NULL, data = NULL, queue = NULL,
   )
 
   server <- function(input, output, session) {
+    tasks <- .liber_shared_task_registry(session)
+    task_signal <- shiny::reactiveVal(0L)
+    ollama_allowed <- .liber_ollama_session_allowed(
+      session, runtime_allowed = ollama_runtime_allowed
+    )
     workspace_path <- if (isTRUE(session_workspace)) {
       base <- if (inherits(workspace_input, "nm_workspace")) {
         workspace_input$path
@@ -119,6 +134,9 @@ liber_gui <- function(model = NULL, data = NULL, queue = NULL,
       )
     }
     client_settings <- .liber_client_settings_read(workspace)
+    client_settings$ai$backend <- .liber_ai_backend_setting(
+      client_settings$ai$backend, ollama_allowed = ollama_allowed
+    )
     saved_remote_config <- client_settings$remotes
     saved_remote_queues <- list()
     saved_remote_meta <- list()
@@ -201,6 +219,15 @@ liber_gui <- function(model = NULL, data = NULL, queue = NULL,
         runs = list()
       ),
       ai_config = client_settings$ai,
+      ollama_models = list(),
+      ollama_status = list(
+        stage = if (ollama_allowed) "idle" else "unavailable",
+        message = if (ollama_allowed) {
+          "Select Ollama and refresh to discover installed models."
+        } else {
+          "Ollama is disabled for hosted or remote sessions."
+        }
+      ),
       ai_context = list(
         available = FALSE, project = "", project_name = "", request_id = "",
         scope = "index", message = "Project result summaries have not been requested.",
@@ -255,6 +282,68 @@ liber_gui <- function(model = NULL, data = NULL, queue = NULL,
       state$log_current <- message
       state$log_history <- utils::tail(c(state$log_history, line), 500L)
       invisible(NULL)
+    }
+    send_workbench_patch <- function(...) {
+      session$sendCustomMessage(
+        "liber-workbench-patch",
+        c(list(inputId = "liber_workbench"), list(...))
+      )
+      invisible(NULL)
+    }
+    send_jobs_patch <- function() {
+      jobs <- as.data.frame(
+        state$jobs %||% data.frame(), stringsAsFactors = FALSE
+      )
+      rows <- unname(lapply(seq_len(nrow(jobs)), function(index) {
+        as.list(jobs[index, , drop = FALSE])
+      }))
+      send_workbench_patch(
+        jobs = rows,
+        job_log = as.character(state$job_log %||% character()),
+        server = list(
+          refreshed = state$refreshed,
+          job_count = nrow(jobs)
+        )
+      )
+    }
+    ollama_active <- new.env(parent = emptyenv())
+    ollama_active$controllers <- list()
+    ollama_active$promises <- list()
+    send_ollama_message <- function(type, id, ...) {
+      session$sendCustomMessage(
+        "liber-ollama-ai",
+        c(list(type = type, id = as.character(id)[[1L]]), list(...))
+      )
+      invisible(NULL)
+    }
+    finish_ollama_request <- function(id) {
+      ollama_active$controllers[[id]] <- NULL
+      ollama_active$promises[[id]] <- NULL
+      invisible(NULL)
+    }
+    cancel_ollama_request <- function(id, reason = "Ollama generation cancelled.") {
+      controller <- ollama_active$controllers[[id]]
+      if (is.null(controller)) return(FALSE)
+      try(controller$cancel(reason), silent = TRUE)
+      finish_ollama_request(id)
+      TRUE
+    }
+    session$onSessionEnded(function() {
+      invisible(lapply(
+        names(ollama_active$controllers),
+        function(id) cancel_ollama_request(id, "LibeRation session ended.")
+      ))
+    })
+    start_background <- function(operation, arguments, label, metadata = list()) {
+      id <- .liber_shared_task_start(
+        tasks, "LibeRation", ".liber_gui_background_task",
+        args = list(operation = operation, arguments = arguments),
+        label = label,
+        metadata = c(list(operation = operation), metadata)
+      )
+      task_signal(task_signal() + 1L)
+      .liber_shared_task_notify(session, "liber_workbench", tasks)
+      invisible(id)
     }
     update_fit <- function(fit) {
       state$fit <- if (inherits(fit, "nm_fit")) fit else NULL
@@ -336,6 +425,9 @@ liber_gui <- function(model = NULL, data = NULL, queue = NULL,
     }
     record <- function(success, value, update_result = TRUE) {
       value <- tryCatch(force(value), error = identity)
+      if (inherits(value, "liber_gui_background_started")) {
+        return(invisible(value))
+      }
       if (isTRUE(update_result) || inherits(value, "error")) state$result <- value
       if (inherits(value, "nm_fit")) update_fit(value)
       if (inherits(value, "nm_report") || inherits(value, "nm_report_bundle")) {
@@ -479,6 +571,7 @@ liber_gui <- function(model = NULL, data = NULL, queue = NULL,
         )
       }
       state$refreshed <- paste("Last refreshed", format(Sys.time(), "%H:%M:%S"))
+      send_jobs_patch()
       invisible(jobs)
     }
     load_snapshot <- function(project_id, snapshot_id = "latest") {
@@ -546,6 +639,113 @@ liber_gui <- function(model = NULL, data = NULL, queue = NULL,
       }
       id
     }
+    apply_background_result <- function(job) {
+      metadata <- job$metadata %||% list()
+      operation <- metadata$operation
+      result <- job$result
+      same_project <- identical(
+        as.character(metadata$project %||% ""),
+        as.character(state$project %||% "")
+      )
+      same_run <- is.null(metadata$run) || identical(
+        as.character(metadata$run %||% ""),
+        as.character(state$run %||% "")
+      )
+      if (operation %in% c("simulate", "estimate", "estimate_sequence")) {
+        run_id <- persist_run(
+          result, metadata$label,
+          project_id = metadata$project,
+          run_model = metadata$model,
+          run_data = metadata$data,
+          parent_version = metadata$parent_version
+        )
+        if (same_project) {
+          state$result <- result
+          if (inherits(result, "nm_fit")) {
+            state$run <- run_id
+            update_fit(result)
+          }
+        }
+      } else if (operation %in% c("diagnostics", "uncertainty")) {
+        saved <- nm_project_save_diagnostics(
+          workspace, metadata$project, metadata$run, result
+        )
+        invalidate_ai_context()
+        if (same_project && same_run) {
+          state$diagnostics <- saved
+          state$diagnostic_payload <- character()
+        }
+      } else if (identical(operation, "scm")) {
+        version <- nm_project_save(
+          workspace, metadata$project,
+          result$final_model, metadata$data, NULL,
+          label = metadata$label
+        )
+        run <- nm_project_save_run(
+          workspace, metadata$project, version, result$final_fit,
+          label = paste("SCM", result$final_fit$method),
+          model = result$final_model, data = metadata$data
+        )
+        saved <- nm_project_save_diagnostics(
+          workspace, metadata$project, run, list(scm = result)
+        )
+        invalidate_ai_context()
+        if (same_project) {
+          state$model <- result$final_model
+          state$draft_outputs <- NULL
+          state$snapshot <- version
+          state$run <- run
+          state$diagnostics <- saved
+          reset_lazy_payloads(data = FALSE)
+          update_fit(result$final_fit)
+          state$result <- result$final_fit
+        }
+      } else if (identical(operation, "report")) {
+        state$report <- result
+        state$result <- result
+      } else if (identical(operation, "report_design")) {
+        state$report <- result
+        state$result <- result
+      } else if (identical(operation, "gof")) {
+        if (same_project && same_run && inherits(state$fit, "nm_fit")) {
+          if (!is.null(state$run)) {
+            state$diagnostics <- nm_project_save_diagnostics(
+              workspace, state$project, state$run, list(gof = result)
+            )
+            invalidate_ai_context()
+          }
+          state$gof_payload <- TRUE
+          state$fit_payload <- .liber_gui_fit(
+            state$fit, include_gof = TRUE, gof = result
+          )
+          send_workbench_patch(
+            run = as.character(state$run %||% ""),
+            fit = state$fit_payload
+          )
+        }
+      } else if (identical(operation, "hmm")) {
+        if (same_project && same_run) {
+          state$hmm_payload <- .liber_gui_hmm(result, available = TRUE)
+        }
+      } else if (identical(operation, "kalman")) {
+        if (same_project && same_run) {
+          state$kalman_payload <- .liber_gui_kalman(result, available = TRUE)
+        }
+      } else if (identical(operation, "comparison")) {
+        if (same_project) {
+          state$comparison_open <- TRUE
+          state$result <- result
+        }
+      } else if (identical(operation, "ai_context")) {
+        result$request_id <- metadata$request_id
+        state$ai_context <- result
+      } else if (identical(operation, "report_ai_context")) {
+        result$request_id <- metadata$request_id
+        state$report_ai_context <- result
+      }
+      append_log(metadata$success %||% paste(metadata$label, "completed"), "info")
+      invisible(result)
+    }
 
     shiny::observe({
       q <- active_queue()
@@ -588,6 +788,14 @@ liber_gui <- function(model = NULL, data = NULL, queue = NULL,
     }, once = TRUE)
 
     output$workbench <- renderLiberWorkbench({
+      jobs_payload <- shiny::isolate(
+        as.data.frame(state$jobs %||% data.frame(), stringsAsFactors = FALSE)
+      )
+      job_log_payload <- shiny::isolate(state$job_log)
+      refreshed_payload <- shiny::isolate(state$refreshed)
+      diagnostic_payload <- shiny::isolate(state$diagnostic_payload)
+      fit_payload <- shiny::isolate(state$fit_payload)
+      gof_payload <- shiny::isolate(state$gof_payload)
       remote_ids <- names(state$remote_meta)
       queues <- c(
         list(list(
@@ -612,11 +820,11 @@ liber_gui <- function(model = NULL, data = NULL, queue = NULL,
         isolation = if (is.null(q)) "current R session" else if (inherits(q, "LibeRQueue")) {
           paste("tenant", q$user)
         } else "server-managed tenant",
-        queue_id = state$queue_id, queues = queues, refreshed = state$refreshed,
+        queue_id = state$queue_id, queues = queues, refreshed = refreshed_payload,
         queue_root = if (inherits(q, "LibeRQueue")) q$root else "",
         package_version = as.character(utils::packageVersion("LibeRation")),
         icon = favicon_href,
-        job_count = nrow(as.data.frame(state$jobs %||% data.frame()))
+        job_count = nrow(jobs_payload)
       )
       run_output <- NULL
       if (isTRUE(state$data_payload)) {
@@ -631,24 +839,31 @@ liber_gui <- function(model = NULL, data = NULL, queue = NULL,
         }
       }
       liber_workbench(
-        model = state$model, data = state$data, jobs = state$jobs,
-        result = state$result, fit = state$fit_payload, report = state$report,
+        model = state$model, data = state$data, jobs = jobs_payload,
+        result = state$result, fit = fit_payload, report = state$report,
         report_design = state$report_design,
         diagnostics = state$diagnostics, hmm = state$hmm_payload,
         kalman = state$kalman_payload,
         log = list(level = state$log_level, current = state$log_current,
                    history = state$log_history),
-        job_log = state$job_log, server = server_info,
+        job_log = job_log_payload, server = server_info,
         workspace = .liber_gui_workspace(
           workspace, state$project, state$snapshot, state$run,
-          pending_jobs = state$job_context, jobs = state$jobs,
+          pending_jobs = state$job_context, jobs = jobs_payload,
           queue_id = state$queue_id
         ),
         library = .liber_gui_library(),
         ai = c(state$ai_config, list(
           worker_url = ai_worker_href, models = ai_models,
+          ollama_allowed = ollama_allowed,
+          ollama_models = state$ollama_models,
+          ollama_status = state$ollama_status,
           secure_context = TRUE,
-          privacy = "Inference runs in a dedicated browser worker with no tools. Network APIs are disabled after the selected model has loaded."
+          privacy = if (identical(state$ai_config$backend, "ollama")) {
+            "Inference runs through this local R session and the loopback-only Ollama service. Hosted and remote browser sessions cannot select this backend."
+          } else {
+            "Inference runs in a dedicated browser worker with no tools. Network APIs are disabled after the selected model has loaded."
+          }
         )),
         ai_context = state$ai_context,
         report_ai_context = state$report_ai_context,
@@ -657,8 +872,9 @@ liber_gui <- function(model = NULL, data = NULL, queue = NULL,
         output_catalog = state$draft_outputs,
         run_output = run_output,
         data_payload = state$data_payload,
-        gof_payload = state$gof_payload,
-        diagnostic_payload = state$diagnostic_payload,
+        gof_payload = gof_payload,
+        diagnostic_payload = diagnostic_payload,
+        task = .liber_shared_task_snapshot(tasks),
         input_id = "liber_workbench", height = "100vh"
       )
     })
@@ -667,6 +883,13 @@ liber_gui <- function(model = NULL, data = NULL, queue = NULL,
       event <- input$liber_workbench_event
       action <- as.character(event$action %||% "")
 
+      if (identical(action, "cancel_task")) {
+        if (.liber_shared_task_cancel_all(tasks)) {
+          append_log("Background calculation cancelled", "warning")
+          .liber_shared_task_notify(session, "liber_workbench", tasks)
+        }
+        return(invisible(NULL))
+      }
       if (identical(action, "support_bundle")) {
         return(record("Redacted support bundle created", {
           destination <- file.path(
@@ -680,8 +903,155 @@ liber_gui <- function(model = NULL, data = NULL, queue = NULL,
           structure(list(path = path), class = "liber_gui_support_bundle")
         }))
       }
+      if (identical(action, "ollama_refresh")) {
+        if (!ollama_allowed) {
+          state$ollama_status <- list(
+            stage = "unavailable",
+            message = "Ollama is disabled for hosted or remote sessions."
+          )
+          return(invisible(NULL))
+        }
+        state$ollama_status <- list(
+          stage = "loading", message = "Checking the local Ollama service..."
+        )
+        discovered <- tryCatch(
+          .liber_ollama_models(state$ai_config$ollama_url),
+          error = function(error) error
+        )
+        if (inherits(discovered, "error")) {
+          state$ollama_models <- list()
+          state$ollama_status <- list(
+            stage = "error",
+            message = paste0(
+              "Ollama is not available at ",
+              state$ai_config$ollama_url, ": ", conditionMessage(discovered)
+            )
+          )
+        } else {
+          state$ollama_models <- discovered
+          state$ollama_status <- list(
+            stage = "ready",
+            message = if (length(discovered)) {
+              paste(length(discovered), "installed Ollama model(s) available.")
+            } else {
+              "Ollama is running, but no models are installed."
+            }
+          )
+          ids <- vapply(discovered, `[[`, character(1), "id")
+          if (!nzchar(state$ai_config$ollama_help_model) && length(ids)) {
+            state$ai_config$ollama_help_model <-
+              .liber_ollama_default_model(discovered)
+          }
+          if (!state$ai_config$ollama_report_model %in%
+              c("same_as_help", ids)) {
+            state$ai_config$ollama_report_model <- "same_as_help"
+          }
+          save_client_settings()
+        }
+        return(invisible(NULL))
+      }
+      if (identical(action, "ollama_cancel")) {
+        request_id <- as.character(event$id %||% "")[[1L]]
+        if (nzchar(request_id)) cancel_ollama_request(request_id)
+        return(invisible(NULL))
+      }
+      if (identical(action, "ollama_generate")) {
+        request_id <- substr(as.character(event$id %||% "")[[1L]], 1L, 120L)
+        if (!nzchar(request_id)) return(invisible(NULL))
+        if (!ollama_allowed ||
+            !identical(state$ai_config$backend, "ollama")) {
+          send_ollama_message(
+            "error", request_id,
+            message = paste0(
+              "The Ollama backend is available only from a local LibeRation ",
+              "browser session."
+            )
+          )
+          return(invisible(NULL))
+        }
+        if (length(ollama_active$controllers)) {
+          send_ollama_message(
+            "error", request_id,
+            message = "Wait for the current Ollama response or cancel it first."
+          )
+          return(invisible(NULL))
+        }
+        purpose <- if (identical(event$purpose, "report")) "report" else "help"
+        configured_model <- if (identical(purpose, "report")) {
+          state$ai_config$ollama_report_model
+        } else {
+          state$ai_config$ollama_help_model
+        }
+        if (identical(configured_model, "same_as_help")) {
+          configured_model <- state$ai_config$ollama_help_model
+        }
+        prepared <- tryCatch(
+          .liber_ollama_chat(
+            messages = event$messages,
+            model = configured_model,
+            base_url = state$ai_config$ollama_url,
+            max_tokens = event$max_tokens,
+            temperature = event$temperature,
+            top_p = event$top_p
+          ),
+          error = function(error) error
+        )
+        if (inherits(prepared, "error")) {
+          send_ollama_message(
+            "error", request_id, message = conditionMessage(prepared)
+          )
+          return(invisible(NULL))
+        }
+        controller <- ellmer::stream_controller()
+        ollama_active$controllers[[request_id]] <- controller
+        send_ollama_message(
+          "status", request_id, stage = "generating",
+          message = paste0("Generating locally with ", configured_model)
+        )
+        stream <- prepared$chat$stream_async(
+          prepared$prompt, controller = controller
+        )
+        promise <- coro::async(function() {
+          response <- ""
+          for (chunk in coro::await_each(stream)) {
+            if (isTRUE(controller$cancelled)) break
+            chunk <- enc2utf8(as.character(chunk %||% "")[[1L]])
+            response <- paste0(response, chunk)
+            send_ollama_message("token", request_id, token = chunk)
+          }
+          response
+        })()
+        ollama_active$promises[[request_id]] <- promises::then(
+          promise,
+          onFulfilled = function(response) {
+            if (is.null(ollama_active$controllers[[request_id]])) {
+              return(invisible(NULL))
+            }
+            finish_ollama_request(request_id)
+            send_ollama_message(
+              "complete", request_id, text = as.character(response %||% "")
+            )
+            invisible(NULL)
+          },
+          onRejected = function(error) {
+            if (is.null(ollama_active$controllers[[request_id]])) {
+              return(invisible(NULL))
+            }
+            finish_ollama_request(request_id)
+            send_ollama_message(
+              "error", request_id, message = conditionMessage(error)
+            )
+            invisible(NULL)
+          }
+        )
+        return(invisible(NULL))
+      }
       if (identical(action, "ai_settings")) {
         allowed_models <- vapply(ai_models, `[[`, character(1), "id")
+        requested_backend <- .liber_ai_backend_setting(
+          event$backend %||% state$ai_config$backend,
+          ollama_allowed = ollama_allowed
+        )
         requested_help <- as.character(event$help_model %||% event$model %||%
           state$ai_config$help_model %||% state$ai_config$model)[[1L]]
         requested_report <- as.character(event$report_model %||%
@@ -698,23 +1068,72 @@ liber_gui <- function(model = NULL, data = NULL, queue = NULL,
         if (!requested_report %in% c("same_as_help", allowed_models)) {
           requested_report <- .liber_ai_default_report_model()
         }
+        requested_ollama_url <- tryCatch(
+          .liber_ollama_url(
+            event$ollama_url %||% state$ai_config$ollama_url
+          ),
+          error = function(error) {
+            state$ollama_status <- list(
+              stage = "error", message = conditionMessage(error)
+            )
+            state$ai_config$ollama_url
+          }
+        )
+        requested_ollama_help <- .liber_ollama_model_setting(
+          event$ollama_help_model %||%
+            state$ai_config$ollama_help_model
+        )
+        requested_ollama_report <- .liber_ollama_model_setting(
+          event$ollama_report_model %||%
+            state$ai_config$ollama_report_model,
+          "same_as_help"
+        )
+        ollama_ids <- vapply(
+          state$ollama_models, `[[`, character(1), "id"
+        )
+        if (length(ollama_ids)) {
+          if (!requested_ollama_help %in% ollama_ids) {
+            requested_ollama_help <- ollama_ids[[1L]]
+          }
+          if (!requested_ollama_report %in%
+              c("same_as_help", ollama_ids)) {
+            requested_ollama_report <- "same_as_help"
+          }
+        }
+        previous_backend <- state$ai_config$backend
         state$ai_config <- list(
           activated = isTRUE(event$activated),
           consented = isTRUE(event$consented),
+          backend = requested_backend,
           help_model = requested_help,
           report_model = requested_report,
           help_context = requested_help_context,
           report_context = requested_report_context,
+          ollama_url = requested_ollama_url,
+          ollama_help_model = requested_ollama_help,
+          ollama_report_model = requested_ollama_report,
           model = requested_help
         )
+        if (!identical(previous_backend, requested_backend)) {
+          invisible(lapply(
+            names(ollama_active$controllers),
+            function(id) cancel_ollama_request(
+              id, "The local AI backend was changed."
+            )
+          ))
+        }
         save_client_settings()
         append_log(if (state$ai_config$activated) {
-          paste0(
-            "Browser-local AI enabled; Help and Report models remain unloaded ",
-            "until first use"
-          )
+          if (identical(requested_backend, "ollama")) {
+            "Local Ollama AI enabled through ellmer; no model is contacted until first use"
+          } else {
+            paste0(
+              "Browser-local WebLLM AI enabled; Help and Report models remain ",
+              "unloaded until first use"
+            )
+          }
         } else {
-          "Browser-local AI settings saved; AI remains disabled"
+          "Local AI settings saved; AI remains disabled"
         }, "info")
         return(invisible(NULL))
       }
@@ -722,29 +1141,85 @@ liber_gui <- function(model = NULL, data = NULL, queue = NULL,
         requested_project <- as.character(event$project %||% "")[[1L]]
         request_id <- as.character(event$requestId %||% "")[[1L]]
         requested_scope <- as.character(event$scope %||% "index")[[1L]]
+        requested_question <- as.character(event$question %||% "")[[1L]]
         if (!requested_scope %in% c("index", "results")) requested_scope <- "index"
+        cached_context <- state$ai_context
+        cache_valid_now <- isTRUE(cached_context$available) &&
+          identical(
+            as.character(cached_context$project %||% ""), requested_project
+          ) &&
+          identical(
+            as.character(cached_context$scope %||% ""), requested_scope
+          ) &&
+          identical(
+            as.character(cached_context$selected_run %||% ""),
+            as.character(state$run %||% "")
+          )
+        if (!cache_valid_now) {
+          start_background(
+            "ai_context",
+            list(
+              workspace_path = workspace$path,
+              project = requested_project,
+              selected_run = state$run,
+              max_runs = if (identical(requested_scope, "results")) 12L else 30L,
+              detail = requested_scope,
+              question = requested_question
+            ),
+            label = "Help AI evidence preparation",
+            metadata = list(
+              success = "Help AI evidence prepared",
+              project = requested_project,
+              request_id = request_id,
+              scope = requested_scope
+            )
+          )
+          return(invisible(NULL))
+        }
         context <- tryCatch({
-          if (!nzchar(requested_project) ||
+          if (nzchar(requested_project) &&
               !identical(requested_project, as.character(state$project %||% ""))) {
             .nm_stop("The requested Help context is no longer the selected project.")
           }
-          .liber_gui_ai_context(
-            workspace, requested_project, selected_run = state$run,
-            max_runs = if (identical(requested_scope, "results")) 12L else 30L,
-            detail = requested_scope
-          )
+          cached <- state$ai_context
+          cache_valid <- isTRUE(cached$available) &&
+            identical(as.character(cached$project %||% ""), requested_project) &&
+            identical(as.character(cached$scope %||% ""), requested_scope) &&
+            identical(
+              as.character(cached$selected_run %||% ""),
+              as.character(state$run %||% "")
+            )
+          if (cache_valid) {
+            cached$fit_quality_guide <- .liber_ai_fit_quality_guide()
+            cached$documentation <- .liber_ai_documentation_context(
+              requested_question
+            )
+            cached
+          } else {
+            .liber_gui_ai_context(
+              workspace, requested_project, selected_run = state$run,
+              max_runs = if (identical(requested_scope, "results")) 12L else 30L,
+              detail = requested_scope, question = requested_question
+            )
+          }
         }, error = function(error) list(
           available = FALSE, project = requested_project, project_name = "",
           scope = requested_scope, message = conditionMessage(error), run_count = 0L,
-          included_runs = 0L, omitted_runs = 0L, runs = list()
+          included_runs = 0L, omitted_runs = 0L,
+          fit_quality_guide = .liber_ai_fit_quality_guide(),
+          documentation = .liber_ai_documentation_context(requested_question),
+          runs = list()
         ))
         context$request_id <- request_id
         state$ai_context <- context
+        context_useful <- isTRUE(context$available) || length(context$documentation)
         append_log(if (isTRUE(context$available)) {
           paste("Loaded", context$included_runs, "saved run summaries for local Help AI")
+        } else if (length(context$documentation)) {
+          paste("Loaded installed package documentation for local Help AI")
         } else {
           paste("Help AI project summaries unavailable:", context$message)
-        }, if (isTRUE(context$available)) "info" else "error")
+        }, if (context_useful) "info" else "error")
         return(invisible(NULL))
       }
       if (identical(action, "diagram_preview")) {
@@ -824,23 +1299,31 @@ liber_gui <- function(model = NULL, data = NULL, queue = NULL,
         requested_project <- as.character(event$project %||% state$project %||% "")[[1L]]
         request_id <- as.character(event$requestId %||% "")[[1L]]
         run_ids <- unique(as.character(unlist(event$runs %||% character())))
-        context <- tryCatch({
-          if (!nzchar(requested_project) ||
-              !identical(requested_project, as.character(state$project %||% ""))) {
-            .nm_stop("The report evidence request is no longer for the selected project.")
-          }
-          .liber_gui_report_ai_context(workspace, requested_project, run_ids)
-        }, error = function(error) list(
-          available = FALSE, project = requested_project, project_name = "",
-          run_ids = run_ids, message = conditionMessage(error), runs = list()
-        ))
-        context$request_id <- request_id
-        state$report_ai_context <- context
-        append_log(if (isTRUE(context$available)) {
-          paste("Loaded", length(context$runs), "selected run(s) for local Report AI")
-        } else {
-          paste("Report AI evidence unavailable:", context$message)
-        }, if (isTRUE(context$available)) "info" else "error")
+        if (!nzchar(requested_project) ||
+            !identical(
+              requested_project, as.character(state$project %||% "")
+            )) {
+          append_log(
+            "The report evidence request is no longer for the selected project.",
+            "error"
+          )
+          return(invisible(NULL))
+        }
+        start_background(
+          "report_ai_context",
+          list(
+            workspace_path = workspace$path,
+            project = requested_project,
+            run_ids = run_ids
+          ),
+          label = "Report AI evidence preparation",
+          metadata = list(
+            success = "Report AI evidence prepared",
+            project = requested_project,
+            request_id = request_id,
+            run_ids = run_ids
+          )
+        )
         return(invisible(NULL))
       }
       if (identical(action, "report_design_save")) {
@@ -864,10 +1347,19 @@ liber_gui <- function(model = NULL, data = NULL, queue = NULL,
             directory <- .liber_report_default_directory(workspace, state$project)
           }
           directory <- path.expand(directory)
-          nm_report_design_render(
-            design, workspace, state$project, directory = directory,
-            name = name, formats = design$formats
+          start_background(
+            "report_design",
+            list(
+              design = design, workspace_path = workspace$path,
+              project = state$project, directory = directory, name = name
+            ),
+            label = "DOCX/PDF report",
+            metadata = list(
+              success = "DOCX/PDF report generated",
+              project = state$project
+            )
           )
+          structure(list(), class = "liber_gui_background_started")
         }))
       }
 
@@ -877,49 +1369,72 @@ liber_gui <- function(model = NULL, data = NULL, queue = NULL,
           state$data_payload <- !is.null(state$data)
         } else if (identical(kind, "gof")) {
           if (inherits(state$fit, "nm_fit")) {
-            gof <- state$diagnostics$gof %||% nm_gof(state$fit)
-            if (is.null(state$diagnostics$gof) && !is.null(state$run)) {
-              state$diagnostics <- nm_project_save_diagnostics(
-                workspace, state$project, state$run, list(gof = gof)
+            if (!is.null(state$diagnostics$gof)) {
+              state$gof_payload <- TRUE
+              state$fit_payload <- .liber_gui_fit(
+                state$fit, include_gof = TRUE,
+                gof = state$diagnostics$gof
               )
-              invalidate_ai_context()
+              send_workbench_patch(
+                run = as.character(state$run %||% ""),
+                fit = state$fit_payload
+              )
+              return(invisible(NULL))
+            } else {
+              start_background(
+                "gof", list(fit = state$fit),
+                label = "Goodness-of-fit preparation",
+                metadata = list(
+                  success = "Loaded GOF view data",
+                  project = state$project, run = state$run
+                )
+              )
+              return(invisible(NULL))
             }
-            state$gof_payload <- TRUE
-            state$fit_payload <- .liber_gui_fit(state$fit, include_gof = TRUE, gof = gof)
           }
         } else if (identical(kind, "hmm")) {
           if (!inherits(state$fit, "nm_fit") || is.null(state$model$HMM_CONFIG)) {
             append_log("Open a fitted hidden Markov model before loading HMM results.", "error")
             return(invisible(NULL))
           }
-          decoded <- tryCatch(
-            nm_hmm_decode(state$fit, method = "all"),
-            error = function(error) {
-              append_log(paste("HMM decoding failed:", conditionMessage(error)), "error")
-              NULL
-            }
+          start_background(
+            "hmm", list(fit = state$fit),
+            label = "HMM state decoding",
+            metadata = list(
+              success = "Loaded HMM view data",
+              project = state$project, run = state$run
+            )
           )
-          if (is.null(decoded)) return(invisible(NULL))
-          state$hmm_payload <- .liber_gui_hmm(decoded, available = TRUE)
+          return(invisible(NULL))
         } else if (identical(kind, "kalman")) {
           if (!inherits(state$fit, "nm_fit") || is.null(state$model$KALMAN_CONFIG)) {
             append_log("Open a fitted linear state-space model before loading state estimates.", "error")
             return(invisible(NULL))
           }
-          decoded <- tryCatch(
-            nm_kalman_decode(state$fit, type = "individual"),
-            error = function(error) {
-              append_log(paste("State-space decoding failed:", conditionMessage(error)), "error")
-              NULL
-            }
+          start_background(
+            "kalman", list(fit = state$fit),
+            label = "State-space decoding",
+            metadata = list(
+              success = "Loaded KALMAN view data",
+              project = state$project, run = state$run
+            )
           )
-          if (is.null(decoded)) return(invisible(NULL))
-          state$kalman_payload <- .liber_gui_kalman(decoded, available = TRUE)
+          return(invisible(NULL))
         } else if (kind %in% c("vpc", "npc", "npde", "vpc_categorical", "vpc_count",
                               "vpc_tte", "vpc_competing", "vpc_recurrent",
                               "bootstrap", "profile", "scm") &&
                    !is.null(state$diagnostics[[kind]])) {
           state$diagnostic_payload <- unique(c(state$diagnostic_payload, kind))
+          prepared <- .liber_gui_diagnostics(
+            state$diagnostics, payload = kind
+          )
+          patch <- list(available = prepared$available)
+          patch[[kind]] <- prepared[[kind]]
+          send_workbench_patch(
+            run = as.character(state$run %||% ""),
+            diagnostics = patch
+          )
+          return(invisible(NULL))
         }
         append_log(paste("Loaded", toupper(kind), "view data"), "info")
         return(invisible(NULL))
@@ -1114,7 +1629,7 @@ liber_gui <- function(model = NULL, data = NULL, queue = NULL,
         }))
       }
       if (identical(action, "simulate")) {
-        return(record("Simulation completed or submitted", {
+        return(record("Simulation started or submitted", {
           if (is.null(state$model) || is.null(state$data)) {
             .nm_stop("Load both a model and dataset before simulation.")
           }
@@ -1136,10 +1651,20 @@ liber_gui <- function(model = NULL, data = NULL, queue = NULL,
           }
           q <- active_queue()
           if (is.null(q)) {
-            result <- do.call(nm_simulate, c(list(model = state$model, data = simulation_data), arguments))
-            persist_run(result, as.character(event$label %||% "Simulation"),
-                        run_data = simulation_data)
-            result
+            label <- as.character(event$label %||% "Simulation")
+            parent_version <- ensure_parent_version()
+            start_background(
+              "simulate",
+              list(model = state$model, data = simulation_data, args = arguments),
+              label = "Simulation",
+              metadata = list(
+                success = "Simulation completed",
+                label = label, project = state$project,
+                parent_version = parent_version,
+                model = state$model, data = simulation_data
+              )
+            )
+            structure(list(), class = "liber_gui_background_started")
           } else {
             if (!requireNamespace("LibeRties", quietly = TRUE)) {
               .nm_stop("LibeRties is required for queued execution.")
@@ -1164,7 +1689,7 @@ liber_gui <- function(model = NULL, data = NULL, queue = NULL,
         }))
       }
       if (identical(action, "estimate")) {
-        return(record("Estimation completed or submitted", {
+        return(record("Estimation started or submitted", {
           if (is.null(state$model) || is.null(state$data)) {
             .nm_stop("Load both a model and dataset before estimation.")
           }
@@ -1181,12 +1706,19 @@ liber_gui <- function(model = NULL, data = NULL, queue = NULL,
           method_label <- paste(methods, collapse = " -> ")
           if (!nzchar(run_label)) run_label <- paste(method_label, "estimation")
           if (is.null(q)) {
-            result <- do.call(
-              if (sequential) nm_est_sequence else nm_est,
-              c(list(model = state$model, data = state$data), arguments)
+            parent_version <- ensure_parent_version()
+            start_background(
+              if (sequential) "estimate_sequence" else "estimate",
+              list(model = state$model, data = state$data, args = arguments),
+              label = paste(method_label, "estimation"),
+              metadata = list(
+                success = paste(method_label, "estimation completed"),
+                label = run_label, project = state$project,
+                parent_version = parent_version,
+                model = state$model, data = state$data
+              )
             )
-            persist_run(result, run_label)
-            result
+            structure(list(), class = "liber_gui_background_started")
           } else {
             if (!requireNamespace("LibeRties", quietly = TRUE)) {
               .nm_stop("LibeRties is required for queued execution.")
@@ -1216,63 +1748,16 @@ liber_gui <- function(model = NULL, data = NULL, queue = NULL,
           if (!inherits(state$fit, "nm_fit") || is.null(state$run)) {
             .nm_stop("Open a saved estimation run before running diagnostics.")
           }
-          selected <- unique(tolower(as.character(unlist(event$types %||% character()))))
-          selected <- intersect(selected, c(
-            "vpc", "npc", "npde", "vpc_categorical", "vpc_count",
-            "vpc_tte", "vpc_competing", "vpc_recurrent"
-          ))
-          if (!length(selected)) .nm_stop("Select at least one diagnostic.")
-          nsim <- max(20L, as.integer(event$nsim %||% 200L))
-          seed <- as.integer(event$seed %||% 20260713L)
-          created <- list()
-          if ("vpc" %in% selected) {
-            created$vpc <- nm_vpc(
-              state$fit, nsim = nsim, seed = seed,
-              pc_correct = isTRUE(event$pcCorrect),
-              stratify = event$stratify %||% NULL
+          start_background(
+            "diagnostics",
+            list(fit = state$fit, options = as.list(event)),
+            label = "Model diagnostics",
+            metadata = list(
+              success = "Selected diagnostics completed and saved",
+              project = state$project, run = state$run
             )
-          }
-          if ("npc" %in% selected) created$npc <- nm_npc(state$fit, nsim = nsim, seed = seed)
-          if ("npde" %in% selected) created$npde <- nm_npde(state$fit, nsim = nsim, seed = seed)
-          if ("vpc_categorical" %in% selected) {
-            created$vpc_categorical <- nm_vpc_categorical(
-              state$fit, outcome = as.character(event$categoricalOutcome %||% "DV"),
-              nsim = nsim, seed = seed
-            )
-          }
-          if ("vpc_count" %in% selected) {
-            created$vpc_count <- nm_vpc_count(
-              state$fit, outcome = as.character(event$countOutcome %||% "DV"),
-              dvid = suppressWarnings(as.numeric(event$countDvid %||% NA_real_)),
-              nsim = nsim, seed = seed
-            )
-          }
-          if ("vpc_tte" %in% selected) {
-            created$vpc_tte <- nm_vpc_tte(
-              state$fit, event = as.character(event$tteEvent %||% "DV"),
-              nsim = nsim, seed = seed
-            )
-          }
-          if ("vpc_competing" %in% selected) {
-            created$vpc_competing <- nm_vpc_competing(
-              state$fit, event = as.character(event$tteEvent %||% "DV"),
-              dvid = suppressWarnings(as.numeric(event$competingDvid %||% NA_real_)),
-              nsim = nsim, seed = seed
-            )
-          }
-          if ("vpc_recurrent" %in% selected) {
-            created$vpc_recurrent <- nm_vpc_recurrent(
-              state$fit, event = as.character(event$tteEvent %||% "DV"),
-              dvid = suppressWarnings(as.numeric(event$recurrentDvid %||% NA_real_)),
-              nsim = nsim, seed = seed
-            )
-          }
-          state$diagnostics <- nm_project_save_diagnostics(
-            workspace, state$project, state$run, created
           )
-          invalidate_ai_context()
-          state$diagnostic_payload <- character()
-          state$diagnostics
+          structure(list(), class = "liber_gui_background_started")
         }, update_result = FALSE))
       }
       if (identical(action, "run_uncertainty")) {
@@ -1280,35 +1765,16 @@ liber_gui <- function(model = NULL, data = NULL, queue = NULL,
           if (!inherits(state$fit, "nm_fit") || is.null(state$run)) {
             .nm_stop("Open a saved estimation run before running uncertainty analyses.")
           }
-          selected <- unique(tolower(as.character(unlist(event$types %||% character()))))
-          selected <- intersect(selected, c("bootstrap", "profile"))
-          if (!length(selected)) .nm_stop("Select bootstrap or profile likelihood.")
-          created <- list()
-          if ("bootstrap" %in% selected) {
-            created$bootstrap <- nm_bootstrap(
-              state$fit, n = as.integer(event$replicates %||% 100L),
-              seed = as.integer(event$seed %||% 20260713L),
-              level = as.numeric(event$level %||% 0.95),
-              maxit = as.integer(event$maxit %||% 100L)
+          start_background(
+            "uncertainty",
+            list(fit = state$fit, options = as.list(event)),
+            label = "Uncertainty analysis",
+            metadata = list(
+              success = "Uncertainty analyses completed and saved",
+              project = state$project, run = state$run
             )
-          }
-          if ("profile" %in% selected) {
-            parameters <- trimws(unlist(strsplit(as.character(event$parameters %||% ""), "[,;[:space:]]+")))
-            parameters <- parameters[nzchar(parameters)]
-            created$profile <- nm_profile(
-              state$fit, parameters = if (length(parameters)) parameters else NULL,
-              points = as.integer(event$points %||% 9L),
-              span = as.numeric(event$span %||% 3),
-              level = as.numeric(event$level %||% 0.95),
-              maxit = as.integer(event$maxit %||% 100L)
-            )
-          }
-          state$diagnostics <- nm_project_save_diagnostics(
-            workspace, state$project, state$run, created
           )
-          invalidate_ai_context()
-          state$diagnostic_payload <- character()
-          state$diagnostics
+          structure(list(), class = "liber_gui_background_started")
         }, update_result = FALSE))
       }
       if (identical(action, "run_scm")) {
@@ -1316,47 +1782,18 @@ liber_gui <- function(model = NULL, data = NULL, queue = NULL,
           if (!inherits(state$fit, "nm_fit") || is.null(state$project)) {
             .nm_stop("Open an estimation run before starting SCM.")
           }
-          lines <- strsplit(as.character(event$candidates %||% ""), "\r?\n", perl = TRUE)[[1L]]
-          lines <- trimws(lines[nzchar(trimws(lines))])
-          if (!length(lines)) .nm_stop("Enter at least one parameter,covariate candidate.")
-          fields <- lapply(lines, function(line) trimws(strsplit(line, ",", fixed = TRUE)[[1L]]))
-          item <- function(field, index, default = "") {
-            if (length(field) >= index && nzchar(field[[index]])) field[[index]] else default
-          }
-          candidates <- do.call(rbind, lapply(fields, function(field) data.frame(
-            parameter = item(field, 1L), covariate = item(field, 2L),
-            form = item(field, 3L, "continuous"),
-            reference = item(field, 4L, NA_character_),
-            category = item(field, 5L, NA_character_), stringsAsFactors = FALSE
-          )))
-          scm <- nm_scm(
-            state$fit, candidates,
-            direction = as.character(event$direction %||% "both"),
-            p_forward = as.numeric(event$pForward %||% 0.05),
-            p_backward = as.numeric(event$pBackward %||% 0.01),
-            max_steps = as.integer(event$maxSteps %||% 20L),
-            maxit = as.integer(event$maxit %||% 100L)
+          start_background(
+            "scm",
+            list(fit = state$fit, options = as.list(event)),
+            label = "Stepwise covariate modelling",
+            metadata = list(
+              success = "Stepwise covariate modelling completed",
+              project = state$project, run = state$run,
+              data = state$data,
+              label = as.character(event$label %||% "SCM model")
+            )
           )
-          version <- nm_project_save(
-            workspace, state$project, scm$final_model, state$data, NULL,
-            label = as.character(event$label %||% "SCM model")
-          )
-          run <- nm_project_save_run(
-            workspace, state$project, version, scm$final_fit,
-            label = paste("SCM", scm$final_fit$method), model = scm$final_model,
-            data = state$data
-          )
-          state$diagnostics <- nm_project_save_diagnostics(
-            workspace, state$project, run, list(scm = scm)
-          )
-          invalidate_ai_context()
-          state$model <- scm$final_model
-          state$draft_outputs <- NULL
-          state$snapshot <- version
-          state$run <- run
-          reset_lazy_payloads(data = FALSE)
-          update_fit(scm$final_fit)
-          scm
+          structure(list(), class = "liber_gui_background_started")
         }, update_result = FALSE))
       }
       if (identical(action, "report")) {
@@ -1366,12 +1803,20 @@ liber_gui <- function(model = NULL, data = NULL, queue = NULL,
           name <- sub("[.]pdf$", "", basename(name), ignore.case = TRUE)
           if (!nzchar(name)) name <- "report"
           directory <- if (is.null(workspace)) tempdir() else file.path(workspace$path, "reports")
-          nm_report(
-            state$fit, file.path(directory, paste0(name, ".pdf")),
-            sections = as.character(unlist(event$sections %||% c(
-              "summary", "parameters", "gof", "eta", "narrative_stub"
-            ))), vpc = state$diagnostics$vpc
+          start_background(
+            "report",
+            list(
+              fit = state$fit,
+              file = file.path(directory, paste0(name, ".pdf")),
+              sections = as.character(unlist(event$sections %||% c(
+                "summary", "parameters", "gof", "eta", "narrative_stub"
+              ))),
+              vpc = state$diagnostics$vpc
+            ),
+            label = "Model report",
+            metadata = list(success = "Report generated")
           )
+          structure(list(), class = "liber_gui_background_started")
         }))
       }
       if (identical(action, "project_create")) {
@@ -1518,6 +1963,34 @@ liber_gui <- function(model = NULL, data = NULL, queue = NULL,
         }))
       }
       if (identical(action, "project_compare")) {
+        return(record("Run comparison started", {
+          if (is.null(workspace) || is.null(state$project)) {
+            .nm_stop("Open a workspace project before comparing runs.")
+          }
+          ids <- unique(as.character(unlist(
+            event$runs %||% event$snapshots %||% character()
+          )))
+          if (length(ids) != 2L) {
+            .nm_stop("Select exactly two estimation runs to compare.")
+          }
+          state$comparison_open <- TRUE
+          start_background(
+            "comparison",
+            list(
+              workspace_path = workspace$path,
+              project = state$project,
+              ids = ids
+            ),
+            label = "Run comparison",
+            metadata = list(
+              success = "Estimation runs compared",
+              project = state$project
+            )
+          )
+          structure(list(), class = "liber_gui_background_started")
+        }))
+      }
+      if (identical(action, "project_compare_sync")) {
         return(record("Estimation runs compared", {
           if (is.null(workspace) || is.null(state$project)) {
             .nm_stop("Open a workspace project before comparing runs.")
@@ -1746,10 +2219,13 @@ liber_gui <- function(model = NULL, data = NULL, queue = NULL,
         }, update_result = FALSE))
       }
       if (identical(action, "jobs_refresh")) {
-        return(record("Job queue refreshed", {
-          refresh_jobs(start = TRUE)
-          structure(list(), class = "liber_gui_validation")
-        }, update_result = FALSE))
+        refreshed <- tryCatch(refresh_jobs(start = TRUE), error = identity)
+        if (inherits(refreshed, "error")) {
+          append_log(
+            paste("Queue refresh failed:", conditionMessage(refreshed)), "error"
+          )
+        }
+        return(invisible(NULL))
       }
       if (identical(action, "jobs_clear")) {
         return(record("Finished jobs hidden from this view", {
@@ -1829,6 +2305,59 @@ liber_gui <- function(model = NULL, data = NULL, queue = NULL,
       }
       invisible(NULL)
     }, ignoreInit = TRUE)
+
+    shiny::observe({
+      task_signal()
+      if (!.liber_shared_task_active(tasks)) return()
+      shiny::invalidateLater(100, session)
+      .liber_shared_task_poll(tasks)
+      completed <- .liber_shared_task_take_completed(tasks)
+      if (!length(completed)) return()
+      for (job in completed) {
+        if (identical(job$status, "failed")) {
+          if (identical(job$metadata$operation, "comparison")) {
+            state$comparison_open <- FALSE
+          } else if (identical(job$metadata$operation, "ai_context")) {
+            state$ai_context <- list(
+              available = FALSE,
+              project = job$metadata$project %||% "",
+              project_name = "",
+              request_id = job$metadata$request_id %||% "",
+              scope = job$metadata$scope %||% "index",
+              message = job$error, runs = list()
+            )
+          } else if (identical(
+            job$metadata$operation, "report_ai_context"
+          )) {
+            state$report_ai_context <- list(
+              available = FALSE,
+              project = job$metadata$project %||% "",
+              project_name = "",
+              request_id = job$metadata$request_id %||% "",
+              run_ids = job$metadata$run_ids %||% character(),
+              message = job$error, runs = list()
+            )
+          }
+          append_log(job$error, "error")
+          shiny::showNotification(job$error, type = "error", duration = 9)
+        } else if (identical(job$status, "completed")) {
+          applied <- tryCatch(apply_background_result(job), error = identity)
+          if (inherits(applied, "error")) {
+            if (identical(job$metadata$operation, "comparison")) {
+              state$comparison_open <- FALSE
+            }
+            append_log(
+              paste("Unable to apply background result:", conditionMessage(applied)),
+              "error"
+            )
+            shiny::showNotification(
+              conditionMessage(applied), type = "error", duration = 9
+            )
+          }
+        }
+      }
+      .liber_shared_task_notify(session, "liber_workbench", tasks)
+    })
   }
   app <- shiny::shinyApp(ui, server)
   if (is.null(launch.browser)) return(app)

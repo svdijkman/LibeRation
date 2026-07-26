@@ -88,7 +88,7 @@ runs.
 The **Visual model** centre tab provides a semantic drag-and-drop editor for
 amount and response compartments, directional or bidirectional flows,
 clearance, Michaelis--Menten elimination, and arbitrary nonlinear flux
-expressions. It previews all generated `$PK/$PRED`, `$DES`, parameter, and
+expressions. It previews all generated `$PK`, `$DES`, parameter, and
 residual-error code before applying it. Applying never locks the code editor:
 the generated model and its graph are retained together, while `$DES` remains
 fully editable. Regenerating from the graph is always an explicit action and
@@ -98,22 +98,43 @@ All visual structural parameters start with log-normal between-subject
 variability (`PARAM = THETA(i) * exp(ETA(i))`). IIV can be disabled per
 parameter in the visual parameter table.
 
-### Browser-local AI
+### Model-definition routes
+
+The Code tab keeps `$PK` and `$PRED` as distinct editable sources and provides
+three radio-button routes:
+
+1. **PREDPP / ADVAN (`$PK`)** uses the conventional `$PK -> ADVAN/$DES ->
+   $ERROR` workflow.
+2. **Direct prediction (`$PRED`)** evaluates each row without compartment
+   propagation and requires `$PRED` to assign `F`.
+3. **ADVAN + prediction layer (`$PK + $PRED`)** first computes the ADVAN
+   prediction, then evaluates a LibeRation post-ADVAN `$PRED` program. It can
+   read `F_ADVAN`, `A(i)`, `$PK` assignments, and input covariates and must
+   assign the final `F`.
+
+Changing route does not discard either code draft. Validation compiles the
+active route, discovers THETA/ETA/SIGMA references across its relevant
+programs, and refreshes generated output columns without running the dataset.
+The third route is a LibeRation extension; NONMEM export folds the post-ADVAN
+program into a marked `$ERROR` block so the numerical order remains explicit.
+
+### Local AI
 
 **Activate AI** is opt-in and remembers the user's consent, selected open
-models, and separate Help and Report context settings. `Auto` selects 8K for
-the recommended 3B Help model and a conservative 6K for the 7B Report model;
-1K--16K presets and a guarded custom value are also available. The status line
-shows the approximate prompt use, output reserve, retained message count, and
-whether older context was compacted. If browser GPU allocation fails before
-generation, LibeRation retries with a smaller context.
+models, backend, and separate Help and Report context settings. WebLLM uses a
+dedicated browser WebGPU worker. Ollama uses `ellmer` from the local R session,
+discovers models installed at a loopback endpoint, and streams responses
+without blocking the Shiny session. The context control is an exact WebLLM
+context setting and an input-budget guard for Ollama; Ollama's actual context
+is set by its model or Modelfile.
 
-Activation itself does not allocate GPU memory: the dedicated WebGPU
-worker and weights are lazy-loaded only when Help or report drafting is first
-used. The download is cached under LibeRation's stable local browser origin.
-After initialization, the worker disables its network APIs before model or run
-context is sent, and receives no tools or DOM access. A compromised browser,
-extension, or operating system remains outside that isolation boundary.
+Activation itself does not allocate GPU memory. WebLLM weights are lazy-loaded
+and cached only on first use; after initialization, the worker disables its
+network APIs before model or run context is sent. Ollama is contacted only on
+first generation and is restricted to localhost. It is disabled automatically
+for hosted, proxied, session-isolated, or remotely accessed applications;
+deployments should additionally call `liber_gui(allow_ollama = FALSE)`.
+Neither backend receives LibeRation tools or mutation privileges.
 
 ## Local and remote execution
 
@@ -140,10 +161,14 @@ fit <- nm_est(control$model, data, method = "FOCEI")
 ```
 
 Supported records include `$INPUT`, `$DATA`, `$SUBROUTINES`, `$MODEL`,
-`$PK`/`$PRED`, `$DES`, `$ERROR`, `$THETA`, diagonal or block `$OMEGA`,
+`$PK` and `$PRED`, `$DES`, `$ERROR`, `$THETA`, diagonal or block `$OMEGA`,
 `$SIGMA`, `$ESTIMATION`, `$COVARIANCE`, and `$TABLE`. Supported generated
 columns in `$TABLE` become the model's `OUTPUT` selection; exporting a model
 with selected outputs creates the corresponding `$TABLE` record.
+ADVAN5/7 `$MODEL` compartments and Kmn/Km0 rates are translated to an
+`nm_matrix_model`. ADVAN9 `$AES`/`$AESINITIAL` blocks are preserved but require
+explicit translation to `ALG` and `DAE_CONFIG`; strict import fails rather than
+silently dropping an equilibrium constraint.
 
 ## Write a control stream
 

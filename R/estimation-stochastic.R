@@ -171,9 +171,16 @@
 }
 
 .nm_imp_subject_proposal <- function(evaluator, parameters, normals,
-                                     eta_maxit, tolerance) {
+                                     eta_maxit, tolerance, start = NULL) {
+  if (!is.null(start)) {
+    start <- as.numeric(start)
+    if (length(start) != evaluator$n_eta || any(!is.finite(start))) {
+      .nm_stop("Adaptive proposal ETA starts must match the subject ETA dimension and be finite.")
+    }
+  }
   mode <- evaluator$eta_mode(
     parameters$theta, parameters$sigma, parameters$omega,
+    start = start %||% rep(0, evaluator$n_eta),
     maxit = eta_maxit, tolerance = tolerance
   )
   if (mode$convergence != 0L) {
@@ -323,13 +330,25 @@
 }
 
 .nm_imp_prepare_proposals <- function(context, parameters, normals,
-                                      eta_maxit, tolerance, adaptive = TRUE) {
-  prepare_chunk <- function(evaluators, chunk_normals) {
+                                      eta_maxit, tolerance, adaptive = TRUE,
+                                      initial_eta = NULL) {
+  if (!is.null(initial_eta)) {
+    initial_eta <- as.matrix(initial_eta)
+    expected <- c(context$n_subjects, context$n_eta)
+    if (!identical(dim(initial_eta), expected) || any(!is.finite(initial_eta))) {
+      .nm_stop(
+        "`initial_eta` must be a finite ", expected[[1L]], " x ",
+        expected[[2L]], " subject-by-ETA matrix."
+      )
+    }
+  }
+  prepare_chunk <- function(evaluators, chunk_normals, chunk_starts = NULL) {
     lapply(seq_along(evaluators), function(subject) {
       if (isTRUE(adaptive)) {
         .nm_imp_subject_proposal(
           evaluators[[subject]], parameters, chunk_normals[[subject]],
-          eta_maxit, tolerance
+          eta_maxit, tolerance,
+          start = if (is.null(chunk_starts)) NULL else chunk_starts[subject, ]
         )
       } else {
         .nm_gq_fixed_subject_proposal(
@@ -339,13 +358,19 @@
     })
   }
   if (is.null(context$parallel)) {
-    return(prepare_chunk(context$subjects, normals))
+    return(prepare_chunk(context$subjects, normals, initial_eta))
   }
   chunks <- context$parallel$chunks
   normal_chunks <- lapply(chunks, function(rows) normals[rows])
+  start_chunks <- if (is.null(initial_eta)) {
+    rep(list(NULL), length(chunks))
+  } else {
+    lapply(chunks, function(rows) initial_eta[rows, , drop = FALSE])
+  }
   pieces <- parallel::clusterApply(
     context$parallel$cluster, seq_along(chunks),
-      function(index, chunks, parameters, eta_maxit, tolerance, adaptive) {
+      function(index, normal_chunks, start_chunks, parameters,
+               eta_maxit, tolerance, adaptive) {
         evaluators <- get(".liber_parallel_subjects", envir = .GlobalEnv)
         prepare <- get(
           if (isTRUE(adaptive)) ".nm_imp_subject_proposal" else
@@ -355,14 +380,21 @@
         lapply(seq_along(evaluators), function(subject) {
           if (isTRUE(adaptive)) {
             prepare(
-              evaluators[[subject]], parameters, chunks[[index]][[subject]],
-              eta_maxit, tolerance
+              evaluators[[subject]], parameters,
+              normal_chunks[[index]][[subject]], eta_maxit, tolerance,
+              start = if (is.null(start_chunks[[index]])) {
+                NULL
+              } else start_chunks[[index]][subject, ]
             )
           } else {
-            prepare(evaluators[[subject]], parameters, chunks[[index]][[subject]])
+            prepare(
+              evaluators[[subject]], parameters,
+              normal_chunks[[index]][[subject]]
+            )
           }
         })
-      }, chunks = normal_chunks, parameters = parameters,
+      }, normal_chunks = normal_chunks, start_chunks = start_chunks,
+      parameters = parameters,
       eta_maxit = eta_maxit, tolerance = tolerance, adaptive = adaptive
   )
   unlist(pieces, recursive = FALSE)
@@ -523,6 +555,42 @@
     map, objective, maxit, tolerance, trace, print_every,
     gradient = gradient, optimizer_backend = optimizer_backend
   )
+  fallback <- NULL
+  if (imp_gradient == "score" &&
+      !identical(as.integer(optimizer$convergence), 0L)) {
+    # The normalized importance-score gradient deliberately omits proposal
+    # derivatives. It is an efficient search direction but is not the exact
+    # derivative of the finite common-random-number objective, so L-BFGS-B can
+    # report an abnormal line-search termination after reaching its vicinity.
+    # Finish such runs against the exact finite-CRN objective without an
+    # analytic gradient. This retains the practical fast path while ensuring
+    # that a completed fit has an optimizer convergence result it can defend.
+    fallback_map <- map
+    # Restart from the declared model initial values. At an abnormal L-BFGS-B
+    # line-search endpoint the finite-difference perturbations can be below the
+    # local numerical resolution, reproducing the same status even though a
+    # clean finite-CRN search converges normally.
+    fallback_map$start <- map$start
+    fallback <- .nm_outer_optim(
+      fallback_map, objective, maxit, tolerance, trace, print_every,
+      gradient = NULL, optimizer_backend = "r"
+    )
+    if (identical(as.integer(fallback$convergence), 0L) &&
+        is.finite(fallback$value) &&
+        fallback$value <= optimizer$value +
+          tolerance * max(abs(optimizer$value), 1)) {
+      fallback$score_search <- list(
+        convergence = optimizer$convergence, value = optimizer$value,
+        par = optimizer$par, backend = optimizer$backend,
+        objective_evaluations = optimizer$objective_evaluations,
+        gradient_evaluations = optimizer$gradient_evaluations
+      )
+      fallback$backend <- paste0(
+        optimizer$backend, "+", fallback$backend, "-finite-crn-fallback"
+      )
+      optimizer <- fallback
+    }
+  }
   parameters <- map$decode(optimizer$par)
   modes <- .nm_subject_modes(
     context, parameters, maxit = eta_maxit, tolerance = tolerance,
@@ -533,8 +601,15 @@
     diagnostics = list(
       n_imp = n_imp, seed = seed, eta_maxit = eta_maxit,
       common_random_numbers = TRUE, imp_gradient = imp_gradient,
+      finite_crn_fallback = !is.null(optimizer$score_search),
       population_gradient = if (imp_gradient == "score") {
-        "normalized importance-score CppAD gradient (proposal derivative omitted)"
+        paste0(
+          "normalized importance-score CppAD gradient (proposal derivative ",
+          "omitted)",
+          if (!is.null(optimizer$score_search)) {
+            " with exact finite-CRN derivative-free convergence fallback"
+          } else ""
+        )
       } else "finite common-random-number objective"
     )
   )
@@ -1106,7 +1181,7 @@
     colMeans(chain[, eta_start + seq_len(context$n_subjects * context$n_eta), drop = FALSE]),
     context$n_subjects, context$n_eta, byrow = TRUE
   ) else matrix(numeric(), context$n_subjects, 0L)
-  final_state <- list(parameters = parameters, eta = eta)
+  final_state <- .nm_bayes_state(map, map$encode(parameters), eta)
   final_objective <- -2 * log_posterior(final_state)
   modes <- lapply(seq_len(context$n_subjects), function(subject) {
     list(par = eta[subject, ], convergence = 0L, jitter = 0)

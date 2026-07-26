@@ -32,7 +32,8 @@ A list with `value`, `jacobian`, and differentiation `domain`.
 \description{
 Records the complete analytical event/ADVAN/matrix path with CppAD and
 returns derivatives with respect to THETA, every subject ETA, and SIGMA.
-Dataset values and event times are treated as fixed inputs. ADVAN6 and
-ADVAN13 record their accepted adaptive trajectories—including periodic
-steady-state shooting—on the same persistent CppAD tape.
+Dataset values and event times are treated as fixed inputs. General ODE,
+Michaelis--Menten, and equilibrium-DAE ADVANs record their accepted
+adaptive trajectories--including periodic steady-state shooting--on the
+same persistent CppAD tape.
 }
