@@ -12,7 +12,8 @@
 
 .liber_shared_user_root <- function(
     ..., envvar = NULL, option = NULL, create = FALSE,
-    documents_on_windows = TRUE, normalize = FALSE) {
+    documents_on_windows = TRUE, normalize = FALSE,
+    root_name = "LibeR") {
   configured <- ""
   if (!is.null(envvar) && nzchar(envvar)) {
     configured <- Sys.getenv(envvar, unset = "")
@@ -34,7 +35,12 @@
     } else {
       home
     }
-    path <- file.path(base, "LibeR", ...)
+    root_name <- as.character(root_name)[[1L]]
+    if (!nzchar(root_name) || root_name %in% c(".", "..") ||
+        grepl("[/\\\\]", root_name)) {
+      stop("`root_name` must be a single directory name.", call. = FALSE)
+    }
+    path <- file.path(base, root_name, ...)
   }
   if (isTRUE(create) && !dir.exists(path)) {
     dir.create(path, recursive = TRUE, showWarnings = FALSE)

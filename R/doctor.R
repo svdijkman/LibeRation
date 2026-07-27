@@ -9,7 +9,7 @@
       LibeRality = list(version = "0.2.5", required = FALSE),
       LibeRties = list(version = "0.7.5", required = FALSE)
     ),
-    contracts = list(model = 2L, job = 2L, result = 2L,
+    contracts = list(model = 4L, job = 2L, result = 2L,
                      liberation_workspace = 2L, liberties_queue = 2L)
   )
 }
