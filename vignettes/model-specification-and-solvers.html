@@ -367,6 +367,42 @@ prior, and mixture configuration.</li>
 <code>SIGMA(i)</code>, <code>ERR(i)</code>, supported mathematical
 functions, and tape-safe <code>ifelse()</code> expressions.</p>
 </div>
+<div id="mu-referencing" class="section level2">
+<h2>MU referencing</h2>
+<p><code>nm_mu()</code> records the population mean associated with an
+ETA and generates editable NONMEM-style <code>MU_n</code> code. The
+declaration is optional: conventional expressions such as
+<code>CL=THETA(1)*exp(ETA(1))</code> remain fully supported.</p>
+<div class="sourceCode" id="cb1"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb1-1"><a href="#cb1-1" tabindex="-1"></a>model <span class="ot">&lt;-</span> <span class="fu">nm_model</span>(</span>
+<span id="cb1-2"><a href="#cb1-2" tabindex="-1"></a>  <span class="at">INPUT =</span> <span class="fu">c</span>(<span class="st">&quot;ID&quot;</span>, <span class="st">&quot;TIME&quot;</span>, <span class="st">&quot;EVID&quot;</span>, <span class="st">&quot;AMT&quot;</span>, <span class="st">&quot;DV&quot;</span>, <span class="st">&quot;MDV&quot;</span>, <span class="st">&quot;WT&quot;</span>),</span>
+<span id="cb1-3"><a href="#cb1-3" tabindex="-1"></a>  <span class="at">COVARIATES =</span> <span class="st">&quot;WT&quot;</span>,</span>
+<span id="cb1-4"><a href="#cb1-4" tabindex="-1"></a>  <span class="at">ADVAN =</span> <span class="dv">1</span>,</span>
+<span id="cb1-5"><a href="#cb1-5" tabindex="-1"></a>  <span class="at">PRED =</span> <span class="st">&quot;V=THETA(2); S1=V&quot;</span>,</span>
+<span id="cb1-6"><a href="#cb1-6" tabindex="-1"></a>  <span class="at">ERROR =</span> <span class="st">&quot;Y=F+ERR(1)&quot;</span>,</span>
+<span id="cb1-7"><a href="#cb1-7" tabindex="-1"></a>  <span class="at">THETAS =</span> <span class="fu">data.frame</span>(<span class="at">THETA=</span><span class="dv">1</span><span class="sc">:</span><span class="dv">3</span>, <span class="at">Value=</span><span class="fu">c</span>(<span class="dv">2</span>, <span class="dv">20</span>, <span class="fl">0.75</span>)),</span>
+<span id="cb1-8"><a href="#cb1-8" tabindex="-1"></a>  <span class="at">OMEGAS =</span> <span class="fu">data.frame</span>(<span class="at">OMEGA=</span><span class="dv">1</span>, <span class="at">Value=</span><span class="fl">0.1</span>),</span>
+<span id="cb1-9"><a href="#cb1-9" tabindex="-1"></a>  <span class="at">SIGMAS =</span> <span class="fu">data.frame</span>(<span class="at">SIGMA=</span><span class="dv">1</span>, <span class="at">Value=</span><span class="fl">0.1</span>),</span>
+<span id="cb1-10"><a href="#cb1-10" tabindex="-1"></a>  <span class="at">MU =</span> <span class="fu">nm_mu</span>(</span>
+<span id="cb1-11"><a href="#cb1-11" tabindex="-1"></a>    <span class="at">eta =</span> <span class="dv">1</span>,</span>
+<span id="cb1-12"><a href="#cb1-12" tabindex="-1"></a>    <span class="at">expression =</span> <span class="st">&quot;log(THETA(1))+THETA(3)*log(WT/70)&quot;</span>,</span>
+<span id="cb1-13"><a href="#cb1-13" tabindex="-1"></a>    <span class="at">parameter =</span> <span class="st">&quot;CL&quot;</span></span>
+<span id="cb1-14"><a href="#cb1-14" tabindex="-1"></a>  )</span>
+<span id="cb1-15"><a href="#cb1-15" tabindex="-1"></a>)</span></code></pre></div>
+<p>The resulting code contains <code>MU_1=...</code> and
+<code>CL=exp(MU_1+ETA(1))</code>. Covariates are inferred from the
+expression, must be declared in <code>COVARIATES</code>, and must be
+constant within each subject. MU metadata is preserved by model-contract
+version 4 and NONMEM control-stream round-tripping. The current
+estimators use the algebraically equivalent differentiable model.
+Eligible affine MU structures use vectorized, OMEGA-keyed generalized
+least-squares SAEM updates and a closed-form-only M-step when no
+ordinary parameters remain. IMP re-centres cached modes and, for
+subject-varying MU designs such as estimated covariate coefficients,
+automatically refines the practical score solution against the exact
+finite common-random-number objective. These estimator specializations
+do not change the model meaning and record their use or fallback reason
+in fit diagnostics.</p>
+</div>
 <div id="experimental-mechanistic-and-latent-state-engines" class="section level2">
 <h2>Experimental mechanistic and latent-state engines</h2>
 <p>Longer-range engines are opt-in so that exploratory methods cannot be
@@ -377,14 +413,14 @@ and queue payload.</p>
 <p>Delay models use <code>LAG(A(i), delay_name)</code> in
 <code>$DES</code>, with the delay assignment defined in
 <code>$PK/$PRED</code>:</p>
-<div class="sourceCode" id="cb1"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb1-1"><a href="#cb1-1" tabindex="-1"></a>model <span class="ot">&lt;-</span> <span class="fu">nm_model</span>(</span>
-<span id="cb1-2"><a href="#cb1-2" tabindex="-1"></a>  <span class="at">INPUT =</span> <span class="fu">c</span>(<span class="st">&quot;ID&quot;</span>, <span class="st">&quot;TIME&quot;</span>, <span class="st">&quot;EVID&quot;</span>, <span class="st">&quot;AMT&quot;</span>), <span class="at">ADVAN =</span> <span class="dv">6</span>,</span>
-<span id="cb1-3"><a href="#cb1-3" tabindex="-1"></a>  <span class="at">PRED =</span> <span class="st">&quot;K=THETA(1); TAU=THETA(2); S1=1&quot;</span>,</span>
-<span id="cb1-4"><a href="#cb1-4" tabindex="-1"></a>  <span class="at">DES =</span> <span class="st">&quot;DADT(1)=-K*A(1)+0.05*LAG(A(1),TAU)&quot;</span>,</span>
-<span id="cb1-5"><a href="#cb1-5" tabindex="-1"></a>  <span class="at">THETAS =</span> <span class="fu">data.frame</span>(<span class="at">THETA=</span><span class="dv">1</span><span class="sc">:</span><span class="dv">2</span>, <span class="at">Value=</span><span class="fu">c</span>(<span class="fl">0.4</span>, <span class="fl">0.5</span>)),</span>
-<span id="cb1-6"><a href="#cb1-6" tabindex="-1"></a>  <span class="at">DDE_CONFIG =</span> <span class="fu">nm_dde_config</span>(<span class="at">step=</span><span class="fl">0.05</span>, <span class="at">minimum_delay=</span><span class="fl">0.5</span>),</span>
-<span id="cb1-7"><a href="#cb1-7" tabindex="-1"></a>  <span class="at">EXPERIMENTAL =</span> <span class="fu">nm_experimental_config</span>(<span class="cn">TRUE</span>)</span>
-<span id="cb1-8"><a href="#cb1-8" tabindex="-1"></a>)</span></code></pre></div>
+<div class="sourceCode" id="cb2"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb2-1"><a href="#cb2-1" tabindex="-1"></a>model <span class="ot">&lt;-</span> <span class="fu">nm_model</span>(</span>
+<span id="cb2-2"><a href="#cb2-2" tabindex="-1"></a>  <span class="at">INPUT =</span> <span class="fu">c</span>(<span class="st">&quot;ID&quot;</span>, <span class="st">&quot;TIME&quot;</span>, <span class="st">&quot;EVID&quot;</span>, <span class="st">&quot;AMT&quot;</span>), <span class="at">ADVAN =</span> <span class="dv">6</span>,</span>
+<span id="cb2-3"><a href="#cb2-3" tabindex="-1"></a>  <span class="at">PRED =</span> <span class="st">&quot;K=THETA(1); TAU=THETA(2); S1=1&quot;</span>,</span>
+<span id="cb2-4"><a href="#cb2-4" tabindex="-1"></a>  <span class="at">DES =</span> <span class="st">&quot;DADT(1)=-K*A(1)+0.05*LAG(A(1),TAU)&quot;</span>,</span>
+<span id="cb2-5"><a href="#cb2-5" tabindex="-1"></a>  <span class="at">THETAS =</span> <span class="fu">data.frame</span>(<span class="at">THETA=</span><span class="dv">1</span><span class="sc">:</span><span class="dv">2</span>, <span class="at">Value=</span><span class="fu">c</span>(<span class="fl">0.4</span>, <span class="fl">0.5</span>)),</span>
+<span id="cb2-6"><a href="#cb2-6" tabindex="-1"></a>  <span class="at">DDE_CONFIG =</span> <span class="fu">nm_dde_config</span>(<span class="at">step=</span><span class="fl">0.05</span>, <span class="at">minimum_delay=</span><span class="fl">0.5</span>),</span>
+<span id="cb2-7"><a href="#cb2-7" tabindex="-1"></a>  <span class="at">EXPERIMENTAL =</span> <span class="fu">nm_experimental_config</span>(<span class="cn">TRUE</span>)</span>
+<span id="cb2-8"><a href="#cb2-8" tabindex="-1"></a>)</span></code></pre></div>
 <p>Index-1 DAEs place one <code>RES(i)</code> equation per algebraic
 variable in <code>$ALG</code>. An optional logical sparsity matrix
 enables independent block solves. Named stoichiometric systems can
@@ -409,18 +445,18 @@ simulations and fitted runs. <code>nm_model_outputs()</code> discovers
 assignment names from the model text without executing the model and
 combines them with standard prediction, residual, ETA, and compartment
 outputs.</p>
-<div class="sourceCode" id="cb2"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb2-1"><a href="#cb2-1" tabindex="-1"></a>model <span class="ot">&lt;-</span> <span class="fu">nm_model</span>(</span>
-<span id="cb2-2"><a href="#cb2-2" tabindex="-1"></a>  <span class="at">INPUT =</span> <span class="fu">c</span>(<span class="st">&quot;ID&quot;</span>, <span class="st">&quot;TIME&quot;</span>, <span class="st">&quot;EVID&quot;</span>, <span class="st">&quot;AMT&quot;</span>, <span class="st">&quot;DV&quot;</span>, <span class="st">&quot;MDV&quot;</span>),</span>
-<span id="cb2-3"><a href="#cb2-3" tabindex="-1"></a>  <span class="at">OUTPUT =</span> <span class="fu">c</span>(<span class="st">&quot;PRED&quot;</span>, <span class="st">&quot;IPRED&quot;</span>, <span class="st">&quot;CWRES&quot;</span>, <span class="st">&quot;CL&quot;</span>, <span class="st">&quot;V&quot;</span>, <span class="st">&quot;A1&quot;</span>),</span>
-<span id="cb2-4"><a href="#cb2-4" tabindex="-1"></a>  <span class="at">ADVAN =</span> <span class="dv">1</span>,</span>
-<span id="cb2-5"><a href="#cb2-5" tabindex="-1"></a>  <span class="at">PRED =</span> <span class="st">&quot;CL=THETA(1)*exp(ETA(1)); V=THETA(2); K=CL/V; S1=V&quot;</span>,</span>
-<span id="cb2-6"><a href="#cb2-6" tabindex="-1"></a>  <span class="at">ERROR =</span> <span class="st">&quot;Y=F+ERR(1)&quot;</span>,</span>
-<span id="cb2-7"><a href="#cb2-7" tabindex="-1"></a>  <span class="at">THETAS =</span> <span class="fu">data.frame</span>(<span class="at">THETA =</span> <span class="dv">1</span><span class="sc">:</span><span class="dv">2</span>, <span class="at">Value =</span> <span class="fu">c</span>(<span class="dv">2</span>, <span class="dv">20</span>)),</span>
-<span id="cb2-8"><a href="#cb2-8" tabindex="-1"></a>  <span class="at">OMEGAS =</span> <span class="fu">data.frame</span>(<span class="at">OMEGA =</span> <span class="dv">1</span>, <span class="at">Value =</span> <span class="fl">0.1</span>),</span>
-<span id="cb2-9"><a href="#cb2-9" tabindex="-1"></a>  <span class="at">SIGMAS =</span> <span class="fu">data.frame</span>(<span class="at">SIGMA =</span> <span class="dv">1</span>, <span class="at">Value =</span> <span class="fl">0.1</span>)</span>
-<span id="cb2-10"><a href="#cb2-10" tabindex="-1"></a>)</span>
-<span id="cb2-11"><a href="#cb2-11" tabindex="-1"></a></span>
-<span id="cb2-12"><a href="#cb2-12" tabindex="-1"></a><span class="fu">nm_model_outputs</span>(model)</span></code></pre></div>
+<div class="sourceCode" id="cb3"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb3-1"><a href="#cb3-1" tabindex="-1"></a>model <span class="ot">&lt;-</span> <span class="fu">nm_model</span>(</span>
+<span id="cb3-2"><a href="#cb3-2" tabindex="-1"></a>  <span class="at">INPUT =</span> <span class="fu">c</span>(<span class="st">&quot;ID&quot;</span>, <span class="st">&quot;TIME&quot;</span>, <span class="st">&quot;EVID&quot;</span>, <span class="st">&quot;AMT&quot;</span>, <span class="st">&quot;DV&quot;</span>, <span class="st">&quot;MDV&quot;</span>),</span>
+<span id="cb3-3"><a href="#cb3-3" tabindex="-1"></a>  <span class="at">OUTPUT =</span> <span class="fu">c</span>(<span class="st">&quot;PRED&quot;</span>, <span class="st">&quot;IPRED&quot;</span>, <span class="st">&quot;CWRES&quot;</span>, <span class="st">&quot;CL&quot;</span>, <span class="st">&quot;V&quot;</span>, <span class="st">&quot;A1&quot;</span>),</span>
+<span id="cb3-4"><a href="#cb3-4" tabindex="-1"></a>  <span class="at">ADVAN =</span> <span class="dv">1</span>,</span>
+<span id="cb3-5"><a href="#cb3-5" tabindex="-1"></a>  <span class="at">PRED =</span> <span class="st">&quot;CL=THETA(1)*exp(ETA(1)); V=THETA(2); K=CL/V; S1=V&quot;</span>,</span>
+<span id="cb3-6"><a href="#cb3-6" tabindex="-1"></a>  <span class="at">ERROR =</span> <span class="st">&quot;Y=F+ERR(1)&quot;</span>,</span>
+<span id="cb3-7"><a href="#cb3-7" tabindex="-1"></a>  <span class="at">THETAS =</span> <span class="fu">data.frame</span>(<span class="at">THETA =</span> <span class="dv">1</span><span class="sc">:</span><span class="dv">2</span>, <span class="at">Value =</span> <span class="fu">c</span>(<span class="dv">2</span>, <span class="dv">20</span>)),</span>
+<span id="cb3-8"><a href="#cb3-8" tabindex="-1"></a>  <span class="at">OMEGAS =</span> <span class="fu">data.frame</span>(<span class="at">OMEGA =</span> <span class="dv">1</span>, <span class="at">Value =</span> <span class="fl">0.1</span>),</span>
+<span id="cb3-9"><a href="#cb3-9" tabindex="-1"></a>  <span class="at">SIGMAS =</span> <span class="fu">data.frame</span>(<span class="at">SIGMA =</span> <span class="dv">1</span>, <span class="at">Value =</span> <span class="fl">0.1</span>)</span>
+<span id="cb3-10"><a href="#cb3-10" tabindex="-1"></a>)</span>
+<span id="cb3-11"><a href="#cb3-11" tabindex="-1"></a></span>
+<span id="cb3-12"><a href="#cb3-12" tabindex="-1"></a><span class="fu">nm_model_outputs</span>(model)</span></code></pre></div>
 <p>In the GUI, <strong>Validate</strong> compiles the unsaved editor
 draft and refreshes the generated-column choices. Selected columns are
 calculated once with the run, saved in its result, and merged into Data
@@ -494,22 +530,22 @@ paths and automatically retape at a finite valid anchor.</p>
 propagation for a semantic compartment graph.
 <code>SOLVER = &quot;auto&quot;</code> chooses the specialized ADVAN kernel when
 available.</p>
-<div class="sourceCode" id="cb3"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb3-1"><a href="#cb3-1" tabindex="-1"></a>ode_model <span class="ot">&lt;-</span> <span class="fu">nm_model</span>(</span>
-<span id="cb3-2"><a href="#cb3-2" tabindex="-1"></a>  <span class="at">INPUT =</span> <span class="fu">c</span>(<span class="st">&quot;ID&quot;</span>, <span class="st">&quot;TIME&quot;</span>, <span class="st">&quot;EVID&quot;</span>, <span class="st">&quot;AMT&quot;</span>, <span class="st">&quot;CMT&quot;</span>, <span class="st">&quot;DV&quot;</span>, <span class="st">&quot;MDV&quot;</span>),</span>
-<span id="cb3-3"><a href="#cb3-3" tabindex="-1"></a>  <span class="at">ADVAN =</span> <span class="dv">13</span>,</span>
-<span id="cb3-4"><a href="#cb3-4" tabindex="-1"></a>  <span class="at">DOSECMP =</span> <span class="dv">1</span>,</span>
-<span id="cb3-5"><a href="#cb3-5" tabindex="-1"></a>  <span class="at">OBSCMP =</span> <span class="dv">2</span>,</span>
-<span id="cb3-6"><a href="#cb3-6" tabindex="-1"></a>  <span class="at">PRED =</span> <span class="st">&quot;KFAST=THETA(1); KSLOW=THETA(2); S2=THETA(3)&quot;</span>,</span>
-<span id="cb3-7"><a href="#cb3-7" tabindex="-1"></a>  <span class="at">DES =</span> <span class="fu">paste</span>(</span>
-<span id="cb3-8"><a href="#cb3-8" tabindex="-1"></a>    <span class="st">&quot;DADT(1) = -KFAST * A(1)&quot;</span>,</span>
-<span id="cb3-9"><a href="#cb3-9" tabindex="-1"></a>    <span class="st">&quot;DADT(2) = KFAST * A(1) - KSLOW * A(2)&quot;</span>,</span>
-<span id="cb3-10"><a href="#cb3-10" tabindex="-1"></a>    <span class="at">sep =</span> <span class="st">&quot;</span><span class="sc">\n</span><span class="st">&quot;</span></span>
-<span id="cb3-11"><a href="#cb3-11" tabindex="-1"></a>  ),</span>
-<span id="cb3-12"><a href="#cb3-12" tabindex="-1"></a>  <span class="at">ERROR =</span> <span class="st">&quot;Y = F + ERR(1)&quot;</span>,</span>
-<span id="cb3-13"><a href="#cb3-13" tabindex="-1"></a>  <span class="at">THETAS =</span> <span class="fu">data.frame</span>(<span class="at">THETA =</span> <span class="dv">1</span><span class="sc">:</span><span class="dv">3</span>, <span class="at">Value =</span> <span class="fu">c</span>(<span class="dv">100</span>, <span class="dv">1</span>, <span class="dv">20</span>)),</span>
-<span id="cb3-14"><a href="#cb3-14" tabindex="-1"></a>  <span class="at">SIGMAS =</span> <span class="fu">data.frame</span>(<span class="at">SIGMA =</span> <span class="dv">1</span>, <span class="at">Value =</span> <span class="fl">0.1</span>),</span>
-<span id="cb3-15"><a href="#cb3-15" tabindex="-1"></a>  <span class="at">ODE_CONTROL =</span> <span class="fu">list</span>(<span class="at">rtol =</span> <span class="fl">1e-7</span>, <span class="at">atol =</span> <span class="fl">1e-9</span>, <span class="at">max_steps =</span> <span class="dv">100000</span>)</span>
-<span id="cb3-16"><a href="#cb3-16" tabindex="-1"></a>)</span></code></pre></div>
+<div class="sourceCode" id="cb4"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb4-1"><a href="#cb4-1" tabindex="-1"></a>ode_model <span class="ot">&lt;-</span> <span class="fu">nm_model</span>(</span>
+<span id="cb4-2"><a href="#cb4-2" tabindex="-1"></a>  <span class="at">INPUT =</span> <span class="fu">c</span>(<span class="st">&quot;ID&quot;</span>, <span class="st">&quot;TIME&quot;</span>, <span class="st">&quot;EVID&quot;</span>, <span class="st">&quot;AMT&quot;</span>, <span class="st">&quot;CMT&quot;</span>, <span class="st">&quot;DV&quot;</span>, <span class="st">&quot;MDV&quot;</span>),</span>
+<span id="cb4-3"><a href="#cb4-3" tabindex="-1"></a>  <span class="at">ADVAN =</span> <span class="dv">13</span>,</span>
+<span id="cb4-4"><a href="#cb4-4" tabindex="-1"></a>  <span class="at">DOSECMP =</span> <span class="dv">1</span>,</span>
+<span id="cb4-5"><a href="#cb4-5" tabindex="-1"></a>  <span class="at">OBSCMP =</span> <span class="dv">2</span>,</span>
+<span id="cb4-6"><a href="#cb4-6" tabindex="-1"></a>  <span class="at">PRED =</span> <span class="st">&quot;KFAST=THETA(1); KSLOW=THETA(2); S2=THETA(3)&quot;</span>,</span>
+<span id="cb4-7"><a href="#cb4-7" tabindex="-1"></a>  <span class="at">DES =</span> <span class="fu">paste</span>(</span>
+<span id="cb4-8"><a href="#cb4-8" tabindex="-1"></a>    <span class="st">&quot;DADT(1) = -KFAST * A(1)&quot;</span>,</span>
+<span id="cb4-9"><a href="#cb4-9" tabindex="-1"></a>    <span class="st">&quot;DADT(2) = KFAST * A(1) - KSLOW * A(2)&quot;</span>,</span>
+<span id="cb4-10"><a href="#cb4-10" tabindex="-1"></a>    <span class="at">sep =</span> <span class="st">&quot;</span><span class="sc">\n</span><span class="st">&quot;</span></span>
+<span id="cb4-11"><a href="#cb4-11" tabindex="-1"></a>  ),</span>
+<span id="cb4-12"><a href="#cb4-12" tabindex="-1"></a>  <span class="at">ERROR =</span> <span class="st">&quot;Y = F + ERR(1)&quot;</span>,</span>
+<span id="cb4-13"><a href="#cb4-13" tabindex="-1"></a>  <span class="at">THETAS =</span> <span class="fu">data.frame</span>(<span class="at">THETA =</span> <span class="dv">1</span><span class="sc">:</span><span class="dv">3</span>, <span class="at">Value =</span> <span class="fu">c</span>(<span class="dv">100</span>, <span class="dv">1</span>, <span class="dv">20</span>)),</span>
+<span id="cb4-14"><a href="#cb4-14" tabindex="-1"></a>  <span class="at">SIGMAS =</span> <span class="fu">data.frame</span>(<span class="at">SIGMA =</span> <span class="dv">1</span>, <span class="at">Value =</span> <span class="fl">0.1</span>),</span>
+<span id="cb4-15"><a href="#cb4-15" tabindex="-1"></a>  <span class="at">ODE_CONTROL =</span> <span class="fu">list</span>(<span class="at">rtol =</span> <span class="fl">1e-7</span>, <span class="at">atol =</span> <span class="fl">1e-9</span>, <span class="at">max_steps =</span> <span class="dv">100000</span>)</span>
+<span id="cb4-16"><a href="#cb4-16" tabindex="-1"></a>)</span></code></pre></div>
 </div>
 <div id="parameter-bounds-and-fixed-values" class="section level2">
 <h2>Parameter bounds and fixed values</h2>
@@ -517,20 +553,20 @@ available.</p>
 <code>Upper</code>, and <code>FIX</code>. Bounds are applied by the
 outer optimizer. Variance parameters must remain non-negative; a zero
 OMEGA is allowed only when fixed.</p>
-<div class="sourceCode" id="cb4"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb4-1"><a href="#cb4-1" tabindex="-1"></a>theta <span class="ot">&lt;-</span> <span class="fu">data.frame</span>(</span>
-<span id="cb4-2"><a href="#cb4-2" tabindex="-1"></a>  <span class="at">THETA =</span> <span class="dv">1</span><span class="sc">:</span><span class="dv">2</span>,</span>
-<span id="cb4-3"><a href="#cb4-3" tabindex="-1"></a>  <span class="at">Lower =</span> <span class="fu">c</span>(<span class="fl">0.01</span>, <span class="dv">1</span>),</span>
-<span id="cb4-4"><a href="#cb4-4" tabindex="-1"></a>  <span class="at">Value =</span> <span class="fu">c</span>(<span class="dv">2</span>, <span class="dv">20</span>),</span>
-<span id="cb4-5"><a href="#cb4-5" tabindex="-1"></a>  <span class="at">Upper =</span> <span class="fu">c</span>(<span class="dv">20</span>, <span class="dv">200</span>),</span>
-<span id="cb4-6"><a href="#cb4-6" tabindex="-1"></a>  <span class="at">FIX =</span> <span class="fu">c</span>(<span class="cn">FALSE</span>, <span class="cn">FALSE</span>)</span>
-<span id="cb4-7"><a href="#cb4-7" tabindex="-1"></a>)</span>
-<span id="cb4-8"><a href="#cb4-8" tabindex="-1"></a></span>
-<span id="cb4-9"><a href="#cb4-9" tabindex="-1"></a>omega_full <span class="ot">&lt;-</span> <span class="fu">data.frame</span>(</span>
-<span id="cb4-10"><a href="#cb4-10" tabindex="-1"></a>  <span class="at">OMEGA =</span> <span class="dv">1</span><span class="sc">:</span><span class="dv">3</span>,</span>
-<span id="cb4-11"><a href="#cb4-11" tabindex="-1"></a>  <span class="at">ROW =</span> <span class="fu">c</span>(<span class="dv">1</span>, <span class="dv">2</span>, <span class="dv">2</span>),</span>
-<span id="cb4-12"><a href="#cb4-12" tabindex="-1"></a>  <span class="at">COL =</span> <span class="fu">c</span>(<span class="dv">1</span>, <span class="dv">1</span>, <span class="dv">2</span>),</span>
-<span id="cb4-13"><a href="#cb4-13" tabindex="-1"></a>  <span class="at">Value =</span> <span class="fu">c</span>(<span class="fl">0.10</span>, <span class="sc">-</span><span class="fl">0.02</span>, <span class="fl">0.20</span>)</span>
-<span id="cb4-14"><a href="#cb4-14" tabindex="-1"></a>)</span></code></pre></div>
+<div class="sourceCode" id="cb5"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb5-1"><a href="#cb5-1" tabindex="-1"></a>theta <span class="ot">&lt;-</span> <span class="fu">data.frame</span>(</span>
+<span id="cb5-2"><a href="#cb5-2" tabindex="-1"></a>  <span class="at">THETA =</span> <span class="dv">1</span><span class="sc">:</span><span class="dv">2</span>,</span>
+<span id="cb5-3"><a href="#cb5-3" tabindex="-1"></a>  <span class="at">Lower =</span> <span class="fu">c</span>(<span class="fl">0.01</span>, <span class="dv">1</span>),</span>
+<span id="cb5-4"><a href="#cb5-4" tabindex="-1"></a>  <span class="at">Value =</span> <span class="fu">c</span>(<span class="dv">2</span>, <span class="dv">20</span>),</span>
+<span id="cb5-5"><a href="#cb5-5" tabindex="-1"></a>  <span class="at">Upper =</span> <span class="fu">c</span>(<span class="dv">20</span>, <span class="dv">200</span>),</span>
+<span id="cb5-6"><a href="#cb5-6" tabindex="-1"></a>  <span class="at">FIX =</span> <span class="fu">c</span>(<span class="cn">FALSE</span>, <span class="cn">FALSE</span>)</span>
+<span id="cb5-7"><a href="#cb5-7" tabindex="-1"></a>)</span>
+<span id="cb5-8"><a href="#cb5-8" tabindex="-1"></a></span>
+<span id="cb5-9"><a href="#cb5-9" tabindex="-1"></a>omega_full <span class="ot">&lt;-</span> <span class="fu">data.frame</span>(</span>
+<span id="cb5-10"><a href="#cb5-10" tabindex="-1"></a>  <span class="at">OMEGA =</span> <span class="dv">1</span><span class="sc">:</span><span class="dv">3</span>,</span>
+<span id="cb5-11"><a href="#cb5-11" tabindex="-1"></a>  <span class="at">ROW =</span> <span class="fu">c</span>(<span class="dv">1</span>, <span class="dv">2</span>, <span class="dv">2</span>),</span>
+<span id="cb5-12"><a href="#cb5-12" tabindex="-1"></a>  <span class="at">COL =</span> <span class="fu">c</span>(<span class="dv">1</span>, <span class="dv">1</span>, <span class="dv">2</span>),</span>
+<span id="cb5-13"><a href="#cb5-13" tabindex="-1"></a>  <span class="at">Value =</span> <span class="fu">c</span>(<span class="fl">0.10</span>, <span class="sc">-</span><span class="fl">0.02</span>, <span class="fl">0.20</span>)</span>
+<span id="cb5-14"><a href="#cb5-14" tabindex="-1"></a>)</span></code></pre></div>
 <p>A full OMEGA uses the complete lower triangle. Select it with
 <code>nm_lik_config(omega = &quot;full&quot;)</code>; the resulting matrix must be
 positive definite. A diagonal table needs only <code>OMEGA</code> and
@@ -538,22 +574,22 @@ positive definite. A diagonal table needs only <code>OMEGA</code> and
 </div>
 <div id="priors-mixtures-censoring-and-iov" class="section level2">
 <h2>Priors, mixtures, censoring, and IOV</h2>
-<div class="sourceCode" id="cb5"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb5-1"><a href="#cb5-1" tabindex="-1"></a>priors <span class="ot">&lt;-</span> <span class="fu">rbind</span>(</span>
-<span id="cb5-2"><a href="#cb5-2" tabindex="-1"></a>  <span class="fu">nm_prior</span>(<span class="st">&quot;THETA1&quot;</span>, <span class="st">&quot;normal&quot;</span>, <span class="at">mean =</span> <span class="dv">2</span>, <span class="at">sd =</span> <span class="fl">0.5</span>),</span>
-<span id="cb5-3"><a href="#cb5-3" tabindex="-1"></a>  <span class="fu">nm_prior</span>(<span class="st">&quot;SIGMA1&quot;</span>, <span class="st">&quot;lognormal&quot;</span>, <span class="at">mean =</span> <span class="sc">-</span><span class="dv">2</span>, <span class="at">sd =</span> <span class="fl">0.5</span>),</span>
-<span id="cb5-4"><a href="#cb5-4" tabindex="-1"></a>  <span class="fu">nm_prior</span>(<span class="st">&quot;OMEGA1&quot;</span>, <span class="st">&quot;inverse_gamma&quot;</span>, <span class="at">shape =</span> <span class="dv">3</span>, <span class="at">rate =</span> <span class="fl">0.2</span>)</span>
-<span id="cb5-5"><a href="#cb5-5" tabindex="-1"></a>)</span>
-<span id="cb5-6"><a href="#cb5-6" tabindex="-1"></a></span>
-<span id="cb5-7"><a href="#cb5-7" tabindex="-1"></a>likelihood <span class="ot">&lt;-</span> <span class="fu">nm_lik_config</span>(</span>
-<span id="cb5-8"><a href="#cb5-8" tabindex="-1"></a>  <span class="at">omega =</span> <span class="st">&quot;full&quot;</span>,</span>
-<span id="cb5-9"><a href="#cb5-9" tabindex="-1"></a>  <span class="at">sigma_parameterization =</span> <span class="st">&quot;variance&quot;</span>,</span>
-<span id="cb5-10"><a href="#cb5-10" tabindex="-1"></a>  <span class="at">blq_method =</span> <span class="st">&quot;m3&quot;</span>,</span>
-<span id="cb5-11"><a href="#cb5-11" tabindex="-1"></a>  <span class="at">lloq =</span> <span class="fl">0.05</span>,</span>
-<span id="cb5-12"><a href="#cb5-12" tabindex="-1"></a>  <span class="at">iov =</span> <span class="dv">1</span>,</span>
-<span id="cb5-13"><a href="#cb5-13" tabindex="-1"></a>  <span class="at">occasion_col =</span> <span class="st">&quot;OCC&quot;</span>,</span>
-<span id="cb5-14"><a href="#cb5-14" tabindex="-1"></a>  <span class="at">priors =</span> priors,</span>
-<span id="cb5-15"><a href="#cb5-15" tabindex="-1"></a>  <span class="at">mixtures =</span> <span class="fu">nm_mixture</span>(<span class="fu">c</span>(<span class="fl">0.8</span>, <span class="fl">0.2</span>), <span class="fu">c</span>(<span class="st">&quot;typical&quot;</span>, <span class="st">&quot;slow&quot;</span>))</span>
-<span id="cb5-16"><a href="#cb5-16" tabindex="-1"></a>)</span></code></pre></div>
+<div class="sourceCode" id="cb6"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb6-1"><a href="#cb6-1" tabindex="-1"></a>priors <span class="ot">&lt;-</span> <span class="fu">rbind</span>(</span>
+<span id="cb6-2"><a href="#cb6-2" tabindex="-1"></a>  <span class="fu">nm_prior</span>(<span class="st">&quot;THETA1&quot;</span>, <span class="st">&quot;normal&quot;</span>, <span class="at">mean =</span> <span class="dv">2</span>, <span class="at">sd =</span> <span class="fl">0.5</span>),</span>
+<span id="cb6-3"><a href="#cb6-3" tabindex="-1"></a>  <span class="fu">nm_prior</span>(<span class="st">&quot;SIGMA1&quot;</span>, <span class="st">&quot;lognormal&quot;</span>, <span class="at">mean =</span> <span class="sc">-</span><span class="dv">2</span>, <span class="at">sd =</span> <span class="fl">0.5</span>),</span>
+<span id="cb6-4"><a href="#cb6-4" tabindex="-1"></a>  <span class="fu">nm_prior</span>(<span class="st">&quot;OMEGA1&quot;</span>, <span class="st">&quot;inverse_gamma&quot;</span>, <span class="at">shape =</span> <span class="dv">3</span>, <span class="at">rate =</span> <span class="fl">0.2</span>)</span>
+<span id="cb6-5"><a href="#cb6-5" tabindex="-1"></a>)</span>
+<span id="cb6-6"><a href="#cb6-6" tabindex="-1"></a></span>
+<span id="cb6-7"><a href="#cb6-7" tabindex="-1"></a>likelihood <span class="ot">&lt;-</span> <span class="fu">nm_lik_config</span>(</span>
+<span id="cb6-8"><a href="#cb6-8" tabindex="-1"></a>  <span class="at">omega =</span> <span class="st">&quot;full&quot;</span>,</span>
+<span id="cb6-9"><a href="#cb6-9" tabindex="-1"></a>  <span class="at">sigma_parameterization =</span> <span class="st">&quot;variance&quot;</span>,</span>
+<span id="cb6-10"><a href="#cb6-10" tabindex="-1"></a>  <span class="at">blq_method =</span> <span class="st">&quot;m3&quot;</span>,</span>
+<span id="cb6-11"><a href="#cb6-11" tabindex="-1"></a>  <span class="at">lloq =</span> <span class="fl">0.05</span>,</span>
+<span id="cb6-12"><a href="#cb6-12" tabindex="-1"></a>  <span class="at">iov =</span> <span class="dv">1</span>,</span>
+<span id="cb6-13"><a href="#cb6-13" tabindex="-1"></a>  <span class="at">occasion_col =</span> <span class="st">&quot;OCC&quot;</span>,</span>
+<span id="cb6-14"><a href="#cb6-14" tabindex="-1"></a>  <span class="at">priors =</span> priors,</span>
+<span id="cb6-15"><a href="#cb6-15" tabindex="-1"></a>  <span class="at">mixtures =</span> <span class="fu">nm_mixture</span>(<span class="fu">c</span>(<span class="fl">0.8</span>, <span class="fl">0.2</span>), <span class="fu">c</span>(<span class="st">&quot;typical&quot;</span>, <span class="st">&quot;slow&quot;</span>))</span>
+<span id="cb6-16"><a href="#cb6-16" tabindex="-1"></a>)</span></code></pre></div>
 </div>
 <div id="first-class-continuous-categorical-count-and-event-outcomes" class="section level2">
 <h2>First-class continuous, categorical, count, and event outcomes</h2>
@@ -562,22 +598,22 @@ observation models into a declarative part of the model. LibeRation
 generates an ordinary, editable <code>$ERROR</code> block, compiles it
 to the C++/CppAD population objective, and retains the distribution
 metadata needed for stochastic simulation and diagnostics.</p>
-<div class="sourceCode" id="cb6"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb6-1"><a href="#cb6-1" tabindex="-1"></a>count_model <span class="ot">&lt;-</span> <span class="fu">nm_model</span>(</span>
-<span id="cb6-2"><a href="#cb6-2" tabindex="-1"></a>  <span class="at">INPUT =</span> <span class="fu">c</span>(<span class="st">&quot;ID&quot;</span>, <span class="st">&quot;TIME&quot;</span>, <span class="st">&quot;DV&quot;</span>, <span class="st">&quot;MDV&quot;</span>),</span>
-<span id="cb6-3"><a href="#cb6-3" tabindex="-1"></a>  <span class="at">ADVAN =</span> <span class="dv">1</span>,</span>
-<span id="cb6-4"><a href="#cb6-4" tabindex="-1"></a>  <span class="at">PRED =</span> <span class="st">&quot;MU=exp(THETA(1)+ETA(1)); CL=1; V=1; S1=V; F=MU&quot;</span>,</span>
-<span id="cb6-5"><a href="#cb6-5" tabindex="-1"></a>  <span class="at">THETAS =</span> <span class="fu">data.frame</span>(<span class="at">THETA=</span><span class="dv">1</span><span class="sc">:</span><span class="dv">2</span>, <span class="at">Value=</span><span class="fu">log</span>(<span class="fu">c</span>(<span class="dv">2</span>, <span class="dv">3</span>)), <span class="at">LOWER=</span><span class="sc">-</span><span class="dv">10</span>, <span class="at">UPPER=</span><span class="dv">10</span>),</span>
-<span id="cb6-6"><a href="#cb6-6" tabindex="-1"></a>  <span class="at">OMEGAS =</span> <span class="fu">data.frame</span>(<span class="at">OMEGA=</span><span class="dv">1</span>, <span class="at">Value=</span><span class="fl">0.2</span>),</span>
-<span id="cb6-7"><a href="#cb6-7" tabindex="-1"></a>  <span class="at">OUTCOMES =</span> <span class="fu">nm_outcome</span>(</span>
-<span id="cb6-8"><a href="#cb6-8" tabindex="-1"></a>    <span class="st">&quot;negative_binomial&quot;</span>, <span class="at">prediction=</span><span class="st">&quot;MU&quot;</span>, <span class="at">dispersion=</span><span class="st">&quot;THETA(2)&quot;</span>,</span>
-<span id="cb6-9"><a href="#cb6-9" tabindex="-1"></a>    <span class="at">max_count=</span><span class="dv">200</span></span>
-<span id="cb6-10"><a href="#cb6-10" tabindex="-1"></a>  )</span>
-<span id="cb6-11"><a href="#cb6-11" tabindex="-1"></a>)</span>
-<span id="cb6-12"><a href="#cb6-12" tabindex="-1"></a></span>
-<span id="cb6-13"><a href="#cb6-13" tabindex="-1"></a>simulated <span class="ot">&lt;-</span> <span class="fu">nm_simulate</span>(count_model, count_design, <span class="at">residual=</span><span class="cn">TRUE</span>, <span class="at">seed=</span><span class="dv">1</span>)</span>
-<span id="cb6-14"><a href="#cb6-14" tabindex="-1"></a>fit <span class="ot">&lt;-</span> <span class="fu">nm_est</span>(count_model, count_data, <span class="at">method=</span><span class="st">&quot;LAPLACE&quot;</span>)</span>
-<span id="cb6-15"><a href="#cb6-15" tabindex="-1"></a><span class="fu">nm_outcome_diagnostics</span>(fit)</span>
-<span id="cb6-16"><a href="#cb6-16" tabindex="-1"></a><span class="fu">nm_vpc_count</span>(fit)</span></code></pre></div>
+<div class="sourceCode" id="cb7"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb7-1"><a href="#cb7-1" tabindex="-1"></a>count_model <span class="ot">&lt;-</span> <span class="fu">nm_model</span>(</span>
+<span id="cb7-2"><a href="#cb7-2" tabindex="-1"></a>  <span class="at">INPUT =</span> <span class="fu">c</span>(<span class="st">&quot;ID&quot;</span>, <span class="st">&quot;TIME&quot;</span>, <span class="st">&quot;DV&quot;</span>, <span class="st">&quot;MDV&quot;</span>),</span>
+<span id="cb7-3"><a href="#cb7-3" tabindex="-1"></a>  <span class="at">ADVAN =</span> <span class="dv">1</span>,</span>
+<span id="cb7-4"><a href="#cb7-4" tabindex="-1"></a>  <span class="at">PRED =</span> <span class="st">&quot;MU=exp(THETA(1)+ETA(1)); CL=1; V=1; S1=V; F=MU&quot;</span>,</span>
+<span id="cb7-5"><a href="#cb7-5" tabindex="-1"></a>  <span class="at">THETAS =</span> <span class="fu">data.frame</span>(<span class="at">THETA=</span><span class="dv">1</span><span class="sc">:</span><span class="dv">2</span>, <span class="at">Value=</span><span class="fu">log</span>(<span class="fu">c</span>(<span class="dv">2</span>, <span class="dv">3</span>)), <span class="at">LOWER=</span><span class="sc">-</span><span class="dv">10</span>, <span class="at">UPPER=</span><span class="dv">10</span>),</span>
+<span id="cb7-6"><a href="#cb7-6" tabindex="-1"></a>  <span class="at">OMEGAS =</span> <span class="fu">data.frame</span>(<span class="at">OMEGA=</span><span class="dv">1</span>, <span class="at">Value=</span><span class="fl">0.2</span>),</span>
+<span id="cb7-7"><a href="#cb7-7" tabindex="-1"></a>  <span class="at">OUTCOMES =</span> <span class="fu">nm_outcome</span>(</span>
+<span id="cb7-8"><a href="#cb7-8" tabindex="-1"></a>    <span class="st">&quot;negative_binomial&quot;</span>, <span class="at">prediction=</span><span class="st">&quot;MU&quot;</span>, <span class="at">dispersion=</span><span class="st">&quot;THETA(2)&quot;</span>,</span>
+<span id="cb7-9"><a href="#cb7-9" tabindex="-1"></a>    <span class="at">max_count=</span><span class="dv">200</span></span>
+<span id="cb7-10"><a href="#cb7-10" tabindex="-1"></a>  )</span>
+<span id="cb7-11"><a href="#cb7-11" tabindex="-1"></a>)</span>
+<span id="cb7-12"><a href="#cb7-12" tabindex="-1"></a></span>
+<span id="cb7-13"><a href="#cb7-13" tabindex="-1"></a>simulated <span class="ot">&lt;-</span> <span class="fu">nm_simulate</span>(count_model, count_design, <span class="at">residual=</span><span class="cn">TRUE</span>, <span class="at">seed=</span><span class="dv">1</span>)</span>
+<span id="cb7-14"><a href="#cb7-14" tabindex="-1"></a>fit <span class="ot">&lt;-</span> <span class="fu">nm_est</span>(count_model, count_data, <span class="at">method=</span><span class="st">&quot;LAPLACE&quot;</span>)</span>
+<span id="cb7-15"><a href="#cb7-15" tabindex="-1"></a><span class="fu">nm_outcome_diagnostics</span>(fit)</span>
+<span id="cb7-16"><a href="#cb7-16" tabindex="-1"></a><span class="fu">nm_vpc_count</span>(fit)</span></code></pre></div>
 <p>Available families are normal, log-normal, fixed-df Student t,
 Bernoulli, categorical, ordinal, Poisson, negative binomial, binomial,
 zero-inflated and hurdle Poisson, first/recurrent event, competing
@@ -587,12 +623,12 @@ item.</p>
 <p>Several endpoints can share structural parameters and ETAs in one
 compiled likelihood. Give every declaration a unique <code>dvid</code>
 and combine them:</p>
-<div class="sourceCode" id="cb7"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb7-1"><a href="#cb7-1" tabindex="-1"></a>joint <span class="ot">&lt;-</span> <span class="fu">nm_outcomes</span>(</span>
-<span id="cb7-2"><a href="#cb7-2" tabindex="-1"></a>  <span class="fu">nm_outcome</span>(<span class="st">&quot;normal&quot;</span>, <span class="at">name=</span><span class="st">&quot;concentration&quot;</span>, <span class="at">dvid=</span><span class="dv">1</span>,</span>
-<span id="cb7-3"><a href="#cb7-3" tabindex="-1"></a>             <span class="at">prediction=</span><span class="st">&quot;CP&quot;</span>, <span class="at">scale=</span><span class="st">&quot;SIGMA(1)&quot;</span>),</span>
-<span id="cb7-4"><a href="#cb7-4" tabindex="-1"></a>  <span class="fu">nm_outcome</span>(<span class="st">&quot;bernoulli&quot;</span>, <span class="at">name=</span><span class="st">&quot;response&quot;</span>, <span class="at">dvid=</span><span class="dv">2</span>,</span>
-<span id="cb7-5"><a href="#cb7-5" tabindex="-1"></a>             <span class="at">prediction=</span><span class="st">&quot;PRESPONSE&quot;</span>)</span>
-<span id="cb7-6"><a href="#cb7-6" tabindex="-1"></a>)</span></code></pre></div>
+<div class="sourceCode" id="cb8"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb8-1"><a href="#cb8-1" tabindex="-1"></a>joint <span class="ot">&lt;-</span> <span class="fu">nm_outcomes</span>(</span>
+<span id="cb8-2"><a href="#cb8-2" tabindex="-1"></a>  <span class="fu">nm_outcome</span>(<span class="st">&quot;normal&quot;</span>, <span class="at">name=</span><span class="st">&quot;concentration&quot;</span>, <span class="at">dvid=</span><span class="dv">1</span>,</span>
+<span id="cb8-3"><a href="#cb8-3" tabindex="-1"></a>             <span class="at">prediction=</span><span class="st">&quot;CP&quot;</span>, <span class="at">scale=</span><span class="st">&quot;SIGMA(1)&quot;</span>),</span>
+<span id="cb8-4"><a href="#cb8-4" tabindex="-1"></a>  <span class="fu">nm_outcome</span>(<span class="st">&quot;bernoulli&quot;</span>, <span class="at">name=</span><span class="st">&quot;response&quot;</span>, <span class="at">dvid=</span><span class="dv">2</span>,</span>
+<span id="cb8-5"><a href="#cb8-5" tabindex="-1"></a>             <span class="at">prediction=</span><span class="st">&quot;PRESPONSE&quot;</span>)</span>
+<span id="cb8-6"><a href="#cb8-6" tabindex="-1"></a>)</span></code></pre></div>
 <p>The count <code>max_count</code> determines how far exact
 factorial/rising-factorial terms are unrolled on the AD tape. Data
 validation rejects a larger observed count. For event families, each
@@ -610,12 +646,12 @@ effect-compartment, indirect-response, tumour-growth, and TMDD systems.
 Every line remains editable and uses the normal ODE/AD engine. Templates
 that need a non-zero physiological baseline identify the required
 initial-state event in <code>attr(model, &quot;template_notes&quot;)</code>.</p>
-<div class="sourceCode" id="cb8"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb8-1"><a href="#cb8-1" tabindex="-1"></a>tmdd <span class="ot">&lt;-</span> <span class="fu">nm_model_template</span>(<span class="st">&quot;tmdd&quot;</span>)</span>
-<span id="cb8-2"><a href="#cb8-2" tabindex="-1"></a>transit <span class="ot">&lt;-</span> <span class="fu">nm_model_template</span>(<span class="st">&quot;transit_absorption&quot;</span>, <span class="at">n_transit=</span><span class="dv">5</span>)</span>
-<span id="cb8-3"><a href="#cb8-3" tabindex="-1"></a></span>
-<span id="cb8-4"><a href="#cb8-4" tabindex="-1"></a>hazard <span class="ot">&lt;-</span> <span class="fu">nm_piecewise</span>(<span class="st">&quot;TIME&quot;</span>, <span class="fu">c</span>(<span class="dv">24</span>, <span class="dv">72</span>), <span class="fu">c</span>(<span class="st">&quot;H1&quot;</span>, <span class="st">&quot;H2&quot;</span>, <span class="st">&quot;H3&quot;</span>))</span>
-<span id="cb8-5"><a href="#cb8-5" tabindex="-1"></a>trend <span class="ot">&lt;-</span> <span class="fu">nm_spline</span>(<span class="st">&quot;TIME&quot;</span>, <span class="fu">c</span>(<span class="dv">0</span>, <span class="dv">12</span>, <span class="dv">48</span>, <span class="dv">96</span>),</span>
-<span id="cb8-6"><a href="#cb8-6" tabindex="-1"></a>                   <span class="fu">c</span>(<span class="st">&quot;B1&quot;</span>, <span class="st">&quot;B2&quot;</span>, <span class="st">&quot;B3&quot;</span>), <span class="at">intercept=</span><span class="st">&quot;B0&quot;</span>)</span></code></pre></div>
+<div class="sourceCode" id="cb9"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb9-1"><a href="#cb9-1" tabindex="-1"></a>tmdd <span class="ot">&lt;-</span> <span class="fu">nm_model_template</span>(<span class="st">&quot;tmdd&quot;</span>)</span>
+<span id="cb9-2"><a href="#cb9-2" tabindex="-1"></a>transit <span class="ot">&lt;-</span> <span class="fu">nm_model_template</span>(<span class="st">&quot;transit_absorption&quot;</span>, <span class="at">n_transit=</span><span class="dv">5</span>)</span>
+<span id="cb9-3"><a href="#cb9-3" tabindex="-1"></a></span>
+<span id="cb9-4"><a href="#cb9-4" tabindex="-1"></a>hazard <span class="ot">&lt;-</span> <span class="fu">nm_piecewise</span>(<span class="st">&quot;TIME&quot;</span>, <span class="fu">c</span>(<span class="dv">24</span>, <span class="dv">72</span>), <span class="fu">c</span>(<span class="st">&quot;H1&quot;</span>, <span class="st">&quot;H2&quot;</span>, <span class="st">&quot;H3&quot;</span>))</span>
+<span id="cb9-5"><a href="#cb9-5" tabindex="-1"></a>trend <span class="ot">&lt;-</span> <span class="fu">nm_spline</span>(<span class="st">&quot;TIME&quot;</span>, <span class="fu">c</span>(<span class="dv">0</span>, <span class="dv">12</span>, <span class="dv">48</span>, <span class="dv">96</span>),</span>
+<span id="cb9-6"><a href="#cb9-6" tabindex="-1"></a>                   <span class="fu">c</span>(<span class="st">&quot;B1&quot;</span>, <span class="st">&quot;B2&quot;</span>, <span class="st">&quot;B3&quot;</span>), <span class="at">intercept=</span><span class="st">&quot;B0&quot;</span>)</span></code></pre></div>
 </div>
 <div id="user-defined-and-markov-likelihoods" class="section level2">
 <h2>User-defined and Markov likelihoods</h2>
@@ -631,36 +667,36 @@ probability and the 0-to-1 and 1-to-1 transition probabilities. The
 probabilities are defined in <code>$PK/$PRED</code>, while
 <code>$ERROR</code> selects the contribution associated with the
 observed transition.</p>
-<div class="sourceCode" id="cb9"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb9-1"><a href="#cb9-1" tabindex="-1"></a>markov <span class="ot">&lt;-</span> <span class="fu">nm_model</span>(</span>
-<span id="cb9-2"><a href="#cb9-2" tabindex="-1"></a>  <span class="at">INPUT =</span> <span class="fu">c</span>(<span class="st">&quot;ID&quot;</span>, <span class="st">&quot;TIME&quot;</span>, <span class="st">&quot;DV&quot;</span>, <span class="st">&quot;MDV&quot;</span>),</span>
-<span id="cb9-3"><a href="#cb9-3" tabindex="-1"></a>  <span class="at">ADVAN =</span> <span class="dv">1</span>,</span>
-<span id="cb9-4"><a href="#cb9-4" tabindex="-1"></a>  <span class="at">PRED =</span> <span class="st">&quot;</span></span>
-<span id="cb9-5"><a href="#cb9-5" tabindex="-1"></a><span class="st">    PBASE = 1 / (1 + exp(-THETA(1)))</span></span>
-<span id="cb9-6"><a href="#cb9-6" tabindex="-1"></a><span class="st">    P01 = 1 / (1 + exp(-(THETA(2) + ETA(1))))</span></span>
-<span id="cb9-7"><a href="#cb9-7" tabindex="-1"></a><span class="st">    P11 = 1 / (1 + exp(-(THETA(3) + ETA(1))))</span></span>
-<span id="cb9-8"><a href="#cb9-8" tabindex="-1"></a><span class="st">    CL = 1; V = 1; S1 = V; F = PBASE</span></span>
-<span id="cb9-9"><a href="#cb9-9" tabindex="-1"></a><span class="st">  &quot;</span>,</span>
-<span id="cb9-10"><a href="#cb9-10" tabindex="-1"></a>  <span class="at">ERROR =</span> <span class="st">&quot;</span></span>
-<span id="cb9-11"><a href="#cb9-11" tabindex="-1"></a><span class="st">    PCURRENT = ifelse(</span></span>
-<span id="cb9-12"><a href="#cb9-12" tabindex="-1"></a><span class="st">      FIRST == 1,</span></span>
-<span id="cb9-13"><a href="#cb9-13" tabindex="-1"></a><span class="st">      ifelse(DV == 1, PBASE, 1 - PBASE),</span></span>
-<span id="cb9-14"><a href="#cb9-14" tabindex="-1"></a><span class="st">      ifelse(</span></span>
-<span id="cb9-15"><a href="#cb9-15" tabindex="-1"></a><span class="st">        PREV_DV == 0,</span></span>
-<span id="cb9-16"><a href="#cb9-16" tabindex="-1"></a><span class="st">        ifelse(DV == 1, P01, 1 - P01),</span></span>
-<span id="cb9-17"><a href="#cb9-17" tabindex="-1"></a><span class="st">        ifelse(DV == 1, P11, 1 - P11)</span></span>
-<span id="cb9-18"><a href="#cb9-18" tabindex="-1"></a><span class="st">      )</span></span>
-<span id="cb9-19"><a href="#cb9-19" tabindex="-1"></a><span class="st">    )</span></span>
-<span id="cb9-20"><a href="#cb9-20" tabindex="-1"></a><span class="st">    LOGLIK = log(pmax(PCURRENT, 1e-12))</span></span>
-<span id="cb9-21"><a href="#cb9-21" tabindex="-1"></a><span class="st">  &quot;</span>,</span>
-<span id="cb9-22"><a href="#cb9-22" tabindex="-1"></a>  <span class="at">THETAS =</span> <span class="fu">data.frame</span>(</span>
-<span id="cb9-23"><a href="#cb9-23" tabindex="-1"></a>    <span class="at">THETA =</span> <span class="dv">1</span><span class="sc">:</span><span class="dv">3</span>, <span class="at">Value =</span> <span class="fu">qlogis</span>(<span class="fu">c</span>(<span class="fl">0.3</span>, <span class="fl">0.2</span>, <span class="fl">0.8</span>)),</span>
-<span id="cb9-24"><a href="#cb9-24" tabindex="-1"></a>    <span class="at">LOWER =</span> <span class="sc">-</span><span class="dv">10</span>, <span class="at">UPPER =</span> <span class="dv">10</span></span>
-<span id="cb9-25"><a href="#cb9-25" tabindex="-1"></a>  ),</span>
-<span id="cb9-26"><a href="#cb9-26" tabindex="-1"></a>  <span class="at">OMEGAS =</span> <span class="fu">data.frame</span>(<span class="at">OMEGA =</span> <span class="dv">1</span>, <span class="at">Value =</span> <span class="fl">0.2</span>),</span>
-<span id="cb9-27"><a href="#cb9-27" tabindex="-1"></a>  <span class="at">OUTPUT =</span> <span class="fu">c</span>(<span class="st">&quot;PBASE&quot;</span>, <span class="st">&quot;P01&quot;</span>, <span class="st">&quot;P11&quot;</span>)</span>
-<span id="cb9-28"><a href="#cb9-28" tabindex="-1"></a>)</span>
-<span id="cb9-29"><a href="#cb9-29" tabindex="-1"></a></span>
-<span id="cb9-30"><a href="#cb9-30" tabindex="-1"></a>fit <span class="ot">&lt;-</span> <span class="fu">nm_est</span>(markov, transitions, <span class="at">method =</span> <span class="st">&quot;LAPLACE&quot;</span>)</span></code></pre></div>
+<div class="sourceCode" id="cb10"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb10-1"><a href="#cb10-1" tabindex="-1"></a>markov <span class="ot">&lt;-</span> <span class="fu">nm_model</span>(</span>
+<span id="cb10-2"><a href="#cb10-2" tabindex="-1"></a>  <span class="at">INPUT =</span> <span class="fu">c</span>(<span class="st">&quot;ID&quot;</span>, <span class="st">&quot;TIME&quot;</span>, <span class="st">&quot;DV&quot;</span>, <span class="st">&quot;MDV&quot;</span>),</span>
+<span id="cb10-3"><a href="#cb10-3" tabindex="-1"></a>  <span class="at">ADVAN =</span> <span class="dv">1</span>,</span>
+<span id="cb10-4"><a href="#cb10-4" tabindex="-1"></a>  <span class="at">PRED =</span> <span class="st">&quot;</span></span>
+<span id="cb10-5"><a href="#cb10-5" tabindex="-1"></a><span class="st">    PBASE = 1 / (1 + exp(-THETA(1)))</span></span>
+<span id="cb10-6"><a href="#cb10-6" tabindex="-1"></a><span class="st">    P01 = 1 / (1 + exp(-(THETA(2) + ETA(1))))</span></span>
+<span id="cb10-7"><a href="#cb10-7" tabindex="-1"></a><span class="st">    P11 = 1 / (1 + exp(-(THETA(3) + ETA(1))))</span></span>
+<span id="cb10-8"><a href="#cb10-8" tabindex="-1"></a><span class="st">    CL = 1; V = 1; S1 = V; F = PBASE</span></span>
+<span id="cb10-9"><a href="#cb10-9" tabindex="-1"></a><span class="st">  &quot;</span>,</span>
+<span id="cb10-10"><a href="#cb10-10" tabindex="-1"></a>  <span class="at">ERROR =</span> <span class="st">&quot;</span></span>
+<span id="cb10-11"><a href="#cb10-11" tabindex="-1"></a><span class="st">    PCURRENT = ifelse(</span></span>
+<span id="cb10-12"><a href="#cb10-12" tabindex="-1"></a><span class="st">      FIRST == 1,</span></span>
+<span id="cb10-13"><a href="#cb10-13" tabindex="-1"></a><span class="st">      ifelse(DV == 1, PBASE, 1 - PBASE),</span></span>
+<span id="cb10-14"><a href="#cb10-14" tabindex="-1"></a><span class="st">      ifelse(</span></span>
+<span id="cb10-15"><a href="#cb10-15" tabindex="-1"></a><span class="st">        PREV_DV == 0,</span></span>
+<span id="cb10-16"><a href="#cb10-16" tabindex="-1"></a><span class="st">        ifelse(DV == 1, P01, 1 - P01),</span></span>
+<span id="cb10-17"><a href="#cb10-17" tabindex="-1"></a><span class="st">        ifelse(DV == 1, P11, 1 - P11)</span></span>
+<span id="cb10-18"><a href="#cb10-18" tabindex="-1"></a><span class="st">      )</span></span>
+<span id="cb10-19"><a href="#cb10-19" tabindex="-1"></a><span class="st">    )</span></span>
+<span id="cb10-20"><a href="#cb10-20" tabindex="-1"></a><span class="st">    LOGLIK = log(pmax(PCURRENT, 1e-12))</span></span>
+<span id="cb10-21"><a href="#cb10-21" tabindex="-1"></a><span class="st">  &quot;</span>,</span>
+<span id="cb10-22"><a href="#cb10-22" tabindex="-1"></a>  <span class="at">THETAS =</span> <span class="fu">data.frame</span>(</span>
+<span id="cb10-23"><a href="#cb10-23" tabindex="-1"></a>    <span class="at">THETA =</span> <span class="dv">1</span><span class="sc">:</span><span class="dv">3</span>, <span class="at">Value =</span> <span class="fu">qlogis</span>(<span class="fu">c</span>(<span class="fl">0.3</span>, <span class="fl">0.2</span>, <span class="fl">0.8</span>)),</span>
+<span id="cb10-24"><a href="#cb10-24" tabindex="-1"></a>    <span class="at">LOWER =</span> <span class="sc">-</span><span class="dv">10</span>, <span class="at">UPPER =</span> <span class="dv">10</span></span>
+<span id="cb10-25"><a href="#cb10-25" tabindex="-1"></a>  ),</span>
+<span id="cb10-26"><a href="#cb10-26" tabindex="-1"></a>  <span class="at">OMEGAS =</span> <span class="fu">data.frame</span>(<span class="at">OMEGA =</span> <span class="dv">1</span>, <span class="at">Value =</span> <span class="fl">0.2</span>),</span>
+<span id="cb10-27"><a href="#cb10-27" tabindex="-1"></a>  <span class="at">OUTPUT =</span> <span class="fu">c</span>(<span class="st">&quot;PBASE&quot;</span>, <span class="st">&quot;P01&quot;</span>, <span class="st">&quot;P11&quot;</span>)</span>
+<span id="cb10-28"><a href="#cb10-28" tabindex="-1"></a>)</span>
+<span id="cb10-29"><a href="#cb10-29" tabindex="-1"></a></span>
+<span id="cb10-30"><a href="#cb10-30" tabindex="-1"></a>fit <span class="ot">&lt;-</span> <span class="fu">nm_est</span>(markov, transitions, <span class="at">method =</span> <span class="st">&quot;LAPLACE&quot;</span>)</span></code></pre></div>
 <p><code>PREV_DV</code>, <code>PREV_TIME</code>, <code>DT</code>, and
 <code>FIRST</code> are maintained independently for each subject and
 <code>DVID</code>. A finite outcome on an <code>MDV = 1</code> record
@@ -699,39 +735,39 @@ estimation.</p>
 <p>This two-state example models binary observations whose distribution
 depends on an unobserved <code>controlled</code> or <code>active</code>
 state:</p>
-<div class="sourceCode" id="cb10"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb10-1"><a href="#cb10-1" tabindex="-1"></a>hmm <span class="ot">&lt;-</span> <span class="fu">nm_model</span>(</span>
-<span id="cb10-2"><a href="#cb10-2" tabindex="-1"></a>  <span class="at">INPUT =</span> <span class="fu">c</span>(<span class="st">&quot;ID&quot;</span>, <span class="st">&quot;TIME&quot;</span>, <span class="st">&quot;DV&quot;</span>, <span class="st">&quot;MDV&quot;</span>),</span>
-<span id="cb10-3"><a href="#cb10-3" tabindex="-1"></a>  <span class="at">ADVAN =</span> <span class="dv">1</span>,</span>
-<span id="cb10-4"><a href="#cb10-4" tabindex="-1"></a>  <span class="at">PRED =</span> <span class="st">&quot;CL = 1; V = 1; S1 = V; F = 0&quot;</span>,</span>
-<span id="cb10-5"><a href="#cb10-5" tabindex="-1"></a>  <span class="at">ERROR =</span> <span class="st">&quot;</span></span>
-<span id="cb10-6"><a href="#cb10-6" tabindex="-1"></a><span class="st">    PI_C = 1 / (1 + exp(-THETA(1)))</span></span>
-<span id="cb10-7"><a href="#cb10-7" tabindex="-1"></a><span class="st">    PI_A = 1 - PI_C</span></span>
-<span id="cb10-8"><a href="#cb10-8" tabindex="-1"></a><span class="st">    P_CC = 1 / (1 + exp(-THETA(2)))</span></span>
-<span id="cb10-9"><a href="#cb10-9" tabindex="-1"></a><span class="st">    P_CA = 1 - P_CC</span></span>
-<span id="cb10-10"><a href="#cb10-10" tabindex="-1"></a><span class="st">    P_AC = 1 / (1 + exp(-THETA(3)))</span></span>
-<span id="cb10-11"><a href="#cb10-11" tabindex="-1"></a><span class="st">    P_AA = 1 - P_AC</span></span>
-<span id="cb10-12"><a href="#cb10-12" tabindex="-1"></a><span class="st">    EMIT_C = ifelse(DV == 0, 1 - THETA(4), THETA(4))</span></span>
-<span id="cb10-13"><a href="#cb10-13" tabindex="-1"></a><span class="st">    EMIT_A = ifelse(DV == 0, 1 - THETA(5), THETA(5))</span></span>
-<span id="cb10-14"><a href="#cb10-14" tabindex="-1"></a><span class="st">  &quot;</span>,</span>
-<span id="cb10-15"><a href="#cb10-15" tabindex="-1"></a>  <span class="at">THETAS =</span> <span class="fu">data.frame</span>(</span>
-<span id="cb10-16"><a href="#cb10-16" tabindex="-1"></a>    <span class="at">THETA =</span> <span class="dv">1</span><span class="sc">:</span><span class="dv">5</span>,</span>
-<span id="cb10-17"><a href="#cb10-17" tabindex="-1"></a>    <span class="at">Value =</span> <span class="fu">c</span>(<span class="fu">qlogis</span>(<span class="fl">0.8</span>), <span class="fu">qlogis</span>(<span class="fl">0.9</span>), <span class="fu">qlogis</span>(<span class="fl">0.3</span>), <span class="fl">0.1</span>, <span class="fl">0.8</span>),</span>
-<span id="cb10-18"><a href="#cb10-18" tabindex="-1"></a>    <span class="at">LOWER =</span> <span class="fu">c</span>(<span class="fu">rep</span>(<span class="sc">-</span><span class="dv">10</span>, <span class="dv">3</span>), <span class="fl">1e-6</span>, <span class="fl">1e-6</span>),</span>
-<span id="cb10-19"><a href="#cb10-19" tabindex="-1"></a>    <span class="at">UPPER =</span> <span class="fu">c</span>(<span class="fu">rep</span>(<span class="dv">10</span>, <span class="dv">3</span>), <span class="dv">1</span> <span class="sc">-</span> <span class="fl">1e-6</span>, <span class="dv">1</span> <span class="sc">-</span> <span class="fl">1e-6</span>)</span>
-<span id="cb10-20"><a href="#cb10-20" tabindex="-1"></a>  ),</span>
-<span id="cb10-21"><a href="#cb10-21" tabindex="-1"></a>  <span class="at">HMM_CONFIG =</span> <span class="fu">nm_hmm_config</span>(</span>
-<span id="cb10-22"><a href="#cb10-22" tabindex="-1"></a>    <span class="at">states =</span> <span class="fu">c</span>(<span class="st">&quot;controlled&quot;</span>, <span class="st">&quot;active&quot;</span>),</span>
-<span id="cb10-23"><a href="#cb10-23" tabindex="-1"></a>    <span class="at">initial =</span> <span class="fu">c</span>(<span class="st">&quot;PI_C&quot;</span>, <span class="st">&quot;PI_A&quot;</span>),</span>
-<span id="cb10-24"><a href="#cb10-24" tabindex="-1"></a>    <span class="at">transition =</span> <span class="fu">matrix</span>(</span>
-<span id="cb10-25"><a href="#cb10-25" tabindex="-1"></a>      <span class="fu">c</span>(<span class="st">&quot;P_CC&quot;</span>, <span class="st">&quot;P_CA&quot;</span>, <span class="st">&quot;P_AC&quot;</span>, <span class="st">&quot;P_AA&quot;</span>), <span class="dv">2</span>, <span class="dv">2</span>, <span class="at">byrow =</span> <span class="cn">TRUE</span></span>
-<span id="cb10-26"><a href="#cb10-26" tabindex="-1"></a>    ),</span>
-<span id="cb10-27"><a href="#cb10-27" tabindex="-1"></a>    <span class="at">emission =</span> <span class="fu">c</span>(<span class="st">&quot;EMIT_C&quot;</span>, <span class="st">&quot;EMIT_A&quot;</span>)</span>
-<span id="cb10-28"><a href="#cb10-28" tabindex="-1"></a>  )</span>
-<span id="cb10-29"><a href="#cb10-29" tabindex="-1"></a>)</span>
-<span id="cb10-30"><a href="#cb10-30" tabindex="-1"></a></span>
-<span id="cb10-31"><a href="#cb10-31" tabindex="-1"></a>fit <span class="ot">&lt;-</span> <span class="fu">nm_est</span>(hmm, observations, <span class="at">method =</span> <span class="st">&quot;LAPLACE&quot;</span>)</span>
-<span id="cb10-32"><a href="#cb10-32" tabindex="-1"></a>states <span class="ot">&lt;-</span> <span class="fu">nm_hmm_decode</span>(fit, <span class="at">method =</span> <span class="st">&quot;all&quot;</span>)</span>
-<span id="cb10-33"><a href="#cb10-33" tabindex="-1"></a>gof <span class="ot">&lt;-</span> <span class="fu">nm_gof</span>(fit) <span class="co"># includes HMM_STATE and HMM_PROB_* columns</span></span></code></pre></div>
+<div class="sourceCode" id="cb11"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb11-1"><a href="#cb11-1" tabindex="-1"></a>hmm <span class="ot">&lt;-</span> <span class="fu">nm_model</span>(</span>
+<span id="cb11-2"><a href="#cb11-2" tabindex="-1"></a>  <span class="at">INPUT =</span> <span class="fu">c</span>(<span class="st">&quot;ID&quot;</span>, <span class="st">&quot;TIME&quot;</span>, <span class="st">&quot;DV&quot;</span>, <span class="st">&quot;MDV&quot;</span>),</span>
+<span id="cb11-3"><a href="#cb11-3" tabindex="-1"></a>  <span class="at">ADVAN =</span> <span class="dv">1</span>,</span>
+<span id="cb11-4"><a href="#cb11-4" tabindex="-1"></a>  <span class="at">PRED =</span> <span class="st">&quot;CL = 1; V = 1; S1 = V; F = 0&quot;</span>,</span>
+<span id="cb11-5"><a href="#cb11-5" tabindex="-1"></a>  <span class="at">ERROR =</span> <span class="st">&quot;</span></span>
+<span id="cb11-6"><a href="#cb11-6" tabindex="-1"></a><span class="st">    PI_C = 1 / (1 + exp(-THETA(1)))</span></span>
+<span id="cb11-7"><a href="#cb11-7" tabindex="-1"></a><span class="st">    PI_A = 1 - PI_C</span></span>
+<span id="cb11-8"><a href="#cb11-8" tabindex="-1"></a><span class="st">    P_CC = 1 / (1 + exp(-THETA(2)))</span></span>
+<span id="cb11-9"><a href="#cb11-9" tabindex="-1"></a><span class="st">    P_CA = 1 - P_CC</span></span>
+<span id="cb11-10"><a href="#cb11-10" tabindex="-1"></a><span class="st">    P_AC = 1 / (1 + exp(-THETA(3)))</span></span>
+<span id="cb11-11"><a href="#cb11-11" tabindex="-1"></a><span class="st">    P_AA = 1 - P_AC</span></span>
+<span id="cb11-12"><a href="#cb11-12" tabindex="-1"></a><span class="st">    EMIT_C = ifelse(DV == 0, 1 - THETA(4), THETA(4))</span></span>
+<span id="cb11-13"><a href="#cb11-13" tabindex="-1"></a><span class="st">    EMIT_A = ifelse(DV == 0, 1 - THETA(5), THETA(5))</span></span>
+<span id="cb11-14"><a href="#cb11-14" tabindex="-1"></a><span class="st">  &quot;</span>,</span>
+<span id="cb11-15"><a href="#cb11-15" tabindex="-1"></a>  <span class="at">THETAS =</span> <span class="fu">data.frame</span>(</span>
+<span id="cb11-16"><a href="#cb11-16" tabindex="-1"></a>    <span class="at">THETA =</span> <span class="dv">1</span><span class="sc">:</span><span class="dv">5</span>,</span>
+<span id="cb11-17"><a href="#cb11-17" tabindex="-1"></a>    <span class="at">Value =</span> <span class="fu">c</span>(<span class="fu">qlogis</span>(<span class="fl">0.8</span>), <span class="fu">qlogis</span>(<span class="fl">0.9</span>), <span class="fu">qlogis</span>(<span class="fl">0.3</span>), <span class="fl">0.1</span>, <span class="fl">0.8</span>),</span>
+<span id="cb11-18"><a href="#cb11-18" tabindex="-1"></a>    <span class="at">LOWER =</span> <span class="fu">c</span>(<span class="fu">rep</span>(<span class="sc">-</span><span class="dv">10</span>, <span class="dv">3</span>), <span class="fl">1e-6</span>, <span class="fl">1e-6</span>),</span>
+<span id="cb11-19"><a href="#cb11-19" tabindex="-1"></a>    <span class="at">UPPER =</span> <span class="fu">c</span>(<span class="fu">rep</span>(<span class="dv">10</span>, <span class="dv">3</span>), <span class="dv">1</span> <span class="sc">-</span> <span class="fl">1e-6</span>, <span class="dv">1</span> <span class="sc">-</span> <span class="fl">1e-6</span>)</span>
+<span id="cb11-20"><a href="#cb11-20" tabindex="-1"></a>  ),</span>
+<span id="cb11-21"><a href="#cb11-21" tabindex="-1"></a>  <span class="at">HMM_CONFIG =</span> <span class="fu">nm_hmm_config</span>(</span>
+<span id="cb11-22"><a href="#cb11-22" tabindex="-1"></a>    <span class="at">states =</span> <span class="fu">c</span>(<span class="st">&quot;controlled&quot;</span>, <span class="st">&quot;active&quot;</span>),</span>
+<span id="cb11-23"><a href="#cb11-23" tabindex="-1"></a>    <span class="at">initial =</span> <span class="fu">c</span>(<span class="st">&quot;PI_C&quot;</span>, <span class="st">&quot;PI_A&quot;</span>),</span>
+<span id="cb11-24"><a href="#cb11-24" tabindex="-1"></a>    <span class="at">transition =</span> <span class="fu">matrix</span>(</span>
+<span id="cb11-25"><a href="#cb11-25" tabindex="-1"></a>      <span class="fu">c</span>(<span class="st">&quot;P_CC&quot;</span>, <span class="st">&quot;P_CA&quot;</span>, <span class="st">&quot;P_AC&quot;</span>, <span class="st">&quot;P_AA&quot;</span>), <span class="dv">2</span>, <span class="dv">2</span>, <span class="at">byrow =</span> <span class="cn">TRUE</span></span>
+<span id="cb11-26"><a href="#cb11-26" tabindex="-1"></a>    ),</span>
+<span id="cb11-27"><a href="#cb11-27" tabindex="-1"></a>    <span class="at">emission =</span> <span class="fu">c</span>(<span class="st">&quot;EMIT_C&quot;</span>, <span class="st">&quot;EMIT_A&quot;</span>)</span>
+<span id="cb11-28"><a href="#cb11-28" tabindex="-1"></a>  )</span>
+<span id="cb11-29"><a href="#cb11-29" tabindex="-1"></a>)</span>
+<span id="cb11-30"><a href="#cb11-30" tabindex="-1"></a></span>
+<span id="cb11-31"><a href="#cb11-31" tabindex="-1"></a>fit <span class="ot">&lt;-</span> <span class="fu">nm_est</span>(hmm, observations, <span class="at">method =</span> <span class="st">&quot;LAPLACE&quot;</span>)</span>
+<span id="cb11-32"><a href="#cb11-32" tabindex="-1"></a>states <span class="ot">&lt;-</span> <span class="fu">nm_hmm_decode</span>(fit, <span class="at">method =</span> <span class="st">&quot;all&quot;</span>)</span>
+<span id="cb11-33"><a href="#cb11-33" tabindex="-1"></a>gof <span class="ot">&lt;-</span> <span class="fu">nm_gof</span>(fit) <span class="co"># includes HMM_STATE and HMM_PROB_* columns</span></span></code></pre></div>
 <p>Rows of <code>transition</code> are the state before the transition
 and columns are the state after it. Probability-scale initial and
 transition values are normalized internally, so they may be
@@ -805,15 +841,15 @@ internally, so the existing exact forward likelihood, retrospective
 smoother, Viterbi decoder, and CppAD gradients are reused.
 <code>nm_hmm_decode()</code> aggregates the expanded representation back
 to the original state labels.</p>
-<div class="sourceCode" id="cb11"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb11-1"><a href="#cb11-1" tabindex="-1"></a>semi_markov <span class="ot">&lt;-</span> <span class="fu">nm_hsmm_config</span>(</span>
-<span id="cb11-2"><a href="#cb11-2" tabindex="-1"></a>  <span class="at">states =</span> <span class="fu">c</span>(<span class="st">&quot;controlled&quot;</span>, <span class="st">&quot;active&quot;</span>),</span>
-<span id="cb11-3"><a href="#cb11-3" tabindex="-1"></a>  <span class="at">initial =</span> <span class="fu">c</span>(<span class="st">&quot;PI_C&quot;</span>, <span class="st">&quot;PI_A&quot;</span>),</span>
-<span id="cb11-4"><a href="#cb11-4" tabindex="-1"></a>  <span class="at">transition =</span> <span class="fu">matrix</span>(<span class="fu">c</span>(<span class="st">&quot;P_CC&quot;</span>, <span class="st">&quot;P_CA&quot;</span>, <span class="st">&quot;P_AC&quot;</span>, <span class="st">&quot;P_AA&quot;</span>), <span class="dv">2</span>, <span class="dv">2</span>,</span>
-<span id="cb11-5"><a href="#cb11-5" tabindex="-1"></a>                      <span class="at">byrow =</span> <span class="cn">TRUE</span>),</span>
-<span id="cb11-6"><a href="#cb11-6" tabindex="-1"></a>  <span class="at">dwell =</span> <span class="fu">matrix</span>(<span class="fu">c</span>(<span class="st">&quot;D_C1&quot;</span>, <span class="st">&quot;D_C2&quot;</span>, <span class="st">&quot;D_C3&quot;</span>,</span>
-<span id="cb11-7"><a href="#cb11-7" tabindex="-1"></a>                   <span class="st">&quot;D_A1&quot;</span>, <span class="st">&quot;D_A2&quot;</span>, <span class="st">&quot;D_A3&quot;</span>), <span class="dv">2</span>, <span class="dv">3</span>, <span class="at">byrow =</span> <span class="cn">TRUE</span>),</span>
-<span id="cb11-8"><a href="#cb11-8" tabindex="-1"></a>  <span class="at">emission =</span> <span class="fu">c</span>(<span class="st">&quot;EMIT_C&quot;</span>, <span class="st">&quot;EMIT_A&quot;</span>)</span>
-<span id="cb11-9"><a href="#cb11-9" tabindex="-1"></a>)</span></code></pre></div>
+<div class="sourceCode" id="cb12"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb12-1"><a href="#cb12-1" tabindex="-1"></a>semi_markov <span class="ot">&lt;-</span> <span class="fu">nm_hsmm_config</span>(</span>
+<span id="cb12-2"><a href="#cb12-2" tabindex="-1"></a>  <span class="at">states =</span> <span class="fu">c</span>(<span class="st">&quot;controlled&quot;</span>, <span class="st">&quot;active&quot;</span>),</span>
+<span id="cb12-3"><a href="#cb12-3" tabindex="-1"></a>  <span class="at">initial =</span> <span class="fu">c</span>(<span class="st">&quot;PI_C&quot;</span>, <span class="st">&quot;PI_A&quot;</span>),</span>
+<span id="cb12-4"><a href="#cb12-4" tabindex="-1"></a>  <span class="at">transition =</span> <span class="fu">matrix</span>(<span class="fu">c</span>(<span class="st">&quot;P_CC&quot;</span>, <span class="st">&quot;P_CA&quot;</span>, <span class="st">&quot;P_AC&quot;</span>, <span class="st">&quot;P_AA&quot;</span>), <span class="dv">2</span>, <span class="dv">2</span>,</span>
+<span id="cb12-5"><a href="#cb12-5" tabindex="-1"></a>                      <span class="at">byrow =</span> <span class="cn">TRUE</span>),</span>
+<span id="cb12-6"><a href="#cb12-6" tabindex="-1"></a>  <span class="at">dwell =</span> <span class="fu">matrix</span>(<span class="fu">c</span>(<span class="st">&quot;D_C1&quot;</span>, <span class="st">&quot;D_C2&quot;</span>, <span class="st">&quot;D_C3&quot;</span>,</span>
+<span id="cb12-7"><a href="#cb12-7" tabindex="-1"></a>                   <span class="st">&quot;D_A1&quot;</span>, <span class="st">&quot;D_A2&quot;</span>, <span class="st">&quot;D_A3&quot;</span>), <span class="dv">2</span>, <span class="dv">3</span>, <span class="at">byrow =</span> <span class="cn">TRUE</span>),</span>
+<span id="cb12-8"><a href="#cb12-8" tabindex="-1"></a>  <span class="at">emission =</span> <span class="fu">c</span>(<span class="st">&quot;EMIT_C&quot;</span>, <span class="st">&quot;EMIT_A&quot;</span>)</span>
+<span id="cb12-9"><a href="#cb12-9" tabindex="-1"></a>)</span></code></pre></div>
 </div>
 </div>
 <div id="residual-covariance" class="section level2">
@@ -844,16 +880,16 @@ grouping column. Blocks may be nested (study/site/subject) or crossed
 supplied, LibeRation constructs independent connected components from
 all memberships and optimizes the exact joint conditional mode for each
 component. Structural PK states still propagate per patient.</p>
-<div class="sourceCode" id="cb12"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb12-1"><a href="#cb12-1" tabindex="-1"></a>design <span class="ot">&lt;-</span> <span class="fu">nm_re_config</span>(</span>
-<span id="cb12-2"><a href="#cb12-2" tabindex="-1"></a>  <span class="fu">nm_re_block</span>(<span class="st">&quot;site&quot;</span>, <span class="st">&quot;SITE&quot;</span>, <span class="dv">1</span>),</span>
-<span id="cb12-3"><a href="#cb12-3" tabindex="-1"></a>  <span class="fu">nm_re_block</span>(<span class="st">&quot;patient&quot;</span>, <span class="st">&quot;ID&quot;</span>, <span class="dv">2</span><span class="sc">:</span><span class="dv">3</span>),</span>
-<span id="cb12-4"><a href="#cb12-4" tabindex="-1"></a>  <span class="fu">nm_re_block</span>(<span class="st">&quot;reader&quot;</span>, <span class="st">&quot;READER&quot;</span>, <span class="dv">4</span>)</span>
-<span id="cb12-5"><a href="#cb12-5" tabindex="-1"></a>)</span>
-<span id="cb12-6"><a href="#cb12-6" tabindex="-1"></a></span>
-<span id="cb12-7"><a href="#cb12-7" tabindex="-1"></a>model <span class="ot">&lt;-</span> <span class="fu">nm_model</span>(</span>
-<span id="cb12-8"><a href="#cb12-8" tabindex="-1"></a>  <span class="co"># ordinary INPUT/PRED/ERROR/parameter declarations ...</span></span>
-<span id="cb12-9"><a href="#cb12-9" tabindex="-1"></a>  <span class="at">RE_CONFIG =</span> design</span>
-<span id="cb12-10"><a href="#cb12-10" tabindex="-1"></a>)</span></code></pre></div>
+<div class="sourceCode" id="cb13"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb13-1"><a href="#cb13-1" tabindex="-1"></a>design <span class="ot">&lt;-</span> <span class="fu">nm_re_config</span>(</span>
+<span id="cb13-2"><a href="#cb13-2" tabindex="-1"></a>  <span class="fu">nm_re_block</span>(<span class="st">&quot;site&quot;</span>, <span class="st">&quot;SITE&quot;</span>, <span class="dv">1</span>),</span>
+<span id="cb13-3"><a href="#cb13-3" tabindex="-1"></a>  <span class="fu">nm_re_block</span>(<span class="st">&quot;patient&quot;</span>, <span class="st">&quot;ID&quot;</span>, <span class="dv">2</span><span class="sc">:</span><span class="dv">3</span>),</span>
+<span id="cb13-4"><a href="#cb13-4" tabindex="-1"></a>  <span class="fu">nm_re_block</span>(<span class="st">&quot;reader&quot;</span>, <span class="st">&quot;READER&quot;</span>, <span class="dv">4</span>)</span>
+<span id="cb13-5"><a href="#cb13-5" tabindex="-1"></a>)</span>
+<span id="cb13-6"><a href="#cb13-6" tabindex="-1"></a></span>
+<span id="cb13-7"><a href="#cb13-7" tabindex="-1"></a>model <span class="ot">&lt;-</span> <span class="fu">nm_model</span>(</span>
+<span id="cb13-8"><a href="#cb13-8" tabindex="-1"></a>  <span class="co"># ordinary INPUT/PRED/ERROR/parameter declarations ...</span></span>
+<span id="cb13-9"><a href="#cb13-9" tabindex="-1"></a>  <span class="at">RE_CONFIG =</span> design</span>
+<span id="cb13-10"><a href="#cb13-10" tabindex="-1"></a>)</span></code></pre></div>
 <p>Every ETA must belong to exactly one block. OMEGA correlation is
 permitted within a block but not between blocks. A highly connected
 crossed design can produce one large conditional mode; supplying a valid
@@ -868,29 +904,29 @@ may use <code>DT</code>, covariates, THETA/ETA/SIGMA, or generated model
 variables. The compiled Kalman filter contributes its exact marginal
 likelihood to estimation; it does not turn latent process states into
 ETAs.</p>
-<div class="sourceCode" id="cb13"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb13-1"><a href="#cb13-1" tabindex="-1"></a>ou <span class="ot">&lt;-</span> <span class="fu">nm_model</span>(</span>
-<span id="cb13-2"><a href="#cb13-2" tabindex="-1"></a>  <span class="at">INPUT =</span> <span class="fu">c</span>(<span class="st">&quot;ID&quot;</span>, <span class="st">&quot;TIME&quot;</span>, <span class="st">&quot;DV&quot;</span>, <span class="st">&quot;MDV&quot;</span>), <span class="at">ADVAN =</span> <span class="dv">1</span>,</span>
-<span id="cb13-3"><a href="#cb13-3" tabindex="-1"></a>  <span class="at">PRED =</span> <span class="st">&quot;CL=1; V=1; S1=V; F=0&quot;</span>,</span>
-<span id="cb13-4"><a href="#cb13-4" tabindex="-1"></a>  <span class="at">ERROR =</span> <span class="st">&quot;</span></span>
-<span id="cb13-5"><a href="#cb13-5" tabindex="-1"></a><span class="st">    M0=0; P0=THETA(2)</span></span>
-<span id="cb13-6"><a href="#cb13-6" tabindex="-1"></a><span class="st">    A11=exp(-THETA(1)*DT)</span></span>
-<span id="cb13-7"><a href="#cb13-7" tabindex="-1"></a><span class="st">    Q11=THETA(2)*(1-exp(-2*THETA(1)*DT))</span></span>
-<span id="cb13-8"><a href="#cb13-8" tabindex="-1"></a><span class="st">    H1=1; R1=THETA(3)*THETA(3)</span></span>
-<span id="cb13-9"><a href="#cb13-9" tabindex="-1"></a><span class="st">  &quot;</span>,</span>
-<span id="cb13-10"><a href="#cb13-10" tabindex="-1"></a>  <span class="at">THETAS =</span> <span class="fu">data.frame</span>(<span class="at">THETA=</span><span class="dv">1</span><span class="sc">:</span><span class="dv">3</span>, <span class="at">Value=</span><span class="fu">c</span>(<span class="fl">0.3</span>, <span class="fl">0.8</span>, <span class="fl">0.2</span>)),</span>
-<span id="cb13-11"><a href="#cb13-11" tabindex="-1"></a>  <span class="at">KALMAN_CONFIG =</span> <span class="fu">nm_kalman_config</span>(</span>
-<span id="cb13-12"><a href="#cb13-12" tabindex="-1"></a>    <span class="at">states =</span> <span class="st">&quot;deviation&quot;</span>, <span class="at">initial_mean =</span> <span class="st">&quot;M0&quot;</span>,</span>
-<span id="cb13-13"><a href="#cb13-13" tabindex="-1"></a>    <span class="at">initial_covariance =</span> <span class="fu">matrix</span>(<span class="st">&quot;P0&quot;</span>, <span class="dv">1</span>),</span>
-<span id="cb13-14"><a href="#cb13-14" tabindex="-1"></a>    <span class="at">transition =</span> <span class="fu">matrix</span>(<span class="st">&quot;A11&quot;</span>, <span class="dv">1</span>),</span>
-<span id="cb13-15"><a href="#cb13-15" tabindex="-1"></a>    <span class="at">process_covariance =</span> <span class="fu">matrix</span>(<span class="st">&quot;Q11&quot;</span>, <span class="dv">1</span>),</span>
-<span id="cb13-16"><a href="#cb13-16" tabindex="-1"></a>    <span class="at">observation =</span> <span class="st">&quot;H1&quot;</span>, <span class="at">observation_variance =</span> <span class="st">&quot;R1&quot;</span>,</span>
-<span id="cb13-17"><a href="#cb13-17" tabindex="-1"></a>    <span class="at">by_dvid =</span> <span class="cn">FALSE</span></span>
-<span id="cb13-18"><a href="#cb13-18" tabindex="-1"></a>  )</span>
-<span id="cb13-19"><a href="#cb13-19" tabindex="-1"></a>)</span>
-<span id="cb13-20"><a href="#cb13-20" tabindex="-1"></a></span>
-<span id="cb13-21"><a href="#cb13-21" tabindex="-1"></a>fit <span class="ot">&lt;-</span> <span class="fu">nm_est</span>(ou, observations, <span class="at">method =</span> <span class="st">&quot;LAPLACE&quot;</span>)</span>
-<span id="cb13-22"><a href="#cb13-22" tabindex="-1"></a>states <span class="ot">&lt;-</span> <span class="fu">nm_kalman_decode</span>(fit)</span>
-<span id="cb13-23"><a href="#cb13-23" tabindex="-1"></a>simulated <span class="ot">&lt;-</span> <span class="fu">nm_simulate</span>(ou, schedule, <span class="at">residual =</span> <span class="cn">TRUE</span>, <span class="at">nsim =</span> <span class="dv">100</span>)</span></code></pre></div>
+<div class="sourceCode" id="cb14"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb14-1"><a href="#cb14-1" tabindex="-1"></a>ou <span class="ot">&lt;-</span> <span class="fu">nm_model</span>(</span>
+<span id="cb14-2"><a href="#cb14-2" tabindex="-1"></a>  <span class="at">INPUT =</span> <span class="fu">c</span>(<span class="st">&quot;ID&quot;</span>, <span class="st">&quot;TIME&quot;</span>, <span class="st">&quot;DV&quot;</span>, <span class="st">&quot;MDV&quot;</span>), <span class="at">ADVAN =</span> <span class="dv">1</span>,</span>
+<span id="cb14-3"><a href="#cb14-3" tabindex="-1"></a>  <span class="at">PRED =</span> <span class="st">&quot;CL=1; V=1; S1=V; F=0&quot;</span>,</span>
+<span id="cb14-4"><a href="#cb14-4" tabindex="-1"></a>  <span class="at">ERROR =</span> <span class="st">&quot;</span></span>
+<span id="cb14-5"><a href="#cb14-5" tabindex="-1"></a><span class="st">    M0=0; P0=THETA(2)</span></span>
+<span id="cb14-6"><a href="#cb14-6" tabindex="-1"></a><span class="st">    A11=exp(-THETA(1)*DT)</span></span>
+<span id="cb14-7"><a href="#cb14-7" tabindex="-1"></a><span class="st">    Q11=THETA(2)*(1-exp(-2*THETA(1)*DT))</span></span>
+<span id="cb14-8"><a href="#cb14-8" tabindex="-1"></a><span class="st">    H1=1; R1=THETA(3)*THETA(3)</span></span>
+<span id="cb14-9"><a href="#cb14-9" tabindex="-1"></a><span class="st">  &quot;</span>,</span>
+<span id="cb14-10"><a href="#cb14-10" tabindex="-1"></a>  <span class="at">THETAS =</span> <span class="fu">data.frame</span>(<span class="at">THETA=</span><span class="dv">1</span><span class="sc">:</span><span class="dv">3</span>, <span class="at">Value=</span><span class="fu">c</span>(<span class="fl">0.3</span>, <span class="fl">0.8</span>, <span class="fl">0.2</span>)),</span>
+<span id="cb14-11"><a href="#cb14-11" tabindex="-1"></a>  <span class="at">KALMAN_CONFIG =</span> <span class="fu">nm_kalman_config</span>(</span>
+<span id="cb14-12"><a href="#cb14-12" tabindex="-1"></a>    <span class="at">states =</span> <span class="st">&quot;deviation&quot;</span>, <span class="at">initial_mean =</span> <span class="st">&quot;M0&quot;</span>,</span>
+<span id="cb14-13"><a href="#cb14-13" tabindex="-1"></a>    <span class="at">initial_covariance =</span> <span class="fu">matrix</span>(<span class="st">&quot;P0&quot;</span>, <span class="dv">1</span>),</span>
+<span id="cb14-14"><a href="#cb14-14" tabindex="-1"></a>    <span class="at">transition =</span> <span class="fu">matrix</span>(<span class="st">&quot;A11&quot;</span>, <span class="dv">1</span>),</span>
+<span id="cb14-15"><a href="#cb14-15" tabindex="-1"></a>    <span class="at">process_covariance =</span> <span class="fu">matrix</span>(<span class="st">&quot;Q11&quot;</span>, <span class="dv">1</span>),</span>
+<span id="cb14-16"><a href="#cb14-16" tabindex="-1"></a>    <span class="at">observation =</span> <span class="st">&quot;H1&quot;</span>, <span class="at">observation_variance =</span> <span class="st">&quot;R1&quot;</span>,</span>
+<span id="cb14-17"><a href="#cb14-17" tabindex="-1"></a>    <span class="at">by_dvid =</span> <span class="cn">FALSE</span></span>
+<span id="cb14-18"><a href="#cb14-18" tabindex="-1"></a>  )</span>
+<span id="cb14-19"><a href="#cb14-19" tabindex="-1"></a>)</span>
+<span id="cb14-20"><a href="#cb14-20" tabindex="-1"></a></span>
+<span id="cb14-21"><a href="#cb14-21" tabindex="-1"></a>fit <span class="ot">&lt;-</span> <span class="fu">nm_est</span>(ou, observations, <span class="at">method =</span> <span class="st">&quot;LAPLACE&quot;</span>)</span>
+<span id="cb14-22"><a href="#cb14-22" tabindex="-1"></a>states <span class="ot">&lt;-</span> <span class="fu">nm_kalman_decode</span>(fit)</span>
+<span id="cb14-23"><a href="#cb14-23" tabindex="-1"></a>simulated <span class="ot">&lt;-</span> <span class="fu">nm_simulate</span>(ou, schedule, <span class="at">residual =</span> <span class="cn">TRUE</span>, <span class="at">nsim =</span> <span class="dv">100</span>)</span></code></pre></div>
 <p>The measurement equation defaults to
 <code>DV = F + H x + epsilon</code>; use <code>baseline = &quot;zero&quot;</code>
 for <code>DV = H x + epsilon</code>. <code>nm_kalman_decode()</code>
@@ -910,13 +946,13 @@ states; <code>particles</code>, <code>ess_threshold</code>, and
 Euler–Maruyama supports general diffusion; Milstein is available for
 diagonal diffusion. EKF/UKF use propagated moments, while the particle
 filter propagates stochastic paths directly.</p>
-<div class="sourceCode" id="cb14"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb14-1"><a href="#cb14-1" tabindex="-1"></a>sde <span class="ot">&lt;-</span> <span class="fu">nm_sde_config</span>(</span>
-<span id="cb14-2"><a href="#cb14-2" tabindex="-1"></a>  <span class="at">states =</span> <span class="st">&quot;deviation&quot;</span>, <span class="at">initial_mean =</span> <span class="st">&quot;M0&quot;</span>,</span>
-<span id="cb14-3"><a href="#cb14-3" tabindex="-1"></a>  <span class="at">initial_covariance =</span> <span class="fu">matrix</span>(<span class="st">&quot;P0&quot;</span>, <span class="dv">1</span>),</span>
-<span id="cb14-4"><a href="#cb14-4" tabindex="-1"></a>  <span class="at">drift =</span> <span class="st">&quot;DRIFT&quot;</span>, <span class="at">diffusion =</span> <span class="fu">matrix</span>(<span class="st">&quot;G&quot;</span>, <span class="dv">1</span>),</span>
-<span id="cb14-5"><a href="#cb14-5" tabindex="-1"></a>  <span class="at">observation =</span> <span class="st">&quot;HX&quot;</span>, <span class="at">observation_variance =</span> <span class="st">&quot;R&quot;</span>,</span>
-<span id="cb14-6"><a href="#cb14-6" tabindex="-1"></a>  <span class="at">filter =</span> <span class="st">&quot;ukf&quot;</span>, <span class="at">method =</span> <span class="st">&quot;euler&quot;</span>, <span class="at">substeps =</span> <span class="dv">8</span></span>
-<span id="cb14-7"><a href="#cb14-7" tabindex="-1"></a>)</span></code></pre></div>
+<div class="sourceCode" id="cb15"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb15-1"><a href="#cb15-1" tabindex="-1"></a>sde <span class="ot">&lt;-</span> <span class="fu">nm_sde_config</span>(</span>
+<span id="cb15-2"><a href="#cb15-2" tabindex="-1"></a>  <span class="at">states =</span> <span class="st">&quot;deviation&quot;</span>, <span class="at">initial_mean =</span> <span class="st">&quot;M0&quot;</span>,</span>
+<span id="cb15-3"><a href="#cb15-3" tabindex="-1"></a>  <span class="at">initial_covariance =</span> <span class="fu">matrix</span>(<span class="st">&quot;P0&quot;</span>, <span class="dv">1</span>),</span>
+<span id="cb15-4"><a href="#cb15-4" tabindex="-1"></a>  <span class="at">drift =</span> <span class="st">&quot;DRIFT&quot;</span>, <span class="at">diffusion =</span> <span class="fu">matrix</span>(<span class="st">&quot;G&quot;</span>, <span class="dv">1</span>),</span>
+<span id="cb15-5"><a href="#cb15-5" tabindex="-1"></a>  <span class="at">observation =</span> <span class="st">&quot;HX&quot;</span>, <span class="at">observation_variance =</span> <span class="st">&quot;R&quot;</span>,</span>
+<span id="cb15-6"><a href="#cb15-6" tabindex="-1"></a>  <span class="at">filter =</span> <span class="st">&quot;ukf&quot;</span>, <span class="at">method =</span> <span class="st">&quot;euler&quot;</span>, <span class="at">substeps =</span> <span class="dv">8</span></span>
+<span id="cb15-7"><a href="#cb15-7" tabindex="-1"></a>)</span></code></pre></div>
 <p>For inter-occasion variability, trailing ETAs are treated as
 occasion-specific and the event data must contain the configured
 occasion column. Mixture models can refer to <code>MIXNUM</code> in
@@ -937,15 +973,15 @@ steady state, and stiff systems.</p>
 expressions with the same indexed-parameter calls. It deliberately
 rejects headers, allocation, I/O, side effects, and arbitrary compiled
 extensions.</p>
-<div class="sourceCode" id="cb15"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb15-1"><a href="#cb15-1" tabindex="-1"></a>cpp_model <span class="ot">&lt;-</span> <span class="fu">nm_model_cpp</span>(</span>
-<span id="cb15-2"><a href="#cb15-2" tabindex="-1"></a>  <span class="at">CPP =</span> <span class="st">&quot;CL = THETA(1) * exp(ETA(1)); V = THETA(2); S1 = V;&quot;</span>,</span>
-<span id="cb15-3"><a href="#cb15-3" tabindex="-1"></a>  <span class="at">INPUT =</span> <span class="fu">c</span>(<span class="st">&quot;ID&quot;</span>, <span class="st">&quot;TIME&quot;</span>, <span class="st">&quot;EVID&quot;</span>, <span class="st">&quot;AMT&quot;</span>, <span class="st">&quot;CMT&quot;</span>, <span class="st">&quot;DV&quot;</span>, <span class="st">&quot;MDV&quot;</span>),</span>
-<span id="cb15-4"><a href="#cb15-4" tabindex="-1"></a>  <span class="at">ADVAN =</span> <span class="dv">1</span>,</span>
-<span id="cb15-5"><a href="#cb15-5" tabindex="-1"></a>  <span class="at">ERROR =</span> <span class="st">&quot;Y = F * (1 + ERR(1))&quot;</span>,</span>
-<span id="cb15-6"><a href="#cb15-6" tabindex="-1"></a>  <span class="at">THETAS =</span> theta,</span>
-<span id="cb15-7"><a href="#cb15-7" tabindex="-1"></a>  <span class="at">OMEGAS =</span> <span class="fu">data.frame</span>(<span class="at">OMEGA =</span> <span class="dv">1</span>, <span class="at">Value =</span> <span class="fl">0.1</span>),</span>
-<span id="cb15-8"><a href="#cb15-8" tabindex="-1"></a>  <span class="at">SIGMAS =</span> <span class="fu">data.frame</span>(<span class="at">SIGMA =</span> <span class="dv">1</span>, <span class="at">Value =</span> <span class="fl">0.1</span>)</span>
-<span id="cb15-9"><a href="#cb15-9" tabindex="-1"></a>)</span></code></pre></div>
+<div class="sourceCode" id="cb16"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb16-1"><a href="#cb16-1" tabindex="-1"></a>cpp_model <span class="ot">&lt;-</span> <span class="fu">nm_model_cpp</span>(</span>
+<span id="cb16-2"><a href="#cb16-2" tabindex="-1"></a>  <span class="at">CPP =</span> <span class="st">&quot;CL = THETA(1) * exp(ETA(1)); V = THETA(2); S1 = V;&quot;</span>,</span>
+<span id="cb16-3"><a href="#cb16-3" tabindex="-1"></a>  <span class="at">INPUT =</span> <span class="fu">c</span>(<span class="st">&quot;ID&quot;</span>, <span class="st">&quot;TIME&quot;</span>, <span class="st">&quot;EVID&quot;</span>, <span class="st">&quot;AMT&quot;</span>, <span class="st">&quot;CMT&quot;</span>, <span class="st">&quot;DV&quot;</span>, <span class="st">&quot;MDV&quot;</span>),</span>
+<span id="cb16-4"><a href="#cb16-4" tabindex="-1"></a>  <span class="at">ADVAN =</span> <span class="dv">1</span>,</span>
+<span id="cb16-5"><a href="#cb16-5" tabindex="-1"></a>  <span class="at">ERROR =</span> <span class="st">&quot;Y = F * (1 + ERR(1))&quot;</span>,</span>
+<span id="cb16-6"><a href="#cb16-6" tabindex="-1"></a>  <span class="at">THETAS =</span> theta,</span>
+<span id="cb16-7"><a href="#cb16-7" tabindex="-1"></a>  <span class="at">OMEGAS =</span> <span class="fu">data.frame</span>(<span class="at">OMEGA =</span> <span class="dv">1</span>, <span class="at">Value =</span> <span class="fl">0.1</span>),</span>
+<span id="cb16-8"><a href="#cb16-8" tabindex="-1"></a>  <span class="at">SIGMAS =</span> <span class="fu">data.frame</span>(<span class="at">SIGMA =</span> <span class="dv">1</span>, <span class="at">Value =</span> <span class="fl">0.1</span>)</span>
+<span id="cb16-9"><a href="#cb16-9" tabindex="-1"></a>)</span></code></pre></div>
 <p>Use <code>nm_support_matrix()</code> to query implemented feature
 support in the running package version.</p>
 </div>

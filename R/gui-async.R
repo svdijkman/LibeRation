@@ -67,14 +67,22 @@
   selected <- unique(tolower(as.character(unlist(
     options$types %||% character()
   ))))
-  selected <- intersect(selected, c("bootstrap", "profile"))
-  if (!length(selected)) .nm_stop("Select bootstrap or profile likelihood.")
+  selected <- intersect(selected, c(
+    "bootstrap", "profile", "sir", "ppc", "waic", "psis_loo"
+  ))
+  if (!length(selected)) {
+    .nm_stop("Select bootstrap, profile likelihood, SIR, or a Bayesian diagnostic.")
+  }
   created <- list()
   if ("bootstrap" %in% selected) {
     created$bootstrap <- nm_bootstrap(
       fit, n = as.integer(options$replicates %||% 100L),
       seed = as.integer(options$seed %||% 20260713L),
       level = as.numeric(options$level %||% 0.95),
+      type = as.character(options$bootstrapType %||% "nonparametric"),
+      unit = as.character(options$bootstrapUnit %||% "subject"),
+      strata = options$bootstrapStrata %||% NULL,
+      cluster = options$bootstrapCluster %||% NULL,
       maxit = as.integer(options$maxit %||% 100L)
     )
   }
@@ -90,6 +98,37 @@
       level = as.numeric(options$level %||% 0.95),
       maxit = as.integer(options$maxit %||% 100L)
     )
+  }
+  if ("sir" %in% selected) {
+    created$sir <- nm_sir(
+      fit,
+      n_proposal = as.integer(options$sirProposals %||% 2000L),
+      n_resample = as.integer(options$sirResamples %||% 1000L),
+      inflation = as.numeric(options$sirInflation %||% 1.5),
+      seed = as.integer(options$seed %||% 20260713L)
+    )
+  }
+  bayesian <- intersect(selected, c("ppc", "waic", "psis_loo"))
+  if (length(bayesian)) {
+    log_lik <- if (any(c("waic", "psis_loo") %in% bayesian)) {
+      nm_log_lik(
+        fit, draws = as.integer(options$posteriorDraws %||% 200L),
+        eta_samples = as.integer(options$etaSamples %||% 64L),
+        seed = as.integer(options$seed %||% 20260713L)
+      )
+    } else NULL
+    if ("ppc" %in% bayesian) {
+      created$ppc <- nm_ppc(
+        fit, draws = as.integer(options$posteriorDraws %||% 200L),
+        predictive = as.character(options$predictive %||% "population"),
+        stratify = options$posteriorStrata %||% NULL,
+        seed = as.integer(options$seed %||% 20260713L)
+      )
+    }
+    if ("waic" %in% bayesian) created$waic <- nm_waic(log_lik)
+    if ("psis_loo" %in% bayesian) {
+      created$psis_loo <- nm_psis_loo(log_lik)
+    }
   }
   created
 }
@@ -213,6 +252,10 @@
   run_diagnostics <- lapply(ids, function(id) {
     nm_project_load_diagnostics(workspace, project, id)
   })
+  comparison_object <- nm_compare(
+    fits, labels = labels, reference = 1L, nested = FALSE,
+    diagnostics = stats::setNames(run_diagnostics, labels)
+  )
   for (kind in c(
     "vpc", "vpc_categorical", "vpc_count", "vpc_tte",
     "vpc_competing", "vpc_recurrent", "npde", "npc"
@@ -231,7 +274,9 @@
         format(Sys.time(), "%Y%m%d%H%M%OS3"), "-",
         sample.int(999999L, 1L)
       ),
-      parameters = parameters, gof = gof, runs = runs, plots = plots
+      parameters = parameters, gof = gof, runs = runs, plots = plots,
+      comparison = summary(comparison_object),
+      comparison_object = comparison_object
     ),
     class = "liber_gui_comparison"
   )

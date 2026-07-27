@@ -95,7 +95,20 @@ for numerical comparison. For `method = "NPML"` or `"NPAG"`, use
 `np_cycles` (3), and, for NPAG, `np_grid_step` (1), `np_grid_decay`
 (0.5), and `np_max_candidates` (500). `np_estimate_population` controls
 alternating THETA/SIGMA updates. Ordinary covariance is not regular for a
-discrete support distribution; use bootstrap uncertainty for NPML/NPAG.}
+discrete support distribution; use bootstrap uncertainty for NPML/NPAG.
+IMP, SAEM, and BAYES accept `mu_specialization = TRUE` (the default).
+IMP then re-centres cached conditional-mode starts as MU values change.
+When an affine MU design varies between subjects (for example an estimated
+covariate coefficient), IMP uses the score path as a warm start and
+automatically refines it against the exact finite common-random-number
+objective.
+Eligible affine MU models use a generalized least-squares fixed-effect
+M-step in SAEM, with vectorized OMEGA-keyed normal-equation caching and a
+closed-form-only fast path, and a Metropolis-corrected Gaussian MU block in
+BAYES.
+Non-affine, rank-deficient, or otherwise ineligible models automatically
+retain the ordinary estimator path and record the reason in
+`fit$diagnostics$mu_specialization`.}
 }
 \description{
 Deterministic conditional methods use exact CppAD gradients for ETA modes.

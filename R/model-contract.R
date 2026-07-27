@@ -19,6 +19,8 @@
   "PRED_MODE", "PK_SOURCE", "PRED_SOURCE"
 )
 
+.nm_model_contract_fields_v4 <- c(.nm_model_contract_fields_v3, "MU")
+
 .nm_contract_classes <- c(
   "nm_matrix_model", "nm_lik_config", "nm_mixture", "nm_residual_group",
   "nm_hmm_config", "nm_cthmm_config", "nm_hsmm_config",
@@ -96,10 +98,11 @@
 #' @param version Contract version. Version 1 is retained for compatibility;
 #'   version 2 contains the original first-class model configurations;
 #'   version 3 additionally preserves the distinct `$PK` and direct `$PRED`
-#'   sources and their active model-definition mode.
+#'   sources and their active model-definition mode; version 4 additionally
+#'   preserves explicit MU-reference metadata.
 #' @return Character vector of semantic model fields.
 #' @export
-nm_model_contract_fields <- function(version = 3L) {
+nm_model_contract_fields <- function(version = 4L) {
   version <- as.integer(version)
   if (length(version) != 1L || is.na(version)) .nm_stop("Invalid model contract version.")
   switch(
@@ -107,6 +110,7 @@ nm_model_contract_fields <- function(version = 3L) {
     `1` = .nm_model_contract_fields_v1,
     `2` = .nm_model_contract_fields_v2,
     `3` = .nm_model_contract_fields_v3,
+    `4` = .nm_model_contract_fields_v4,
     .nm_stop("Unsupported model contract version: ", version, ".")
   )
 }
@@ -115,7 +119,7 @@ nm_model_contract_fields <- function(version = 3L) {
 #' @param model An [nm_model()] object.
 #' @return `nm_model_to_contract()` returns a JSON-compatible semantic contract.
 #' @export
-nm_model_to_contract <- function(model, version = 3L) {
+nm_model_to_contract <- function(model, version = 4L) {
   if (!inherits(model, "nm_model")) .nm_stop("`model` must be an nm_model.")
   fields <- nm_model_contract_fields(version)
   required <- c("INPUT", "ADVAN", "PRED", "THETAS")

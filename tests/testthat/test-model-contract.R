@@ -8,7 +8,7 @@ test_that("versioned model contracts rebuild semantic models", {
   contract <- nm_model_to_contract(model)
   rebuilt <- nm_model_from_contract(contract)
   expect_identical(contract$schema, "liberation.model")
-  expect_identical(contract$version, 3L)
+  expect_identical(contract$version, 4L)
   expect_s3_class(rebuilt, "nm_model")
   expect_equal(rebuilt$PRED, model$PRED)
   expect_equal(rebuilt$THETAS, model$THETAS)
@@ -23,7 +23,7 @@ test_that("contract v3 preserves combined PK and post-ADVAN PRED sources", {
     PRED_SOURCE = "F=F_ADVAN+A(1)/100",
     THETAS = data.frame(THETA = 1:2, Value = c(2, 20))
   )
-  contract <- nm_model_to_contract(model)
+  contract <- nm_model_to_contract(model, version = 3L)
   rebuilt <- nm_model_from_contract(contract)
   expect_identical(rebuilt$PRED_MODE, "pk_pred")
   expect_identical(rebuilt$PK_SOURCE, model$PK_SOURCE)

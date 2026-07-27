@@ -659,6 +659,35 @@
   objective_evaluations <- suppressWarnings(as.integer(
     fit$objective_evaluations %||% fit$evaluations[["function"]] %||% NA_integer_
   ))
+  mu_specialization <- fit$diagnostics$mu_specialization %||% NULL
+  mu_status <- if (is.null(mu_specialization)) {
+    ""
+  } else if (!isTRUE(mu_specialization$enabled)) {
+    "Disabled"
+  } else if (fit$method == "SAEM" &&
+             (mu_specialization$closed_form_updates %||% 0L) > 0L) {
+    paste0(
+      "GLS M-step (", mu_specialization$closed_form_updates,
+      " update", if (mu_specialization$closed_form_updates == 1L) "" else "s",
+      ")"
+    )
+  } else if (fit$method == "IMP" &&
+             (mu_specialization$recentered_mode_starts %||% 0L) > 0L) {
+    paste0(
+      "MU-preserving mode starts (",
+      mu_specialization$recentered_mode_starts, ")"
+    )
+  } else if (fit$method == "BAYES" &&
+             (mu_specialization$attempted_blocks %||% 0L) > 0L) {
+    paste0(
+      "Metropolis-corrected MU blocks (",
+      mu_specialization$accepted_blocks %||% 0L, "/",
+      mu_specialization$attempted_blocks, " accepted)"
+    )
+  } else {
+    paste0("Fallback: ", mu_specialization$runtime_reason %||%
+             mu_specialization$reason %||% "ordinary estimator path")
+  }
   list(
     available = TRUE, method = .nm_fit_method_label(fit), final_method = fit$method,
     method_sequence = as.character(fit$method_sequence %||% fit$method),
@@ -693,6 +722,7 @@
         ratios <- fit$diagnostics$quadrature_cancellation_ratio
         if (any(is.finite(ratios))) min(ratios[is.finite(ratios)]) else ""
       } else "",
+      `MU estimator specialization` = mu_status,
       `Model fit time` = .liber_gui_duration(timing$model_fit_seconds),
       `Covariance step` = if (is.null(covariance)) "Not requested" else
         if (identical(covariance$status, "failed")) "Failed" else "Completed",
@@ -928,6 +958,9 @@
     vpc_tte = "has_vpc_tte", vpc_competing = "has_vpc_competing",
     vpc_recurrent = "has_vpc_recurrent",
     bootstrap = "has_bootstrap", profile = "has_profile",
+    sir = "has_sir", ppc = "has_ppc", waic = "has_waic",
+    psis_loo = "has_psis_loo",
+    comparison = "has_comparison",
     scm = "has_scm", covariance = "has_covariance"
   )
   summaries <- unname(lapply(seq_len(nrow(runs)), function(index) {
@@ -1000,6 +1033,15 @@
         total = unname(timing$total_seconds %||% NULL)
       )
       base$output_columns <- names(result$output %||% data.frame())
+      if (inherits(saved_diagnostics$comparison, "nm_model_comparison")) {
+        comparison <- saved_diagnostics$comparison
+        base$model_comparison <- list(
+          id = comparison$id,
+          reference = comparison$labels[[comparison$reference]],
+          metrics = .liber_gui_rows(comparison$metrics),
+          pairwise = .liber_gui_rows(comparison$pairwise)
+        )
+      }
       if (identical(as.character(metadata$id), selected_run)) {
         base$fit_quality <- .liber_ai_fit_quality_summary(result)
       }
@@ -1219,6 +1261,10 @@
     return(list(
       status = "completed", kind = "bootstrap", message = "Bootstrap completed",
       n = result$n, successful = result$successful, level = result$level,
+      type = result$type %||% "nonparametric",
+      unit = result$unit %||% "subject",
+      strata = result$strata %||% character(),
+      cluster = result$cluster %||% character(),
       summary = .liber_gui_rows(result$summary), errors = as.character(result$errors)
     ))
   }
@@ -1233,7 +1279,10 @@
     return(list(
       status = "completed", kind = "scm", message = "SCM completed",
       base_objective = result$base_objective, final_objective = result$final_objective,
-      selected = .liber_gui_rows(result$selected), steps = .liber_gui_rows(result$steps)
+      selected = .liber_gui_rows(result$selected), steps = .liber_gui_rows(result$steps),
+      comparison_id = result$comparison$id %||% NULL,
+      comparison_metrics = .liber_gui_rows(result$comparison$metrics %||% data.frame()),
+      comparison_pairwise = .liber_gui_rows(result$comparison$pairwise %||% data.frame())
     ))
   }
   if (inherits(result, "liber_gui_comparison")) {
@@ -1243,7 +1292,46 @@
       parameters = .liber_gui_rows(result$parameters),
       gof = .liber_gui_rows(result$gof),
       runs = .liber_gui_rows(result$runs),
-      plots = result$plots %||% list()
+      plots = result$plots %||% list(),
+      metrics = .liber_gui_rows(result$comparison$metrics %||% data.frame()),
+      pairwise = .liber_gui_rows(result$comparison$pairwise %||% data.frame())
+    ))
+  }
+  if (inherits(result, "nm_sir")) {
+    summary <- as.data.frame(result$summary, stringsAsFactors = FALSE)
+    summary$parameter <- rownames(summary)
+    summary <- summary[, c("parameter", setdiff(names(summary), "parameter")),
+                       drop = FALSE]
+    return(list(
+      status = "completed", kind = "sir", message = "SIR completed",
+      diagnostics = result$diagnostics,
+      summary = .liber_gui_rows(summary)
+    ))
+  }
+  if (inherits(result, "nm_ppc")) {
+    return(list(
+      status = "completed", kind = "ppc",
+      message = "Posterior predictive checks completed",
+      predictive = result$predictive, checks = .liber_gui_rows(result$checks)
+    ))
+  }
+  if (inherits(result, "nm_waic")) {
+    return(list(
+      status = "completed", kind = "waic", message = "WAIC completed",
+      waic = result$waic, elpd_waic = result$elpd_waic,
+      p_waic = result$p_waic, se = result$se,
+      pointwise = .liber_gui_rows(result$pointwise)
+    ))
+  }
+  if (inherits(result, "nm_psis_loo")) {
+    estimates <- as.data.frame(result$estimates, stringsAsFactors = FALSE)
+    estimates$metric <- rownames(estimates)
+    estimates <- estimates[, c("metric", setdiff(names(estimates), "metric")),
+                           drop = FALSE]
+    return(list(
+      status = "completed", kind = "psis_loo", message = "PSIS-LOO completed",
+      estimates = .liber_gui_rows(estimates),
+      pareto_k = as.numeric(result$pareto_k)
     ))
   }
   if (inherits(result, "nm_report") || inherits(result, "nm_report_bundle")) {
@@ -1297,7 +1385,8 @@
   types <- c("vpc", "npc", "npde", "vpc_categorical", "vpc_count", "vpc_tte",
              "vpc_competing",
              "vpc_recurrent",
-             "bootstrap", "profile", "scm")
+             "bootstrap", "profile", "sir", "ppc", "waic", "psis_loo",
+             "scm")
   payload <- intersect(as.character(payload %||% character()), types)
   list(
     available = stats::setNames(lapply(types, function(name) !is.null(diagnostics[[name]])), types),
@@ -1311,6 +1400,10 @@
     vpc_recurrent = if (is.null(diagnostics$vpc_recurrent) || !"vpc_recurrent" %in% payload) NULL else .liber_gui_result(diagnostics$vpc_recurrent),
     bootstrap = if (is.null(diagnostics$bootstrap) || !"bootstrap" %in% payload) NULL else .liber_gui_result(diagnostics$bootstrap),
     profile = if (is.null(diagnostics$profile) || !"profile" %in% payload) NULL else .liber_gui_result(diagnostics$profile),
+    sir = if (is.null(diagnostics$sir) || !"sir" %in% payload) NULL else .liber_gui_result(diagnostics$sir),
+    ppc = if (is.null(diagnostics$ppc) || !"ppc" %in% payload) NULL else .liber_gui_result(diagnostics$ppc),
+    waic = if (is.null(diagnostics$waic) || !"waic" %in% payload) NULL else .liber_gui_result(diagnostics$waic),
+    psis_loo = if (is.null(diagnostics$psis_loo) || !"psis_loo" %in% payload) NULL else .liber_gui_result(diagnostics$psis_loo),
     scm = if (is.null(diagnostics$scm) || !"scm" %in% payload) NULL else .liber_gui_result(diagnostics$scm)
   )
 }

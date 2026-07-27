@@ -473,43 +473,22 @@
 }
 
 .nm_imp_evaluate <- function(context, parameters, normals, eta_maxit, tolerance,
-                             gradient = TRUE) {
-  evaluate_chunk <- function(evaluators, chunk_normals) {
-    lapply(seq_along(evaluators), function(subject) {
-      .nm_imp_subject_state(
-        evaluators[[subject]], parameters, chunk_normals[[subject]],
-        eta_maxit, tolerance, gradient = gradient
-      )
-    })
-  }
-  if (is.null(context$parallel)) {
-    states <- evaluate_chunk(context$subjects, normals)
-  } else {
-    normal_chunks <- lapply(context$parallel$chunks, function(rows) normals[rows])
-    pieces <- parallel::clusterApply(
-      context$parallel$cluster, seq_along(context$parallel$chunks),
-      function(index, chunks, parameters, eta_maxit, tolerance, gradient) {
-        evaluators <- get(".liber_parallel_subjects", envir = .GlobalEnv)
-        state <- get(".nm_imp_subject_state", envir = asNamespace("LibeRation"))
-        lapply(seq_along(evaluators), function(subject) {
-          state(
-            evaluators[[subject]], parameters, chunks[[index]][[subject]],
-            eta_maxit, tolerance, gradient = gradient
-          )
-        })
-      }, chunks = normal_chunks, parameters = parameters,
-      eta_maxit = eta_maxit, tolerance = tolerance, gradient = gradient
-    )
-    states <- unlist(pieces, recursive = FALSE)
-  }
-  value <- sum(vapply(states, `[[`, numeric(1), "value")) +
+                             gradient = TRUE, initial_eta = NULL) {
+  proposals <- .nm_imp_prepare_proposals(
+    context, parameters, normals, eta_maxit, tolerance,
+    adaptive = TRUE, initial_eta = initial_eta
+  )
+  evaluated <- .nm_imp_evaluate_fixed(
+    context, parameters, proposals, gradient = gradient
+  )
+  states <- evaluated$states
+  value <- evaluated$value +
     .nm_prior_nll(context$model, parameters)
   if (!isTRUE(gradient)) return(list(value = value, states = states))
-  gradients <- lapply(states, `[[`, "native_gradient")
-  if (any(vapply(gradients, is.null, logical(1)))) {
+  if (is.null(evaluated$native_gradient)) {
     return(list(value = value, native_gradient = NULL, states = states))
   }
-  full <- Reduce(`+`, gradients)
+  full <- evaluated$native_gradient
   n_theta <- length(parameters$theta)
   n_sigma <- length(parameters$sigma)
   n_omega <- length(parameters$omega)
@@ -528,21 +507,42 @@
 .nm_est_imp <- function(context, map, maxit, eta_maxit, tolerance, trace,
                         n_imp = 200L, seed = 20260713L, print_every = 0L,
                         imp_gradient = c("score", "finite_crn"),
-                        optimizer_backend = "auto") {
+                        optimizer_backend = "auto",
+                        mu_specialization = TRUE) {
   n_imp <- as.integer(n_imp)
   if (n_imp < 5L) .nm_stop("IMP requires `n_imp >= 5`.")
   imp_gradient <- match.arg(imp_gradient)
   normals <- .nm_imp_normals(context, n_imp, seed)
   cache <- new.env(parent = emptyenv())
   cache$key <- NULL
+  cache$parameters <- NULL
+  cache$modes <- NULL
+  cache$mu_recentered_starts <- 0L
+  mu <- .nm_mu_specialization(context, map, enabled = mu_specialization)
   evaluate <- function(parameters) {
     key <- c(parameters$theta, parameters$sigma, parameters$omega)
     if (is.null(cache$key) || !identical(cache$key, key)) {
+      starts <- NULL
+      if (!is.null(cache$parameters) && !is.null(cache$modes) &&
+          isTRUE(mu$mapped) && isTRUE(mu$enabled) &&
+          identical(dim(cache$modes), c(context$n_subjects, context$n_eta)) &&
+          all(is.finite(cache$modes))) {
+        starts <- .nm_mu_recenter_eta(
+          mu, cache$parameters, parameters, cache$modes
+        )
+        cache$mu_recentered_starts <- cache$mu_recentered_starts + 1L
+      }
       cache$result <- .nm_imp_evaluate(
         context, parameters, normals, eta_maxit, tolerance,
-        gradient = imp_gradient == "score"
+        gradient = imp_gradient == "score", initial_eta = starts
       )
       cache$key <- key
+      cache$parameters <- parameters
+      cache$modes <- if (context$n_eta) {
+        do.call(rbind, lapply(cache$result$states, function(state) {
+          as.numeric(state$mode$par)
+        }))
+      } else matrix(numeric(), context$n_subjects, 0L)
     }
     cache$result
   }
@@ -556,8 +556,20 @@
     gradient = gradient, optimizer_backend = optimizer_backend
   )
   fallback <- NULL
-  if (imp_gradient == "score" &&
-      !identical(as.integer(optimizer$convergence), 0L)) {
+  refinement_reason <- NULL
+  if (imp_gradient == "score") {
+    refinement_reason <- if (
+      !identical(as.integer(optimizer$convergence), 0L)
+    ) {
+      "score search did not converge"
+    } else if (isTRUE(mu$active) && isTRUE(mu$covariate_design)) {
+      paste0(
+        "subject-varying MU design requires an exact finite-CRN ",
+        "objective refinement"
+      )
+    } else NULL
+  }
+  if (!is.null(refinement_reason)) {
     # The normalized importance-score gradient deliberately omits proposal
     # derivatives. It is an efficient search direction but is not the exact
     # derivative of the finite common-random-number objective, so L-BFGS-B can
@@ -566,11 +578,12 @@
     # analytic gradient. This retains the practical fast path while ensuring
     # that a completed fit has an optimizer convergence result it can defend.
     fallback_map <- map
-    # Restart from the declared model initial values. At an abnormal L-BFGS-B
-    # line-search endpoint the finite-difference perturbations can be below the
-    # local numerical resolution, reproducing the same status even though a
-    # clean finite-CRN search converges normally.
-    fallback_map$start <- map$start
+    # An abnormal line-search endpoint can also be below finite-difference
+    # resolution, so that case restarts from the declared model values.
+    # A converged score search is a useful warm start for the exact refinement.
+    fallback_map$start <- if (
+      identical(refinement_reason, "score search did not converge")
+    ) map$start else optimizer$par
     fallback <- .nm_outer_optim(
       fallback_map, objective, maxit, tolerance, trace, print_every,
       gradient = NULL, optimizer_backend = "r"
@@ -586,7 +599,7 @@
         gradient_evaluations = optimizer$gradient_evaluations
       )
       fallback$backend <- paste0(
-        optimizer$backend, "+", fallback$backend, "-finite-crn-fallback"
+        optimizer$backend, "+", fallback$backend, "-finite-crn-refinement"
       )
       optimizer <- fallback
     }
@@ -601,7 +614,14 @@
     diagnostics = list(
       n_imp = n_imp, seed = seed, eta_maxit = eta_maxit,
       common_random_numbers = TRUE, imp_gradient = imp_gradient,
+      mu_specialization = c(
+        .nm_mu_diagnostic(mu),
+        list(recentered_mode_starts = cache$mu_recentered_starts)
+      ),
       finite_crn_fallback = !is.null(optimizer$score_search),
+      finite_crn_refinement_reason = if (!is.null(optimizer$score_search)) {
+        refinement_reason
+      } else NULL,
       population_gradient = if (imp_gradient == "score") {
         paste0(
           "normalized importance-score CppAD gradient (proposal derivative ",
@@ -928,7 +948,8 @@
                          mstep_maxit = 20L, seed = 20260713L,
                          print_every = 0L, adapt_proposal = TRUE,
                          target_acceptance = 0.3, closed_form_sigma = TRUE,
-                         optimizer_backend = "auto", initial_eta = NULL) {
+                         optimizer_backend = "auto", initial_eta = NULL,
+                         mu_specialization = TRUE) {
   n_iter <- as.integer(n_iter)
   burn <- as.integer(burn %||% floor(n_iter / 3))
   mcmc_steps <- as.integer(mcmc_steps)
@@ -952,7 +973,12 @@
   mstep_iterations <- 0L
   mstep_elapsed <- 0
   mstep_backend <- "unknown"
+  mu <- .nm_mu_specialization(context, map, enabled = mu_specialization)
+  mu_updates <- 0L
+  mu_fallbacks <- 0L
+  mu_closed_form_only_iterations <- 0L
   for (iteration in seq_len(n_iter)) {
+    previous_parameters <- parameters
     if (context$n_eta) {
       sampled <- .nm_saem_metropolis(
         context, parameters, eta, mcmc_steps, step_scale
@@ -978,16 +1004,49 @@
     mstep_model$OMEGAS$Value <- parameters$omega
     if (length(map$omega_free)) mstep_model$OMEGAS$FIX[] <- TRUE
     if (simple_sigma && length(map$sigma_free)) mstep_model$SIGMAS$FIX[] <- TRUE
-    iteration_map <- .nm_outer_map(mstep_model)
-    conditional <- function(candidate) .nm_saem_conditional(context, candidate, eta)
-    conditional_gradient <- function(candidate) {
-      .nm_saem_conditional_gradient(context, iteration_map, candidate, eta)
+    eta_mstep <- eta
+    mu_iteration_active <- FALSE
+    if (isTRUE(mu$saem_eligible) && isTRUE(mu$active)) {
+      mu_update <- .nm_mu_gls_update(mu, context, parameters, eta)
+      if (isTRUE(mu_update$valid)) {
+        mstep_model$THETAS$Value <- mu_update$parameters$theta
+        mstep_model$THETAS$FIX[mu$theta] <- TRUE
+        eta_mstep <- mu_update$eta
+        mu_updates <- mu_updates + 1L
+        mu_iteration_active <- TRUE
+      } else {
+        mu_fallbacks <- mu_fallbacks + 1L
+        mu$runtime_reason <- mu_update$reason %||% "MU GLS update unavailable"
+      }
     }
-    maximized <- .nm_outer_optim(
-      iteration_map, conditional, min(as.integer(mstep_maxit), as.integer(maxit)),
-      tolerance, if (trace > 1L) trace else 0L,
-      gradient = conditional_gradient, optimizer_backend = optimizer_backend
-    )
+    iteration_map <- .nm_outer_map(mstep_model)
+    if (!length(iteration_map$start)) {
+      maximized <- list(
+        par = numeric(), value = NA_real_, convergence = 0L,
+        message = "All SAEM M-step parameters used closed-form updates",
+        counts = c(`function` = 0L, gradient = 0L),
+        iterations = 0L, objective_evaluations = 0L,
+        gradient_evaluations = 0L, elapsed_seconds = 0,
+        backend = "saem-closed-form"
+      )
+      if (mu_iteration_active) {
+        mu_closed_form_only_iterations <- mu_closed_form_only_iterations + 1L
+      }
+    } else {
+      conditional <- function(candidate) {
+        .nm_saem_conditional(context, candidate, eta_mstep)
+      }
+      conditional_gradient <- function(candidate) {
+        .nm_saem_conditional_gradient(
+          context, iteration_map, candidate, eta_mstep
+        )
+      }
+      maximized <- .nm_outer_optim(
+        iteration_map, conditional, min(as.integer(mstep_maxit), as.integer(maxit)),
+        tolerance, if (trace > 1L) trace else 0L,
+        gradient = conditional_gradient, optimizer_backend = optimizer_backend
+      )
+    }
     mstep_objective_evaluations <- mstep_objective_evaluations +
       as.integer(maximized$objective_evaluations %||% 0L)
     mstep_gradient_evaluations <- mstep_gradient_evaluations +
@@ -997,7 +1056,7 @@
     mstep_backend <- maximized$backend %||% mstep_backend
     candidate <- iteration_map$decode(maximized$par)
     sigma_sufficient <- if (simple_sigma) {
-      .nm_saem_sigma_sufficient(context, candidate, eta)
+      .nm_saem_sigma_sufficient(context, candidate, eta_mstep)
     } else NULL
     if (!is.null(sigma_sufficient) && length(map$sigma_free)) {
       candidate$sigma[map$sigma_free] <- sigma_sufficient[map$sigma_free]
@@ -1008,6 +1067,11 @@
     parameters$sigma[map$sigma_free] <-
       (1 - gamma) * parameters$sigma[map$sigma_free] +
       gamma * candidate$sigma[map$sigma_free]
+    if (mu_iteration_active) {
+      eta <- .nm_mu_recenter_eta(
+        mu, previous_parameters, parameters, eta
+      )
+    }
     if (length(map$omega_free) && context$n_eta) {
       sufficient <- .nm_saem_omega_sufficient(context, eta)
       parameters$omega[map$omega_free] <-
@@ -1048,6 +1112,15 @@
       adaptive_proposal = isTRUE(adapt_proposal),
       closed_form_sigma = simple_sigma,
       closed_form_omega = length(map$omega_free) > 0L,
+      mu_specialization = c(
+        .nm_mu_diagnostic(mu),
+        list(
+          closed_form_updates = mu_updates,
+          closed_form_only_iterations = mu_closed_form_only_iterations,
+          runtime_fallbacks = mu_fallbacks,
+          runtime_reason = mu$runtime_reason %||% NULL
+        )
+      ),
       n_iter = n_iter, burn = burn, seed = seed,
       population_gradient = "exact conditional CppAD gradient"
     )
@@ -1063,7 +1136,8 @@
                           n_burn = 500L, n_sample = 1000L, n_thin = 1L,
                           step_scale = 0.03, eta_step = 0.35,
                           seed = 20260713L, adapt = TRUE,
-                          print_every = 0L) {
+                          print_every = 0L,
+                          mu_specialization = TRUE) {
   n_burn <- as.integer(n_burn)
   n_sample <- as.integer(n_sample)
   n_thin <- as.integer(n_thin)
@@ -1093,14 +1167,24 @@
     map, map$start, matrix(0, context$n_subjects, context$n_eta)
   )
   current <- log_posterior(state)
+  mu <- .nm_mu_specialization(context, map, enabled = mu_specialization)
+  mu_outer <- if (isTRUE(mu$active) && length(mu$theta)) {
+    match(mu$theta, map$theta_free)
+  } else integer()
+  mu_outer <- mu_outer[!is.na(mu_outer)]
+  random_walk_outer <- setdiff(seq_along(map$start), mu_outer)
   total_iterations <- n_burn + n_sample * n_thin
   kept <- vector("list", n_sample)
   accepted_outer <- attempted_outer <- accepted_eta <- attempted_eta <- 0L
+  accepted_mu <- attempted_mu <- 0L
   keep <- 0L
   for (iteration in seq_len(total_iterations)) {
-    if (length(state$outer)) {
+    if (length(random_walk_outer)) {
+      proposed_outer <- state$outer
+      proposed_outer[random_walk_outer] <- proposed_outer[random_walk_outer] +
+        stats::rnorm(length(random_walk_outer), sd = step_scale)
       proposal <- .nm_bayes_state(
-        map, state$outer + stats::rnorm(length(state$outer), sd = step_scale), state$eta
+        map, proposed_outer, state$eta
       )
       proposed <- log_posterior(proposal)
       attempted_outer <- attempted_outer + 1L
@@ -1108,6 +1192,19 @@
         state <- proposal
         current <- proposed
         accepted_outer <- accepted_outer + 1L
+      }
+    }
+    if (isTRUE(mu$active) && length(mu$theta)) {
+      proposed_mu <- .nm_mu_bayes_proposal(
+        mu, context, state, map, log_posterior, current
+      )
+      if (isTRUE(proposed_mu$attempted)) {
+        attempted_mu <- attempted_mu + 1L
+      }
+      if (isTRUE(proposed_mu$accepted)) {
+        accepted_mu <- accepted_mu + 1L
+        state <- proposed_mu$state
+        current <- proposed_mu$log_posterior
       }
     }
     if (context$n_eta) {
@@ -1127,7 +1224,8 @@
         }
       }
     }
-    if (isTRUE(adapt) && iteration <= n_burn && iteration %% 50L == 0L) {
+    if (isTRUE(adapt) && length(random_walk_outer) &&
+        iteration <= n_burn && iteration %% 50L == 0L) {
       rate <- accepted_outer / max(attempted_outer, 1L)
       step_scale <- step_scale * exp(if (rate > 0.3) 0.1 else -0.1)
     }
@@ -1196,6 +1294,15 @@
     diagnostics = list(
       outer_acceptance = accepted_outer / max(attempted_outer, 1L),
       eta_acceptance = accepted_eta / max(attempted_eta, 1L),
+      mu_acceptance = accepted_mu / max(attempted_mu, 1L),
+      mu_specialization = c(
+        .nm_mu_diagnostic(mu),
+        list(
+          attempted_blocks = attempted_mu,
+          accepted_blocks = accepted_mu,
+          random_walk_outer_parameters = length(random_walk_outer)
+        )
+      ),
       n_burn = n_burn, n_sample = n_sample, n_thin = n_thin,
       seed = seed, final_step_scale = step_scale
     )

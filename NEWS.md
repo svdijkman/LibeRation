@@ -1,3 +1,33 @@
+# LibeRation 0.9.5
+
+- Adds explicit MU-reference metadata and editable `MU_n` code generation,
+  subject-level covariate validation, NONMEM round-tripping, and model contract
+  version 4.
+- Specializes MU-aware estimation: symbolic affine/link classification drives
+  bounded generalized least-squares SAEM M-steps, IMP preserves individual
+  parameters when warm-starting conditional proposals, and BAYES uses a
+  Metropolis-corrected Gaussian MU block. Ineligible models fall back safely
+  and retain the reason in fit diagnostics.
+- Vectorizes and caches the SAEM MU GLS system and skips the generic optimizer
+  when MU, OMEGA, and SIGMA closed forms exhaust the M-step. On the paired
+  100-subject reference model this reduced specialized SAEM core time by about
+  half. IMP now detects subject-varying MU designs and refines its practical
+  score solution against the exact finite common-random-number objective.
+- Adds a scrubbed external comparison campaign for conventional and
+  MU-referenced NONMEM 7.3 FOCEI, IMP, and SAEM controls, including matched
+  estimates, individual ETAs, fresh-process/core runtime, and specialization
+  telemetry. Scenarios cover one and two ETAs, fixed and estimated diagonal or
+  correlated OMEGA, estimated SIGMA, and an estimated weight relationship.
+- Adds sampling importance resampling, subject- or cluster-level stratified
+  bootstrap, and fitted-model parametric bootstrap.
+- Adds durable model-comparison objects with model/data/fit fingerprints,
+  AIC/BIC weights, explicitly declared nested likelihood-ratio tests, boundary
+  warnings, and optional parametric-bootstrap calibration. SCM, the comparison
+  GUI, and Help AI use the same comparison evidence.
+- Adds subject-marginal Bayesian pointwise likelihoods, population and
+  conditional posterior predictive checks, WAIC, and optional PSIS-LOO with
+  Pareto-k diagnostics.
+
 # LibeRation 0.9.4
 
 - Updates GOF, saved diagnostics, comparison, and queue views through targeted

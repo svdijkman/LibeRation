@@ -125,6 +125,194 @@
   matrix
 }
 
+#' Declare NONMEM-style MU references
+#'
+#' A MU declaration records the population mean associated with one ETA.
+#' LibeRation writes the corresponding `MU_n` assignment into the active
+#' `$PK/$PRED` source. When `parameter` is supplied it also generates the
+#' conventional individual-parameter assignment unless that parameter is
+#' already assigned by the user.
+#'
+#' @param eta ETA indices.
+#' @param expression Population-mean expressions, for example
+#'   `"log(THETA(1))"`.
+#' @param parameter Optional individual parameter names such as `"CL"`.
+#' @param scale `log` generates `PARAMETER=exp(MU_n+ETA(n))`; `additive`
+#'   generates `PARAMETER=MU_n+ETA(n)`.
+#' @param covariates Optional semicolon-separated or list-column declarations
+#'   of subject-level covariates used by each MU expression.
+#' @return A serializable `nm_mu` table.
+#' @export
+nm_mu <- function(eta, expression, parameter = NULL,
+                  scale = "log", covariates = NULL) {
+  eta <- as.integer(eta)
+  expression <- as.character(expression)
+  count <- max(length(eta), length(expression), length(parameter %||% character()),
+               length(scale), length(covariates %||% character()))
+  if (!length(eta) || anyNA(eta) || any(eta < 1L) ||
+      !length(expression) || any(!nzchar(trimws(expression)))) {
+    .nm_stop("MU declarations require positive ETA indices and non-empty expressions.")
+  }
+  recycle <- function(value, default = "") {
+    if (is.null(value) || !length(value)) value <- default
+    rep_len(as.character(value), count)
+  }
+  eta <- rep_len(eta, count)
+  expression <- recycle(expression)
+  parameter <- recycle(parameter)
+  scale <- tolower(recycle(scale, "log"))
+  covariates <- if (is.list(covariates)) {
+    vapply(rep_len(covariates, count), function(value) {
+      paste(unique(as.character(value)), collapse = ";")
+    }, character(1))
+  } else recycle(covariates)
+  if (any(!scale %in% c("log", "additive"))) {
+    .nm_stop("MU `scale` must be `log` or `additive`.")
+  }
+  if (anyDuplicated(eta)) .nm_stop("Each ETA may have only one MU declaration.")
+  if (any(nzchar(parameter) & !grepl("^[A-Za-z][A-Za-z0-9_]*$", parameter))) {
+    .nm_stop("MU parameter names must be valid model identifiers.")
+  }
+  structure(data.frame(
+    MU = eta, ETA = eta, EXPRESSION = trimws(expression),
+    PARAMETER = trimws(parameter), SCALE = scale,
+    COVARIATES = covariates, stringsAsFactors = FALSE
+  ), class = c("nm_mu", "data.frame"))
+}
+
+.nm_mu_from_source <- function(source) {
+  lines <- unlist(strsplit(gsub(";", "\n", source, fixed = TRUE), "\n",
+                           fixed = TRUE), use.names = FALSE)
+  pattern <- "^\\s*MU_?([0-9]+)\\s*(?:<-|=)\\s*(.+?)\\s*$"
+  matches <- regexec(pattern, lines, ignore.case = TRUE, perl = TRUE)
+  parts <- regmatches(lines, matches)
+  parts <- Filter(length, parts)
+  if (!length(parts)) return(NULL)
+  mu <- as.integer(vapply(parts, `[[`, character(1), 2L))
+  expression <- vapply(parts, `[[`, character(1), 3L)
+  if (anyDuplicated(mu)) .nm_stop("Each MU index may be assigned only once.")
+  structure(data.frame(
+    MU = mu, ETA = mu, EXPRESSION = trimws(expression),
+    PARAMETER = "", SCALE = "log", COVARIATES = "",
+    stringsAsFactors = FALSE
+  ), class = c("nm_mu", "data.frame"))
+}
+
+.nm_mu_normalize <- function(value, source, n_eta, covariates) {
+  inferred <- .nm_mu_from_source(source)
+  if (is.null(value)) value <- inferred
+  if (is.null(value)) return(NULL)
+  value <- as.data.frame(value, stringsAsFactors = FALSE)
+  names(value) <- toupper(names(value))
+  required <- c("MU", "ETA", "EXPRESSION")
+  if (length(setdiff(required, names(value))) || !nrow(value)) {
+    .nm_stop("MU requires non-empty MU, ETA, and EXPRESSION columns.")
+  }
+  if (!"PARAMETER" %in% names(value)) value$PARAMETER <- ""
+  if (!"SCALE" %in% names(value)) value$SCALE <- "log"
+  if (!"COVARIATES" %in% names(value)) value$COVARIATES <- ""
+  value$MU <- as.integer(value$MU)
+  value$ETA <- as.integer(value$ETA)
+  value$EXPRESSION <- trimws(as.character(value$EXPRESSION))
+  value$PARAMETER <- trimws(as.character(value$PARAMETER))
+  value$SCALE <- tolower(trimws(as.character(value$SCALE)))
+  value$COVARIATES <- as.character(value$COVARIATES)
+  if (anyNA(value$MU) || anyNA(value$ETA) || any(value$MU < 1L) ||
+      any(value$ETA < 1L | value$ETA > n_eta) ||
+      anyDuplicated(value$MU) || anyDuplicated(value$ETA) ||
+      any(!nzchar(value$EXPRESSION))) {
+    .nm_stop("MU/ETA indices must be unique and refer to available ETAs.")
+  }
+  if (any(!value$SCALE %in% c("log", "additive"))) {
+    .nm_stop("MU `SCALE` must be `log` or `additive`.")
+  }
+  source_lines <- trimws(unlist(strsplit(
+    gsub(";", "\n", source, fixed = TRUE), "\n", fixed = TRUE
+  ), use.names = FALSE))
+  assignment_pattern <- "^([A-Za-z][A-Za-z0-9_]*)\\s*(?:<-|=)\\s*(.+)$"
+  assignment_matches <- regexec(
+    assignment_pattern, source_lines, perl = TRUE
+  )
+  assignment_parts <- Filter(length, regmatches(source_lines, assignment_matches))
+  assignments <- if (length(assignment_parts)) stats::setNames(
+    vapply(assignment_parts, `[[`, character(1), 3L),
+    toupper(vapply(assignment_parts, `[[`, character(1), 2L))
+  ) else character()
+  expression_symbols <- function(expression, seen = character()) {
+    parsed <- tryCatch(parse(text = expression), error = identity)
+    if (inherits(parsed, "error")) {
+      .nm_stop("Unable to parse MU expression `", expression, "`: ",
+               conditionMessage(parsed))
+    }
+    symbols <- unique(all.vars(parsed))
+    leaves <- character()
+    for (symbol in symbols) {
+      key <- toupper(symbol)
+      if (key %in% names(assignments) && !key %in% seen &&
+          !grepl("^MU_?[0-9]+$", key)) {
+        leaves <- c(leaves, expression_symbols(
+          assignments[[key]], c(seen, key)
+        ))
+      } else {
+        leaves <- c(leaves, symbol)
+      }
+    }
+    unique(leaves)
+  }
+  expression_covariates <- lapply(value$EXPRESSION, expression_symbols)
+  undeclared_expression_covariates <- setdiff(
+    unique(unlist(expression_covariates, use.names = FALSE)), covariates
+  )
+  if (length(undeclared_expression_covariates)) {
+    .nm_stop(
+      "MU expressions may use THETA values and declared subject-level ",
+      "COVARIATES; add these variables to `COVARIATES`: ",
+      paste(undeclared_expression_covariates, collapse = ", "), "."
+    )
+  }
+  for (row in seq_len(nrow(value))) {
+    supplied <- unlist(strsplit(
+      value$COVARIATES[[row]], "\\s*[;,]\\s*", perl = TRUE
+    ))
+    value$COVARIATES[[row]] <- paste(unique(c(
+      supplied[nzchar(supplied)], expression_covariates[[row]]
+    )), collapse = ";")
+  }
+  declared <- unique(unlist(strsplit(
+    paste(value$COVARIATES, collapse = ";"), "\\s*[;,]\\s*", perl = TRUE
+  )))
+  declared <- declared[nzchar(declared)]
+  if (length(setdiff(declared, covariates))) {
+    .nm_stop("MU covariates must also be declared in `COVARIATES`: ",
+             paste(setdiff(declared, covariates), collapse = ", "), ".")
+  }
+  structure(value[order(value$MU), c(
+    "MU", "ETA", "EXPRESSION", "PARAMETER", "SCALE", "COVARIATES"
+  ), drop = FALSE], class = c("nm_mu", "data.frame"))
+}
+
+.nm_mu_source <- function(source, mu) {
+  if (is.null(mu) || !nrow(mu)) return(source)
+  assigned <- function(name) grepl(
+    paste0("(?im)^\\s*", name, "\\s*(?:<-|=)"), source, perl = TRUE
+  )
+  generated <- character()
+  for (row in seq_len(nrow(mu))) {
+    mu_name <- paste0("MU_", mu$MU[[row]])
+    if (!assigned(mu_name) &&
+        !assigned(paste0("MU", mu$MU[[row]]))) {
+      generated <- c(generated, paste0(mu_name, "=", mu$EXPRESSION[[row]]))
+    }
+    parameter <- mu$PARAMETER[[row]]
+    if (nzchar(parameter) && !assigned(parameter)) {
+      rhs <- paste0(mu_name, "+ETA(", mu$ETA[[row]], ")")
+      if (identical(mu$SCALE[[row]], "log")) rhs <- paste0("exp(", rhs, ")")
+      generated <- c(generated, paste0(parameter, "=", rhs))
+    }
+  }
+  paste(c(generated, source), collapse = "\n")
+}
+
 .nm_error_type <- function(code, requested = "auto") {
   requested <- match.arg(requested, c(
     "auto", "none", "additive", "proportional", "combined",
@@ -568,6 +756,9 @@
 #' @param COMPONENTS Optional list of immutable offline [nm_component()]
 #'   declarations expanded into compiled `$PK/$PRED` or `$DES` IR according
 #'   to each component's scope.
+#' @param MU Optional NONMEM-style population-mean declarations created by
+#'   [nm_mu()]. Existing `MU_1=...` assignments in `$PK/$PRED` are discovered
+#'   automatically and retained as semantic metadata.
 #' @param PRED_MODE Model-definition route. `"pk"` uses `PRED` as a
 #'   PREDPP/ADVAN-style `$PK` block; `"pred"` uses it as a row-wise direct
 #'   `$PRED` block; `"pk_pred"` runs `$PK`, ADVAN/`$DES`, and then a
@@ -630,6 +821,7 @@ nm_model <- function(INPUT,
                      DAE_CONFIG = NULL,
                      RE_CONFIG = NULL,
                      COMPONENTS = NULL,
+                     MU = NULL,
                      PRED_MODE = c("pk", "pred", "pk_pred"),
                      PK_SOURCE = NULL,
                      PRED_SOURCE = NULL,
@@ -816,6 +1008,26 @@ nm_model <- function(INPUT,
     )
   }
   n_eta <- .nm_n_eta(omega)
+  active_source <- if (identical(pred_mode, "pred")) {
+    direct_pred_source
+  } else pred_source
+  mu <- .nm_mu_normalize(
+    MU, active_source, n_eta,
+    unique(as.character(COVARIATES %||% character()))
+  )
+  active_source <- .nm_mu_source(active_source, mu)
+  if (identical(pred_mode, "pred")) {
+    direct_pred_source <- active_source
+  } else {
+    pred_source <- active_source
+    pk_source <- active_source
+  }
+  PRED <- paste(c(
+    if (length(pred_components)) {
+      vapply(pred_components, nm_component_code, character(1))
+    } else character(),
+    active_source
+  ), collapse = "\n")
   re_config <- .nm_re_config(RE_CONFIG, n_eta)
   if (!is.null(re_config) && lik_config$iov > 0L) {
     .nm_stop("Use either RE_CONFIG or legacy IOV expansion, not both.")
@@ -978,6 +1190,7 @@ nm_model <- function(INPUT,
       DAE_CONFIG = dae_config,
       RE_CONFIG = re_config,
       COMPONENTS = components,
+      MU = mu,
       EXPERIMENTAL = experimental,
       OUTCOMES = outcomes,
       outcome_error_generated = !is.null(outcomes) && isTRUE(error_was_missing),
@@ -1168,7 +1381,11 @@ nm_support_matrix <- function() {
                "cross-endpoint residual covariance",
                "stochastic simulation", "VPC", "multicategory VPC",
                "count VPC", "time-to-event VPC", "recurrent-event VPC",
-               "competing-risk VPC", "bootstrap", "profile likelihood", "SCM",
+               "competing-risk VPC", "bootstrap", "stratified bootstrap",
+               "cluster bootstrap", "parametric bootstrap",
+               "profile likelihood", "sampling importance resampling",
+               "Bayesian posterior predictive checks", "WAIC", "PSIS-LOO",
+               "reproducible model comparison", "MU referencing", "SCM",
                "NONMEM control-stream round-trip", "local queue", "remote queue",
                "React workbench", "model versions", "THETA bounds",
                "parallel estimation", "parallel simulation", "iteration gradients")

@@ -2,9 +2,19 @@
 % Please edit documentation in R/diagnostics.R
 \name{nm_bootstrap}
 \alias{nm_bootstrap}
-\title{Subject-level nonparametric bootstrap}
+\title{Nonparametric and parametric bootstrap uncertainty}
 \usage{
-nm_bootstrap(fit, n = 100L, seed = 20260713L, level = 0.95, ...)
+nm_bootstrap(
+  fit,
+  n = 100L,
+  seed = 20260713L,
+  level = 0.95,
+  type = c("nonparametric", "parametric"),
+  unit = c("subject", "cluster"),
+  strata = NULL,
+  cluster = NULL,
+  ...
+)
 }
 \arguments{
 \item{fit}{An `nm_fit` used as the model and estimation template.}
@@ -15,11 +25,22 @@ nm_bootstrap(fit, n = 100L, seed = 20260713L, level = 0.95, ...)
 
 \item{level}{Percentile confidence level.}
 
+\item{type}{`nonparametric` resamples observed units; `parametric`
+simulates new outcomes and random effects from the fitted model.}
+
+\item{unit}{Resampling unit for a nonparametric bootstrap: subjects or a
+user-supplied cluster column.}
+
+\item{strata}{Optional column whose subject/cluster-level values define
+independent resampling strata.}
+
+\item{cluster}{Cluster column required for `unit = "cluster"`.}
+
 \item{...}{Controls passed to [nm_est()].}
 }
 \value{
 Bootstrap parameter matrix, convergence flags, and failed-run errors.
 }
 \description{
-Subject-level nonparametric bootstrap
+Nonparametric and parametric bootstrap uncertainty
 }

@@ -290,11 +290,21 @@ nm_scm <- function(fit, candidates, direction = c("both", "forward", "backward")
       step <- step + 1L
     }
   }
+  base_parameters <- .nm_fit_free_parameters(fit)
+  final_parameters <- .nm_fit_free_parameters(current)
+  comparison_reference <- if (base_parameters <= final_parameters) 1L else 2L
+  comparison <- nm_compare(
+    fit, current,
+    labels = c("base", "final"),
+    reference = comparison_reference,
+    nested = c(TRUE, TRUE)
+  )
   structure(list(
     selected = candidates[candidates$id %in% selected, , drop = FALSE],
     steps = if (length(log)) do.call(rbind, log) else data.frame(),
     final_model = current$model, final_fit = current, base_objective = fit$objective,
     final_objective = current$objective, direction = direction,
-    p_forward = p_forward, p_backward = p_backward
+    p_forward = p_forward, p_backward = p_backward,
+    comparison = comparison
   ), class = "nm_scm")
 }

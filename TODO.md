@@ -146,25 +146,40 @@ retains an unchecked parent item with completed sub-items checked.
 - [ ] Add a named very-large/thousands-of-subject benchmark profile with memory
   and startup measurements.
 
-## 10. Candidate: MU modelling / MU referencing
+## 10. MU modelling / MU referencing - implemented / monitored
 
-- [ ] Add an explicit serializable mapping from each eligible ETA to
+- [x] ~~Add an explicit serializable mapping from each eligible ETA to
   `MU_i = mu_i(theta, subject-level covariates)` and
-  `phi_i = MU_i + ETA(i)`.
-- [ ] Accept and round-trip NONMEM `MU_1`, `MU_2`, ... assignments without
-  requiring users to rewrite imported control streams.
-- [ ] Validate MU definitions: one ETA mapping, compatible scale, no
-  observation-varying covariates inside MU, and clear handling of nonlinear
-  `mu(theta)` relationships.
-- [ ] Use linear-in-THETA MU structure for conditional/Gibbs-style fixed-effect
-  updates in SAEM/BAYES where mathematically valid; retain Metropolis or the
-  existing optimizer otherwise.
-- [ ] Reuse the mapping in IMP proposal construction and SCM-generated models.
+  `phi_i = MU_i + ETA(i)`.~~
+- [x] ~~Accept and round-trip NONMEM `MU_1`, `MU_2`, ... assignments without
+  requiring users to rewrite imported control streams.~~
+- [x] ~~Validate MU definitions: one ETA mapping, compatible scale, and no
+  observation-varying covariates inside MU.~~
+- [x] ~~Add symbolic affine/link classification and specific fallback
+  diagnostics for nonlinear, aliased, rank-deficient, or otherwise
+  ineligible `mu(theta)` relationships.~~
+- [x] ~~Use eligible MU structure for bounded generalized least-squares SAEM
+  M-steps and Metropolis-corrected Gaussian BAYES blocks; retain the existing
+  optimizer or random-walk path otherwise.~~
+- [x] ~~Reuse the mapping to preserve individual parameters when warm-starting
+  IMP conditional-mode proposals.~~
+- [ ] Reuse MU mappings when SCM generates common log-normal covariate models.
 - [ ] Add GUI support that can generate MU definitions automatically from
   common log-normal parameter/covariate relationships while leaving expert code
   editable.
-- [ ] Cross-check estimates and runtime against algebraically equivalent
-  non-MU LibeRation models and MU-referenced NONMEM models.
+- [x] ~~Cross-check algebraic individual-parameter invariance, Gaussian-block
+  improvement, safe nonlinear fallback, and estimator-path telemetry against
+  equivalent LibeRation fixtures.~~
+- [x] ~~Add paired runtime/estimate benchmarks against MU-referenced NONMEM
+  FOCEI/IMP/SAEM models to the external validation matrix, retaining only
+  scrubbed derived evidence.~~
+- [x] ~~Vectorize and cache the MU GLS normal equations and bypass the generic
+  SAEM M-step optimizer when all remaining parameters have closed-form
+  updates.~~
+- [x] ~~Extend the paired matrix to two ETAs, estimated diagonal/full OMEGA,
+  estimated SIGMA, and a subject-level covariate coefficient.~~
+- [x] ~~Refine IMP score solutions against the exact finite-CRN objective when
+  a subject-varying MU design makes the practical score path insufficient.~~
 
 MU modelling should remain optional. Existing expressions such as
 `CL = THETA(1) * exp(ETA(1))` are already valid; explicit MU metadata is useful
@@ -202,3 +217,23 @@ when NONMEM control-stream compatibility requires it.
   cancellation and iteration logging between sampler iterations.~~
 - [x] ~~Retain the R sampler as an explicit reference backend and verify native
   target values/gradients against it.~~
+
+## 13. Advanced uncertainty and reproducible comparison - implemented
+
+- [x] ~~Add sampling importance resampling with a heavy-tailed proposal, exact
+  population objective, normalized weights, ESS diagnostics, and systematic
+  resampling.~~
+- [x] ~~Add first-class, serializable model-comparison objects with immutable
+  fit/data/model fingerprints, AIC/BIC weights, explicitly declared nested
+  LRTs, boundary warnings, and optional parametric-bootstrap calibration.~~
+- [x] ~~Use the model-comparison contract in SCM results, LibeRary dual-lane
+  extraction reconciliation, the LibeRation comparison GUI, and Help-AI
+  evidence.~~
+- [x] ~~Add subject-marginal pointwise posterior log likelihood, posterior
+  predictive checks, WAIC, and PSIS-LOO with Pareto-k diagnostics.~~
+- [x] ~~Add subject- and cluster-level nonparametric bootstrap with optional
+  strata, plus fitted-model parametric bootstrap.~~
+- [ ] Add adaptive multi-round SIR proposals and proposal sources based on
+  bootstrap or sandwich samples.
+- [ ] Add BCa bootstrap intervals, explicit occasion-level resampling, and
+  durable checkpoint/resume for large distributed uncertainty campaigns.

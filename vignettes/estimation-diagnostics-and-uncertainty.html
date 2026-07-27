@@ -413,6 +413,37 @@ common interface.</p>
 <p>Method-specific controls are supplied through <code>...</code>. Use a
 fixed seed for stochastic methods and record all controls in reports or
 manifests.</p>
+<div id="mu-aware-stochastic-estimation" class="section level3">
+<h3>MU-aware stochastic estimation</h3>
+<p>When a model declares <code>MU_n</code> references, <code>IMP</code>,
+<code>SAEM</code>, and <code>BAYES</code> use the mapping by default.
+The classifier recognizes MU equations that are affine in native THETAs
+or in <code>log(THETA)</code> coordinates, including subject-level
+covariate coefficients. For eligible models:</p>
+<ul>
+<li>IMP re-centres the previous conditional modes as the population MU
+changes, preserving the corresponding individual parameters while
+finding the next proposal;</li>
+<li>SAEM replaces repeated model-level optimization of MU-linked fixed
+effects with a bounded generalized least-squares M-step; and</li>
+<li>BAYES samples the linked fixed effects with a Gaussian MU proposal,
+re-centres ETAs to preserve individual parameters, and applies a
+Metropolis correction so bounds, priors, and any other model dependence
+remain exact.</li>
+</ul>
+<p>Nonlinear expressions, inconsistent links, rank-deficient MU designs,
+direct use of a linked THETA outside its MU equation, explicit
+linked-THETA priors, and currently unsupported random-effect layouts
+retain the conventional SAEM path. The exact decision and any runtime
+fallback are recorded in <code>fit$diagnostics$mu_specialization</code>.
+Set <code>mu_specialization = FALSE</code> as a reference/debugging
+control.</p>
+<div class="sourceCode" id="cb1"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb1-1"><a href="#cb1-1" tabindex="-1"></a>saem_fit <span class="ot">&lt;-</span> <span class="fu">nm_est</span>(</span>
+<span id="cb1-2"><a href="#cb1-2" tabindex="-1"></a>  mu_model, data, <span class="at">method =</span> <span class="st">&quot;SAEM&quot;</span>,</span>
+<span id="cb1-3"><a href="#cb1-3" tabindex="-1"></a>  <span class="at">n_iter =</span> <span class="dv">500</span>, <span class="at">mu_specialization =</span> <span class="cn">TRUE</span></span>
+<span id="cb1-4"><a href="#cb1-4" tabindex="-1"></a>)</span>
+<span id="cb1-5"><a href="#cb1-5" tabindex="-1"></a></span>
+<span id="cb1-6"><a href="#cb1-6" tabindex="-1"></a>saem_fit<span class="sc">$</span>diagnostics<span class="sc">$</span>mu_specialization</span></code></pre></div>
 <p>For GQ, <code>gq_grid = &quot;auto&quot;</code> uses a tensor grid through
 three ETA dimensions and a Smolyak sparse grid for higher-dimensional
 models. <code>gq_order</code> controls the tensor nodes per ETA
@@ -445,28 +476,29 @@ posterior ETA means. Their reported OMEGA is the weighted support
 covariance for interoperability, not an assumed normal random-effect
 distribution. Support-point inference is non-regular; use bootstrap
 rather than the ordinary Hessian covariance step.</p>
-<div class="sourceCode" id="cb1"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb1-1"><a href="#cb1-1" tabindex="-1"></a>gq_fit <span class="ot">&lt;-</span> <span class="fu">nm_est</span>(</span>
-<span id="cb1-2"><a href="#cb1-2" tabindex="-1"></a>  model, data, <span class="at">method =</span> <span class="st">&quot;GQ&quot;</span>,</span>
-<span id="cb1-3"><a href="#cb1-3" tabindex="-1"></a>  <span class="at">gq_grid =</span> <span class="st">&quot;auto&quot;</span>, <span class="at">gq_order =</span> <span class="dv">5</span>, <span class="at">gq_level =</span> <span class="dv">3</span>,</span>
-<span id="cb1-4"><a href="#cb1-4" tabindex="-1"></a>  <span class="at">covariance =</span> <span class="cn">TRUE</span></span>
-<span id="cb1-5"><a href="#cb1-5" tabindex="-1"></a>)</span></code></pre></div>
-<div class="sourceCode" id="cb2"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb2-1"><a href="#cb2-1" tabindex="-1"></a>fit <span class="ot">&lt;-</span> <span class="fu">nm_est</span>(</span>
-<span id="cb2-2"><a href="#cb2-2" tabindex="-1"></a>  model,</span>
-<span id="cb2-3"><a href="#cb2-3" tabindex="-1"></a>  data,</span>
-<span id="cb2-4"><a href="#cb2-4" tabindex="-1"></a>  <span class="at">method =</span> <span class="st">&quot;FOCEI&quot;</span>,</span>
-<span id="cb2-5"><a href="#cb2-5" tabindex="-1"></a>  <span class="at">maxit =</span> <span class="dv">200</span>,</span>
-<span id="cb2-6"><a href="#cb2-6" tabindex="-1"></a>  <span class="at">eta_maxit =</span> <span class="dv">100</span>,</span>
-<span id="cb2-7"><a href="#cb2-7" tabindex="-1"></a>  <span class="at">tolerance =</span> <span class="fl">1e-6</span>,</span>
-<span id="cb2-8"><a href="#cb2-8" tabindex="-1"></a>  <span class="at">optimizer_backend =</span> <span class="st">&quot;auto&quot;</span>,</span>
-<span id="cb2-9"><a href="#cb2-9" tabindex="-1"></a>  <span class="at">n_cores =</span> <span class="dv">4</span>,</span>
-<span id="cb2-10"><a href="#cb2-10" tabindex="-1"></a>  <span class="at">print_every =</span> <span class="dv">10</span>,</span>
-<span id="cb2-11"><a href="#cb2-11" tabindex="-1"></a>  <span class="at">covariance =</span> <span class="cn">TRUE</span>,</span>
-<span id="cb2-12"><a href="#cb2-12" tabindex="-1"></a>  <span class="at">covariance_type =</span> <span class="st">&quot;auto&quot;</span></span>
-<span id="cb2-13"><a href="#cb2-13" tabindex="-1"></a>)</span></code></pre></div>
+<div class="sourceCode" id="cb2"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb2-1"><a href="#cb2-1" tabindex="-1"></a>gq_fit <span class="ot">&lt;-</span> <span class="fu">nm_est</span>(</span>
+<span id="cb2-2"><a href="#cb2-2" tabindex="-1"></a>  model, data, <span class="at">method =</span> <span class="st">&quot;GQ&quot;</span>,</span>
+<span id="cb2-3"><a href="#cb2-3" tabindex="-1"></a>  <span class="at">gq_grid =</span> <span class="st">&quot;auto&quot;</span>, <span class="at">gq_order =</span> <span class="dv">5</span>, <span class="at">gq_level =</span> <span class="dv">3</span>,</span>
+<span id="cb2-4"><a href="#cb2-4" tabindex="-1"></a>  <span class="at">covariance =</span> <span class="cn">TRUE</span></span>
+<span id="cb2-5"><a href="#cb2-5" tabindex="-1"></a>)</span></code></pre></div>
+<div class="sourceCode" id="cb3"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb3-1"><a href="#cb3-1" tabindex="-1"></a>fit <span class="ot">&lt;-</span> <span class="fu">nm_est</span>(</span>
+<span id="cb3-2"><a href="#cb3-2" tabindex="-1"></a>  model,</span>
+<span id="cb3-3"><a href="#cb3-3" tabindex="-1"></a>  data,</span>
+<span id="cb3-4"><a href="#cb3-4" tabindex="-1"></a>  <span class="at">method =</span> <span class="st">&quot;FOCEI&quot;</span>,</span>
+<span id="cb3-5"><a href="#cb3-5" tabindex="-1"></a>  <span class="at">maxit =</span> <span class="dv">200</span>,</span>
+<span id="cb3-6"><a href="#cb3-6" tabindex="-1"></a>  <span class="at">eta_maxit =</span> <span class="dv">100</span>,</span>
+<span id="cb3-7"><a href="#cb3-7" tabindex="-1"></a>  <span class="at">tolerance =</span> <span class="fl">1e-6</span>,</span>
+<span id="cb3-8"><a href="#cb3-8" tabindex="-1"></a>  <span class="at">optimizer_backend =</span> <span class="st">&quot;auto&quot;</span>,</span>
+<span id="cb3-9"><a href="#cb3-9" tabindex="-1"></a>  <span class="at">n_cores =</span> <span class="dv">4</span>,</span>
+<span id="cb3-10"><a href="#cb3-10" tabindex="-1"></a>  <span class="at">print_every =</span> <span class="dv">10</span>,</span>
+<span id="cb3-11"><a href="#cb3-11" tabindex="-1"></a>  <span class="at">covariance =</span> <span class="cn">TRUE</span>,</span>
+<span id="cb3-12"><a href="#cb3-12" tabindex="-1"></a>  <span class="at">covariance_type =</span> <span class="st">&quot;auto&quot;</span></span>
+<span id="cb3-13"><a href="#cb3-13" tabindex="-1"></a>)</span></code></pre></div>
 <p><code>print_every</code> writes the objective and scaled population
 gradient to the worker log every N outer evaluations. The fit records
 elapsed model-fit time, covariance time, iterations, function and
 gradient evaluations, and available numerical telemetry.</p>
+</div>
 </div>
 <div id="sequential-estimation" class="section level2">
 <h2>Sequential estimation</h2>
@@ -476,26 +508,26 @@ the next stage; compatible conditional methods also receive the previous
 subject ETA modes. Only the final stage generates the selected
 record-level output table, while every stage retains convergence and
 timing telemetry.</p>
-<div class="sourceCode" id="cb3"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb3-1"><a href="#cb3-1" tabindex="-1"></a>fit <span class="ot">&lt;-</span> <span class="fu">nm_est_sequence</span>(</span>
-<span id="cb3-2"><a href="#cb3-2" tabindex="-1"></a>  model, data,</span>
-<span id="cb3-3"><a href="#cb3-3" tabindex="-1"></a>  <span class="at">stages =</span> <span class="fu">list</span>(</span>
-<span id="cb3-4"><a href="#cb3-4" tabindex="-1"></a>    <span class="fu">nm_est_stage</span>(<span class="st">&quot;FOCE&quot;</span>, <span class="at">maxit =</span> <span class="dv">100</span>, <span class="at">eta_maxit =</span> <span class="dv">50</span>),</span>
-<span id="cb3-5"><a href="#cb3-5" tabindex="-1"></a>    <span class="fu">nm_est_stage</span>(<span class="st">&quot;SAEM&quot;</span>, <span class="at">n_iter =</span> <span class="dv">500</span>, <span class="at">seed =</span> <span class="dv">20260719</span>)</span>
-<span id="cb3-6"><a href="#cb3-6" tabindex="-1"></a>  )</span>
-<span id="cb3-7"><a href="#cb3-7" tabindex="-1"></a>)</span>
-<span id="cb3-8"><a href="#cb3-8" tabindex="-1"></a></span>
-<span id="cb3-9"><a href="#cb3-9" tabindex="-1"></a>fit<span class="sc">$</span>method_sequence</span>
-<span id="cb3-10"><a href="#cb3-10" tabindex="-1"></a>fit<span class="sc">$</span>stages</span></code></pre></div>
+<div class="sourceCode" id="cb4"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb4-1"><a href="#cb4-1" tabindex="-1"></a>fit <span class="ot">&lt;-</span> <span class="fu">nm_est_sequence</span>(</span>
+<span id="cb4-2"><a href="#cb4-2" tabindex="-1"></a>  model, data,</span>
+<span id="cb4-3"><a href="#cb4-3" tabindex="-1"></a>  <span class="at">stages =</span> <span class="fu">list</span>(</span>
+<span id="cb4-4"><a href="#cb4-4" tabindex="-1"></a>    <span class="fu">nm_est_stage</span>(<span class="st">&quot;FOCE&quot;</span>, <span class="at">maxit =</span> <span class="dv">100</span>, <span class="at">eta_maxit =</span> <span class="dv">50</span>),</span>
+<span id="cb4-5"><a href="#cb4-5" tabindex="-1"></a>    <span class="fu">nm_est_stage</span>(<span class="st">&quot;SAEM&quot;</span>, <span class="at">n_iter =</span> <span class="dv">500</span>, <span class="at">seed =</span> <span class="dv">20260719</span>)</span>
+<span id="cb4-6"><a href="#cb4-6" tabindex="-1"></a>  )</span>
+<span id="cb4-7"><a href="#cb4-7" tabindex="-1"></a>)</span>
+<span id="cb4-8"><a href="#cb4-8" tabindex="-1"></a></span>
+<span id="cb4-9"><a href="#cb4-9" tabindex="-1"></a>fit<span class="sc">$</span>method_sequence</span>
+<span id="cb4-10"><a href="#cb4-10" tabindex="-1"></a>fit<span class="sc">$</span>stages</span></code></pre></div>
 </div>
 <div id="covariance-and-standard-errors" class="section level2">
 <h2>Covariance and standard errors</h2>
-<div class="sourceCode" id="cb4"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb4-1"><a href="#cb4-1" tabindex="-1"></a>covariance <span class="ot">&lt;-</span> <span class="fu">nm_cov_step</span>(</span>
-<span id="cb4-2"><a href="#cb4-2" tabindex="-1"></a>  fit,</span>
-<span id="cb4-3"><a href="#cb4-3" tabindex="-1"></a>  <span class="at">type =</span> <span class="st">&quot;auto&quot;</span>,</span>
-<span id="cb4-4"><a href="#cb4-4" tabindex="-1"></a>  <span class="at">tolerance =</span> <span class="fl">1e-8</span>,</span>
-<span id="cb4-5"><a href="#cb4-5" tabindex="-1"></a>  <span class="at">samples =</span> <span class="dv">200</span>,</span>
-<span id="cb4-6"><a href="#cb4-6" tabindex="-1"></a>  <span class="at">seed =</span> <span class="dv">20260715</span></span>
-<span id="cb4-7"><a href="#cb4-7" tabindex="-1"></a>)</span></code></pre></div>
+<div class="sourceCode" id="cb5"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb5-1"><a href="#cb5-1" tabindex="-1"></a>covariance <span class="ot">&lt;-</span> <span class="fu">nm_cov_step</span>(</span>
+<span id="cb5-2"><a href="#cb5-2" tabindex="-1"></a>  fit,</span>
+<span id="cb5-3"><a href="#cb5-3" tabindex="-1"></a>  <span class="at">type =</span> <span class="st">&quot;auto&quot;</span>,</span>
+<span id="cb5-4"><a href="#cb5-4" tabindex="-1"></a>  <span class="at">tolerance =</span> <span class="fl">1e-8</span>,</span>
+<span id="cb5-5"><a href="#cb5-5" tabindex="-1"></a>  <span class="at">samples =</span> <span class="dv">200</span>,</span>
+<span id="cb5-6"><a href="#cb5-6" tabindex="-1"></a>  <span class="at">seed =</span> <span class="dv">20260715</span></span>
+<span id="cb5-7"><a href="#cb5-7" tabindex="-1"></a>)</span></code></pre></div>
 <p>Available estimators include objective Hessian (<code>R</code>),
 subject-score OPG (<code>S</code>), and robust sandwich covariance.
 <code>auto</code> prefers reliable objective curvature and falls back
@@ -513,80 +545,156 @@ standard errors before using the uncertainty estimates.</p>
 versus PRED, DV versus IPRED, CWRES versus TIME, and CWRES versus PRED.
 CWRES plots use a -5 to 5 reference range with horizontal guides at -2
 and 2.</p>
-<div class="sourceCode" id="cb5"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb5-1"><a href="#cb5-1" tabindex="-1"></a>gof <span class="ot">&lt;-</span> <span class="fu">nm_gof</span>(fit)</span>
-<span id="cb5-2"><a href="#cb5-2" tabindex="-1"></a><span class="fu">subset</span>(gof, EVID <span class="sc">==</span> <span class="dv">0</span>, <span class="fu">c</span>(ID, TIME, DV, PRED, IPRED, CWRES))</span></code></pre></div>
+<div class="sourceCode" id="cb6"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb6-1"><a href="#cb6-1" tabindex="-1"></a>gof <span class="ot">&lt;-</span> <span class="fu">nm_gof</span>(fit)</span>
+<span id="cb6-2"><a href="#cb6-2" tabindex="-1"></a><span class="fu">subset</span>(gof, EVID <span class="sc">==</span> <span class="dv">0</span>, <span class="fu">c</span>(ID, TIME, DV, PRED, IPRED, CWRES))</span></code></pre></div>
 </div>
 <div id="predictive-diagnostics" class="section level2">
 <h2>Predictive diagnostics</h2>
-<div class="sourceCode" id="cb6"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb6-1"><a href="#cb6-1" tabindex="-1"></a>vpc <span class="ot">&lt;-</span> <span class="fu">nm_vpc</span>(</span>
-<span id="cb6-2"><a href="#cb6-2" tabindex="-1"></a>  fit,</span>
-<span id="cb6-3"><a href="#cb6-3" tabindex="-1"></a>  <span class="at">nsim =</span> <span class="dv">500</span>,</span>
-<span id="cb6-4"><a href="#cb6-4" tabindex="-1"></a>  <span class="at">probs =</span> <span class="fu">c</span>(<span class="fl">0.05</span>, <span class="fl">0.5</span>, <span class="fl">0.95</span>),</span>
-<span id="cb6-5"><a href="#cb6-5" tabindex="-1"></a>  <span class="at">level =</span> <span class="fl">0.90</span>,</span>
-<span id="cb6-6"><a href="#cb6-6" tabindex="-1"></a>  <span class="at">stratify =</span> <span class="st">&quot;SEX&quot;</span>,</span>
-<span id="cb6-7"><a href="#cb6-7" tabindex="-1"></a>  <span class="at">seed =</span> <span class="dv">20260715</span></span>
-<span id="cb6-8"><a href="#cb6-8" tabindex="-1"></a>)</span>
-<span id="cb6-9"><a href="#cb6-9" tabindex="-1"></a></span>
-<span id="cb6-10"><a href="#cb6-10" tabindex="-1"></a>npde <span class="ot">&lt;-</span> <span class="fu">nm_npde</span>(fit, <span class="at">nsim =</span> <span class="dv">500</span>, <span class="at">seed =</span> <span class="dv">20260715</span>)</span>
-<span id="cb6-11"><a href="#cb6-11" tabindex="-1"></a>npc <span class="ot">&lt;-</span> <span class="fu">nm_npc</span>(fit, <span class="at">nsim =</span> <span class="dv">500</span>, <span class="at">seed =</span> <span class="dv">20260715</span>)</span></code></pre></div>
+<div class="sourceCode" id="cb7"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb7-1"><a href="#cb7-1" tabindex="-1"></a>vpc <span class="ot">&lt;-</span> <span class="fu">nm_vpc</span>(</span>
+<span id="cb7-2"><a href="#cb7-2" tabindex="-1"></a>  fit,</span>
+<span id="cb7-3"><a href="#cb7-3" tabindex="-1"></a>  <span class="at">nsim =</span> <span class="dv">500</span>,</span>
+<span id="cb7-4"><a href="#cb7-4" tabindex="-1"></a>  <span class="at">probs =</span> <span class="fu">c</span>(<span class="fl">0.05</span>, <span class="fl">0.5</span>, <span class="fl">0.95</span>),</span>
+<span id="cb7-5"><a href="#cb7-5" tabindex="-1"></a>  <span class="at">level =</span> <span class="fl">0.90</span>,</span>
+<span id="cb7-6"><a href="#cb7-6" tabindex="-1"></a>  <span class="at">stratify =</span> <span class="st">&quot;SEX&quot;</span>,</span>
+<span id="cb7-7"><a href="#cb7-7" tabindex="-1"></a>  <span class="at">seed =</span> <span class="dv">20260715</span></span>
+<span id="cb7-8"><a href="#cb7-8" tabindex="-1"></a>)</span>
+<span id="cb7-9"><a href="#cb7-9" tabindex="-1"></a></span>
+<span id="cb7-10"><a href="#cb7-10" tabindex="-1"></a>npde <span class="ot">&lt;-</span> <span class="fu">nm_npde</span>(fit, <span class="at">nsim =</span> <span class="dv">500</span>, <span class="at">seed =</span> <span class="dv">20260715</span>)</span>
+<span id="cb7-11"><a href="#cb7-11" tabindex="-1"></a>npc <span class="ot">&lt;-</span> <span class="fu">nm_npc</span>(fit, <span class="at">nsim =</span> <span class="dv">500</span>, <span class="at">seed =</span> <span class="dv">20260715</span>)</span></code></pre></div>
 <p>A stratified VPC retains the total-population summary and adds
 summaries for each stratum. The GUI generates and saves diagnostic plot
 data once, then reloads the saved representation when revisiting a
 tab.</p>
 <p>Binary categorical and time-to-event models have dedicated VPC
 summaries:</p>
-<div class="sourceCode" id="cb7"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb7-1"><a href="#cb7-1" tabindex="-1"></a>categorical_vpc <span class="ot">&lt;-</span> <span class="fu">nm_vpc_categorical</span>(</span>
-<span id="cb7-2"><a href="#cb7-2" tabindex="-1"></a>  categorical_fit, <span class="at">outcome =</span> <span class="st">&quot;DV&quot;</span>, <span class="at">nsim =</span> <span class="dv">500</span></span>
-<span id="cb7-3"><a href="#cb7-3" tabindex="-1"></a>)</span>
-<span id="cb7-4"><a href="#cb7-4" tabindex="-1"></a></span>
-<span id="cb7-5"><a href="#cb7-5" tabindex="-1"></a>tte_vpc <span class="ot">&lt;-</span> <span class="fu">nm_vpc_tte</span>(</span>
-<span id="cb7-6"><a href="#cb7-6" tabindex="-1"></a>  tte_fit, <span class="at">event =</span> <span class="st">&quot;EVENT&quot;</span>, <span class="at">nsim =</span> <span class="dv">500</span></span>
-<span id="cb7-7"><a href="#cb7-7" tabindex="-1"></a>)</span></code></pre></div>
+<div class="sourceCode" id="cb8"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb8-1"><a href="#cb8-1" tabindex="-1"></a>categorical_vpc <span class="ot">&lt;-</span> <span class="fu">nm_vpc_categorical</span>(</span>
+<span id="cb8-2"><a href="#cb8-2" tabindex="-1"></a>  categorical_fit, <span class="at">outcome =</span> <span class="st">&quot;DV&quot;</span>, <span class="at">nsim =</span> <span class="dv">500</span></span>
+<span id="cb8-3"><a href="#cb8-3" tabindex="-1"></a>)</span>
+<span id="cb8-4"><a href="#cb8-4" tabindex="-1"></a></span>
+<span id="cb8-5"><a href="#cb8-5" tabindex="-1"></a>tte_vpc <span class="ot">&lt;-</span> <span class="fu">nm_vpc_tte</span>(</span>
+<span id="cb8-6"><a href="#cb8-6" tabindex="-1"></a>  tte_fit, <span class="at">event =</span> <span class="st">&quot;EVENT&quot;</span>, <span class="at">nsim =</span> <span class="dv">500</span></span>
+<span id="cb8-7"><a href="#cb8-7" tabindex="-1"></a>)</span></code></pre></div>
 </div>
-<div id="bootstrap-and-profile-likelihood" class="section level2">
-<h2>Bootstrap and profile likelihood</h2>
-<div class="sourceCode" id="cb8"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb8-1"><a href="#cb8-1" tabindex="-1"></a>bootstrap <span class="ot">&lt;-</span> <span class="fu">nm_bootstrap</span>(</span>
-<span id="cb8-2"><a href="#cb8-2" tabindex="-1"></a>  fit,</span>
-<span id="cb8-3"><a href="#cb8-3" tabindex="-1"></a>  <span class="at">n =</span> <span class="dv">1000</span>,</span>
-<span id="cb8-4"><a href="#cb8-4" tabindex="-1"></a>  <span class="at">seed =</span> <span class="dv">20260715</span>,</span>
-<span id="cb8-5"><a href="#cb8-5" tabindex="-1"></a>  <span class="at">n_cores =</span> <span class="dv">8</span></span>
-<span id="cb8-6"><a href="#cb8-6" tabindex="-1"></a>)</span>
-<span id="cb8-7"><a href="#cb8-7" tabindex="-1"></a></span>
-<span id="cb8-8"><a href="#cb8-8" tabindex="-1"></a>profile <span class="ot">&lt;-</span> <span class="fu">nm_profile</span>(</span>
-<span id="cb8-9"><a href="#cb8-9" tabindex="-1"></a>  fit,</span>
-<span id="cb8-10"><a href="#cb8-10" tabindex="-1"></a>  <span class="at">parameters =</span> <span class="fu">c</span>(<span class="st">&quot;THETA1&quot;</span>, <span class="st">&quot;OMEGA1&quot;</span>),</span>
-<span id="cb8-11"><a href="#cb8-11" tabindex="-1"></a>  <span class="at">points =</span> <span class="dv">11</span>,</span>
-<span id="cb8-12"><a href="#cb8-12" tabindex="-1"></a>  <span class="at">span =</span> <span class="dv">3</span>,</span>
-<span id="cb8-13"><a href="#cb8-13" tabindex="-1"></a>  <span class="at">level =</span> <span class="fl">0.95</span></span>
-<span id="cb8-14"><a href="#cb8-14" tabindex="-1"></a>)</span></code></pre></div>
-<p>Bootstrap resamples subjects, not rows. Profile likelihood fixes one
-native parameter at each grid point and re-estimates the others. These
-workflows are particularly useful when Hessian uncertainty is asymmetric
-or unreliable.</p>
+<div id="bootstrap-sir-and-profile-likelihood" class="section level2">
+<h2>Bootstrap, SIR, and profile likelihood</h2>
+<div class="sourceCode" id="cb9"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb9-1"><a href="#cb9-1" tabindex="-1"></a>subject_bootstrap <span class="ot">&lt;-</span> <span class="fu">nm_bootstrap</span>(</span>
+<span id="cb9-2"><a href="#cb9-2" tabindex="-1"></a>  fit,</span>
+<span id="cb9-3"><a href="#cb9-3" tabindex="-1"></a>  <span class="at">n =</span> <span class="dv">1000</span>,</span>
+<span id="cb9-4"><a href="#cb9-4" tabindex="-1"></a>  <span class="at">strata =</span> <span class="st">&quot;SITE&quot;</span>,</span>
+<span id="cb9-5"><a href="#cb9-5" tabindex="-1"></a>  <span class="at">seed =</span> <span class="dv">20260715</span>,</span>
+<span id="cb9-6"><a href="#cb9-6" tabindex="-1"></a>  <span class="at">n_cores =</span> <span class="dv">8</span></span>
+<span id="cb9-7"><a href="#cb9-7" tabindex="-1"></a>)</span>
+<span id="cb9-8"><a href="#cb9-8" tabindex="-1"></a></span>
+<span id="cb9-9"><a href="#cb9-9" tabindex="-1"></a>cluster_bootstrap <span class="ot">&lt;-</span> <span class="fu">nm_bootstrap</span>(</span>
+<span id="cb9-10"><a href="#cb9-10" tabindex="-1"></a>  fit, <span class="at">n =</span> <span class="dv">1000</span>, <span class="at">unit =</span> <span class="st">&quot;cluster&quot;</span>,</span>
+<span id="cb9-11"><a href="#cb9-11" tabindex="-1"></a>  <span class="at">cluster =</span> <span class="st">&quot;CENTRE&quot;</span>, <span class="at">strata =</span> <span class="st">&quot;REGION&quot;</span></span>
+<span id="cb9-12"><a href="#cb9-12" tabindex="-1"></a>)</span>
+<span id="cb9-13"><a href="#cb9-13" tabindex="-1"></a></span>
+<span id="cb9-14"><a href="#cb9-14" tabindex="-1"></a>parametric_bootstrap <span class="ot">&lt;-</span> <span class="fu">nm_bootstrap</span>(</span>
+<span id="cb9-15"><a href="#cb9-15" tabindex="-1"></a>  fit, <span class="at">n =</span> <span class="dv">1000</span>, <span class="at">type =</span> <span class="st">&quot;parametric&quot;</span></span>
+<span id="cb9-16"><a href="#cb9-16" tabindex="-1"></a>)</span>
+<span id="cb9-17"><a href="#cb9-17" tabindex="-1"></a></span>
+<span id="cb9-18"><a href="#cb9-18" tabindex="-1"></a>sir <span class="ot">&lt;-</span> <span class="fu">nm_sir</span>(</span>
+<span id="cb9-19"><a href="#cb9-19" tabindex="-1"></a>  fit, <span class="at">n_proposal =</span> <span class="dv">5000</span>, <span class="at">n_resample =</span> <span class="dv">2000</span>,</span>
+<span id="cb9-20"><a href="#cb9-20" tabindex="-1"></a>  <span class="at">inflation =</span> <span class="fl">1.5</span>, <span class="at">seed =</span> <span class="dv">20260715</span></span>
+<span id="cb9-21"><a href="#cb9-21" tabindex="-1"></a>)</span>
+<span id="cb9-22"><a href="#cb9-22" tabindex="-1"></a></span>
+<span id="cb9-23"><a href="#cb9-23" tabindex="-1"></a>profile <span class="ot">&lt;-</span> <span class="fu">nm_profile</span>(</span>
+<span id="cb9-24"><a href="#cb9-24" tabindex="-1"></a>  fit,</span>
+<span id="cb9-25"><a href="#cb9-25" tabindex="-1"></a>  <span class="at">parameters =</span> <span class="fu">c</span>(<span class="st">&quot;THETA1&quot;</span>, <span class="st">&quot;OMEGA1&quot;</span>),</span>
+<span id="cb9-26"><a href="#cb9-26" tabindex="-1"></a>  <span class="at">points =</span> <span class="dv">11</span>,</span>
+<span id="cb9-27"><a href="#cb9-27" tabindex="-1"></a>  <span class="at">span =</span> <span class="dv">3</span>,</span>
+<span id="cb9-28"><a href="#cb9-28" tabindex="-1"></a>  <span class="at">level =</span> <span class="fl">0.95</span></span>
+<span id="cb9-29"><a href="#cb9-29" tabindex="-1"></a>)</span></code></pre></div>
+<p>Nonparametric bootstrap samples whole subjects or whole user-declared
+clusters, never individual rows, and can preserve the number of units
+within each subject/cluster-level stratum. Parametric bootstrap
+simulates new ETAs and outcomes from the fitted model before each refit.
+Every run retains its seed, resampling design, convergence status,
+failed-fit messages, parameter samples, and percentile intervals.</p>
+<p>SIR uses a heavy-tailed multivariate proposal derived from the fitted
+covariance, evaluates the exact population objective at every proposal,
+and reports normalized weights and effective sample size before
+systematic resampling. It is useful for irregular or asymmetric
+frequentist uncertainty; a very small relative ESS indicates that the
+proposal or inflation should be revisited. Profile likelihood fixes one
+native parameter at each grid point and re-estimates the others.</p>
+</div>
+<div id="bayesian-predictive-checks-and-comparison" class="section level2">
+<h2>Bayesian predictive checks and comparison</h2>
+<div class="sourceCode" id="cb10"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb10-1"><a href="#cb10-1" tabindex="-1"></a>log_lik <span class="ot">&lt;-</span> <span class="fu">nm_log_lik</span>(</span>
+<span id="cb10-2"><a href="#cb10-2" tabindex="-1"></a>  bayes_fit, <span class="at">draws =</span> <span class="dv">500</span>,</span>
+<span id="cb10-3"><a href="#cb10-3" tabindex="-1"></a>  <span class="at">marginal =</span> <span class="cn">TRUE</span>, <span class="at">eta_samples =</span> <span class="dv">128</span></span>
+<span id="cb10-4"><a href="#cb10-4" tabindex="-1"></a>)</span>
+<span id="cb10-5"><a href="#cb10-5" tabindex="-1"></a></span>
+<span id="cb10-6"><a href="#cb10-6" tabindex="-1"></a>ppc <span class="ot">&lt;-</span> <span class="fu">nm_ppc</span>(</span>
+<span id="cb10-7"><a href="#cb10-7" tabindex="-1"></a>  bayes_fit, <span class="at">draws =</span> <span class="dv">500</span>,</span>
+<span id="cb10-8"><a href="#cb10-8" tabindex="-1"></a>  <span class="at">predictive =</span> <span class="st">&quot;population&quot;</span>, <span class="at">stratify =</span> <span class="st">&quot;SEX&quot;</span></span>
+<span id="cb10-9"><a href="#cb10-9" tabindex="-1"></a>)</span>
+<span id="cb10-10"><a href="#cb10-10" tabindex="-1"></a>waic <span class="ot">&lt;-</span> <span class="fu">nm_waic</span>(log_lik)</span>
+<span id="cb10-11"><a href="#cb10-11" tabindex="-1"></a>loo <span class="ot">&lt;-</span> <span class="fu">nm_psis_loo</span>(log_lik)</span></code></pre></div>
+<p>The pointwise unit is an independent subject. By default each
+posterior population draw integrates over a new ETA distribution, which
+is appropriate for prediction of a held-out subject. Conditional PPCs
+can instead reuse the saved subject ETAs for within-subject model
+checking. PSIS-LOO uses the optional <code>loo</code> package and
+retains its pointwise Pareto-k diagnostics; inspect those diagnostics
+rather than using the total estimate uncritically.</p>
+</div>
+<div id="reproducible-model-comparison" class="section level2">
+<h2>Reproducible model comparison</h2>
+<div class="sourceCode" id="cb11"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb11-1"><a href="#cb11-1" tabindex="-1"></a>comparison <span class="ot">&lt;-</span> <span class="fu">nm_compare</span>(</span>
+<span id="cb11-2"><a href="#cb11-2" tabindex="-1"></a>  base_fit, covariate_fit,</span>
+<span id="cb11-3"><a href="#cb11-3" tabindex="-1"></a>  <span class="at">labels =</span> <span class="fu">c</span>(<span class="st">&quot;base&quot;</span>, <span class="st">&quot;WT on CL&quot;</span>),</span>
+<span id="cb11-4"><a href="#cb11-4" tabindex="-1"></a>  <span class="at">reference =</span> <span class="dv">1</span>,</span>
+<span id="cb11-5"><a href="#cb11-5" tabindex="-1"></a>  <span class="at">nested =</span> <span class="fu">c</span>(<span class="cn">TRUE</span>, <span class="cn">TRUE</span>),</span>
+<span id="cb11-6"><a href="#cb11-6" tabindex="-1"></a>  <span class="at">diagnostics =</span> <span class="fu">list</span>(</span>
+<span id="cb11-7"><a href="#cb11-7" tabindex="-1"></a>    <span class="at">base =</span> <span class="fu">list</span>(<span class="at">vpc =</span> base_vpc),</span>
+<span id="cb11-8"><a href="#cb11-8" tabindex="-1"></a>    <span class="st">`</span><span class="at">WT on CL</span><span class="st">`</span> <span class="ot">=</span> <span class="fu">list</span>(<span class="at">vpc =</span> covariate_vpc)</span>
+<span id="cb11-9"><a href="#cb11-9" tabindex="-1"></a>  ),</span>
+<span id="cb11-10"><a href="#cb11-10" tabindex="-1"></a>  <span class="at">bic_n =</span> <span class="st">&quot;subjects&quot;</span>,</span>
+<span id="cb11-11"><a href="#cb11-11" tabindex="-1"></a>  <span class="at">parametric_bootstrap =</span> <span class="dv">200</span>,</span>
+<span id="cb11-12"><a href="#cb11-12" tabindex="-1"></a>  <span class="at">seed =</span> <span class="dv">20260715</span></span>
+<span id="cb11-13"><a href="#cb11-13" tabindex="-1"></a>)</span>
+<span id="cb11-14"><a href="#cb11-14" tabindex="-1"></a></span>
+<span id="cb11-15"><a href="#cb11-15" tabindex="-1"></a><span class="fu">nm_compare_save</span>(comparison, <span class="st">&quot;base-vs-wt.rds&quot;</span>)</span>
+<span id="cb11-16"><a href="#cb11-16" tabindex="-1"></a>comparison <span class="ot">&lt;-</span> <span class="fu">nm_compare_read</span>(<span class="st">&quot;base-vs-wt.rds&quot;</span>)</span></code></pre></div>
+<p><code>nm_compare()</code> is a durable analysis object rather than
+only a displayed table. It retains exact model/data/fit and diagnostic
+fingerprints, parameter tables, AIC/BIC and weights, the chosen BIC
+sample-size convention, comparison rules, notes, and optional
+bootstrap-calibrated likelihood-ratio evidence. Likelihood-ratio
+inference is produced only when the user explicitly declares that the
+candidate nests the reference and the likelihood, data, method, and
+degrees of freedom are compatible. Variance-component and mixture
+additions carry a boundary warning.</p>
 </div>
 <div id="stepwise-covariate-modelling" class="section level2">
 <h2>Stepwise covariate modelling</h2>
-<div class="sourceCode" id="cb9"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb9-1"><a href="#cb9-1" tabindex="-1"></a>candidates <span class="ot">&lt;-</span> <span class="fu">data.frame</span>(</span>
-<span id="cb9-2"><a href="#cb9-2" tabindex="-1"></a>  <span class="at">parameter =</span> <span class="fu">c</span>(<span class="st">&quot;CL&quot;</span>, <span class="st">&quot;V&quot;</span>),</span>
-<span id="cb9-3"><a href="#cb9-3" tabindex="-1"></a>  <span class="at">covariate =</span> <span class="fu">c</span>(<span class="st">&quot;WT&quot;</span>, <span class="st">&quot;SEX&quot;</span>),</span>
-<span id="cb9-4"><a href="#cb9-4" tabindex="-1"></a>  <span class="at">form =</span> <span class="fu">c</span>(<span class="st">&quot;power&quot;</span>, <span class="st">&quot;categorical&quot;</span>),</span>
-<span id="cb9-5"><a href="#cb9-5" tabindex="-1"></a>  <span class="at">reference =</span> <span class="fu">c</span>(<span class="dv">70</span>, <span class="cn">NA</span>),</span>
-<span id="cb9-6"><a href="#cb9-6" tabindex="-1"></a>  <span class="at">category =</span> <span class="fu">c</span>(<span class="cn">NA</span>, <span class="dv">1</span>),</span>
-<span id="cb9-7"><a href="#cb9-7" tabindex="-1"></a>  <span class="at">initial =</span> <span class="fu">c</span>(<span class="fl">0.75</span>, <span class="fl">0.1</span>)</span>
-<span id="cb9-8"><a href="#cb9-8" tabindex="-1"></a>)</span>
-<span id="cb9-9"><a href="#cb9-9" tabindex="-1"></a></span>
-<span id="cb9-10"><a href="#cb9-10" tabindex="-1"></a>scm <span class="ot">&lt;-</span> <span class="fu">nm_scm</span>(</span>
-<span id="cb9-11"><a href="#cb9-11" tabindex="-1"></a>  fit,</span>
-<span id="cb9-12"><a href="#cb9-12" tabindex="-1"></a>  candidates,</span>
-<span id="cb9-13"><a href="#cb9-13" tabindex="-1"></a>  <span class="at">direction =</span> <span class="st">&quot;both&quot;</span>,</span>
-<span id="cb9-14"><a href="#cb9-14" tabindex="-1"></a>  <span class="at">p_forward =</span> <span class="fl">0.05</span>,</span>
-<span id="cb9-15"><a href="#cb9-15" tabindex="-1"></a>  <span class="at">p_backward =</span> <span class="fl">0.01</span>,</span>
-<span id="cb9-16"><a href="#cb9-16" tabindex="-1"></a>  <span class="at">max_steps =</span> <span class="dv">20</span></span>
-<span id="cb9-17"><a href="#cb9-17" tabindex="-1"></a>)</span></code></pre></div>
+<div class="sourceCode" id="cb12"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb12-1"><a href="#cb12-1" tabindex="-1"></a>candidates <span class="ot">&lt;-</span> <span class="fu">data.frame</span>(</span>
+<span id="cb12-2"><a href="#cb12-2" tabindex="-1"></a>  <span class="at">parameter =</span> <span class="fu">c</span>(<span class="st">&quot;CL&quot;</span>, <span class="st">&quot;V&quot;</span>),</span>
+<span id="cb12-3"><a href="#cb12-3" tabindex="-1"></a>  <span class="at">covariate =</span> <span class="fu">c</span>(<span class="st">&quot;WT&quot;</span>, <span class="st">&quot;SEX&quot;</span>),</span>
+<span id="cb12-4"><a href="#cb12-4" tabindex="-1"></a>  <span class="at">form =</span> <span class="fu">c</span>(<span class="st">&quot;power&quot;</span>, <span class="st">&quot;categorical&quot;</span>),</span>
+<span id="cb12-5"><a href="#cb12-5" tabindex="-1"></a>  <span class="at">reference =</span> <span class="fu">c</span>(<span class="dv">70</span>, <span class="cn">NA</span>),</span>
+<span id="cb12-6"><a href="#cb12-6" tabindex="-1"></a>  <span class="at">category =</span> <span class="fu">c</span>(<span class="cn">NA</span>, <span class="dv">1</span>),</span>
+<span id="cb12-7"><a href="#cb12-7" tabindex="-1"></a>  <span class="at">initial =</span> <span class="fu">c</span>(<span class="fl">0.75</span>, <span class="fl">0.1</span>)</span>
+<span id="cb12-8"><a href="#cb12-8" tabindex="-1"></a>)</span>
+<span id="cb12-9"><a href="#cb12-9" tabindex="-1"></a></span>
+<span id="cb12-10"><a href="#cb12-10" tabindex="-1"></a>scm <span class="ot">&lt;-</span> <span class="fu">nm_scm</span>(</span>
+<span id="cb12-11"><a href="#cb12-11" tabindex="-1"></a>  fit,</span>
+<span id="cb12-12"><a href="#cb12-12" tabindex="-1"></a>  candidates,</span>
+<span id="cb12-13"><a href="#cb12-13" tabindex="-1"></a>  <span class="at">direction =</span> <span class="st">&quot;both&quot;</span>,</span>
+<span id="cb12-14"><a href="#cb12-14" tabindex="-1"></a>  <span class="at">p_forward =</span> <span class="fl">0.05</span>,</span>
+<span id="cb12-15"><a href="#cb12-15" tabindex="-1"></a>  <span class="at">p_backward =</span> <span class="fl">0.01</span>,</span>
+<span id="cb12-16"><a href="#cb12-16" tabindex="-1"></a>  <span class="at">max_steps =</span> <span class="dv">20</span></span>
+<span id="cb12-17"><a href="#cb12-17" tabindex="-1"></a>)</span></code></pre></div>
 <p>SCM decisions use nested re-estimation and likelihood-ratio
 thresholds. Keep the complete selection log and review biological
 plausibility rather than treating automated selection as a substitute
-for model judgement.</p>
+for model judgement. The SCM result contains the same
+<code>nm_model_comparison</code> contract for its base and final fits,
+allowing downstream reporting and Help AI to consume the evidence
+without reconstructing it.</p>
 </div>
 
 

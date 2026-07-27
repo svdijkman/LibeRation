@@ -16,6 +16,7 @@ arbitrary linear matrix propagation (ADVAN5/7), explicit and stiff general
 ODEs (ADVAN6/8/9/13/14), Michaelis--Menten elimination (ADVAN10), and
 equilibrium DAE constraints (ADVAN9), plus infusions and analytical/nonlinear periodic
 steady state, correlated OMEGA, IOV, priors, mixtures, BLQ likelihoods,
+explicit NONMEM-compatible MU referencing,
 compiled user-defined likelihoods plus declarative continuous, categorical,
 ordinal/IRT, count, event-time, recurrent-event, competing-risk, observed
 Markov, two-state continuous-time Markov, and joint DVID outcomes,
@@ -30,10 +31,18 @@ grids, IMP, SAEM, and Bayesian estimation.
 Bayesian workflows include random-walk BAYES, static HMC, and adaptive NUTS;
 discrete nonparametric population distributions are available through
 fixed-support NPML and adaptive-grid NPAG.
+Affine MU equations are exploited directly by SAEM and BAYES fixed-effect
+blocks; IMP uses the same mapping to re-centre conditional-mode proposals.
+The classifier falls back to the conventional estimator for nonlinear or
+non-identifiable MU structures and records the reason with the fit.
 Diagnostics and uncertainty workflows
 include covariance, GOF/CWRES, family-specific outcome residuals/scores,
 VPC/NPDE/NPC, multicategory, count, time-to-event, recurrent-event, and
 competing-risk VPCs, bootstrap, profile likelihood, and SCM.
+The uncertainty and comparison layer additionally provides sampling importance
+resampling, stratified subject/cluster and parametric bootstrap, Bayesian
+posterior predictive checks, WAIC, PSIS-LOO, and durable fingerprinted model
+comparisons with explicit nested-model rules.
 
 The model editor exposes three definition routes:
 

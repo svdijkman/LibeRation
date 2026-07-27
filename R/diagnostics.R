@@ -1728,40 +1728,110 @@ nm_vpc_recurrent <- function(fit, event = "DV", dvid = NULL, nsim = 200L,
   ), class = "nm_vpc_recurrent")
 }
 
-#' Subject-level nonparametric bootstrap
+#' Nonparametric and parametric bootstrap uncertainty
 #'
 #' @param fit An `nm_fit` used as the model and estimation template.
 #' @param n Number of bootstrap fits.
 #' @param seed RNG seed.
 #' @param level Percentile confidence level.
+#' @param type `nonparametric` resamples observed units; `parametric`
+#'   simulates new outcomes and random effects from the fitted model.
+#' @param unit Resampling unit for a nonparametric bootstrap: subjects or a
+#'   user-supplied cluster column.
+#' @param strata Optional column whose subject/cluster-level values define
+#'   independent resampling strata.
+#' @param cluster Cluster column required for `unit = "cluster"`.
 #' @param ... Controls passed to [nm_est()].
 #' @return Bootstrap parameter matrix, convergence flags, and failed-run errors.
 #' @export
-nm_bootstrap <- function(fit, n = 100L, seed = 20260713L, level = 0.95, ...) {
+nm_bootstrap <- function(fit, n = 100L, seed = 20260713L, level = 0.95,
+                         type = c("nonparametric", "parametric"),
+                         unit = c("subject", "cluster"),
+                         strata = NULL, cluster = NULL, ...) {
   if (!inherits(fit, "nm_fit")) .nm_stop("`fit` must be an nm_fit.")
+  type <- match.arg(type)
+  unit <- match.arg(unit)
   n <- as.integer(n)
   if (length(n) != 1L || is.na(n) || n < 1L) .nm_stop("`n` must be a positive integer.")
   if (!is.finite(level) || level <= 0 || level >= 1) .nm_stop("`level` must lie between zero and one.")
+  strata <- as.character(strata %||% "")
+  cluster <- as.character(cluster %||% "")
+  if (length(strata) != 1L || length(cluster) != 1L) {
+    .nm_stop("`strata` and `cluster` must each be one column name or NULL.")
+  }
+  if (type == "parametric") {
+    unit <- "subject"
+    strata <- cluster <- ""
+  }
+  if (nzchar(strata) && !strata %in% names(fit$data)) {
+    .nm_stop("Bootstrap stratum column `", strata, "` is absent from the fitted data.")
+  }
+  if (unit == "cluster" && (!nzchar(cluster) || !cluster %in% names(fit$data))) {
+    .nm_stop("Cluster bootstrap requires a valid `cluster` column.")
+  }
+  strip_internal <- function(data) {
+    data <- as.data.frame(data, stringsAsFactors = FALSE)
+    data[grep("^\\.", names(data), value = TRUE)] <- NULL
+    data
+  }
+  resample_nonparametric <- function() {
+    data <- as.data.frame(fit$data, stringsAsFactors = FALSE)
+    key <- if (unit == "subject") data$ID else data[[cluster]]
+    units <- unique(key)
+    unit_strata <- if (nzchar(strata)) vapply(units, function(value) {
+      observed <- unique(data[[strata]][key == value])
+      observed <- observed[!is.na(observed)]
+      if (length(observed) > 1L) {
+        .nm_stop("Bootstrap strata must be constant within each resampling unit.")
+      }
+      if (length(observed)) as.character(observed[[1L]]) else "<missing>"
+    }, character(1)) else rep("all", length(units))
+    selected <- unlist(lapply(split(units, unit_strata), function(values) {
+      sample(values, length(values), replace = TRUE)
+    }), use.names = FALSE)
+    pieces <- lapply(seq_along(selected), function(index) {
+      block <- data[key == selected[[index]], , drop = FALSE]
+      if (unit == "subject") {
+        block$ID <- index
+      } else {
+        original_ids <- unique(block$ID)
+        block$ID <- match(block$ID, original_ids) +
+          sum(vapply(seq_len(index - 1L), function(previous) {
+            length(unique(data$ID[key == selected[[previous]]]))
+          }, integer(1)))
+        block[[cluster]] <- index
+      }
+      strip_internal(block)
+    })
+    do.call(rbind, pieces)
+  }
+  fitted_model <- .nm_model_rebuild(fit$model, list(
+    THETAS = transform(fit$model$THETAS, Value = fit$theta),
+    OMEGAS = transform(fit$model$OMEGAS, Value = fit$omega),
+    SIGMAS = transform(fit$model$SIGMAS, Value = fit$sigma)
+  ))
   set.seed(seed)
-  ids <- unique(fit$data$ID)
   runs <- vector("list", n)
   errors <- character(n)
+  convergence <- rep(NA_integer_, n)
+  replicate_seeds <- sample.int(.Machine$integer.max, n)
   for (iteration in seq_len(n)) {
-    selected <- sample(ids, length(ids), replace = TRUE)
-    pieces <- lapply(seq_along(selected), function(index) {
-      block <- as.data.frame(fit$data[fit$data$ID == selected[[index]], , drop = FALSE])
-      block$ID <- index
-      internal <- grep("^\\.", names(block), value = TRUE)
-      block[setdiff(internal, character())] <- NULL
-      block
-    })
+    set.seed(replicate_seeds[[iteration]])
+    dataset <- if (type == "parametric") {
+      strip_internal(nm_simulate(
+        fitted_model, fit$data, theta = fit$theta, sigma = fit$sigma,
+        omega = fit$omega, random_effects = TRUE, residual = TRUE,
+        sample_mixture = TRUE, seed = replicate_seeds[[iteration]]
+      ))
+    } else resample_nonparametric()
     refit <- tryCatch(
-      nm_est(fit$model, do.call(rbind, pieces), method = fit$method, ...),
+      nm_est(fitted_model, dataset, method = fit$method, ...),
       error = identity
     )
     if (inherits(refit, "error")) {
       errors[[iteration]] <- conditionMessage(refit)
     } else {
+      convergence[[iteration]] <- refit$convergence
       runs[[iteration]] <- c(refit$theta, refit$sigma, refit$omega)
     }
   }
@@ -1782,9 +1852,22 @@ nm_bootstrap <- function(fit, n = 100L, seed = 20260713L, level = 0.95, ...) {
       lower = interval[[1L]], upper = interval[[2L]], stringsAsFactors = FALSE
     )
   })) else data.frame()
+  if (nrow(summary)) {
+    display_order <- c(
+      .nm_numbered_names("THETA", length(fit$theta)),
+      .nm_numbered_names("OMEGA", length(fit$omega)),
+      .nm_numbered_names("SIGMA", length(fit$sigma))
+    )
+    summary <- summary[match(display_order, summary$parameter), , drop = FALSE]
+    rownames(summary) <- NULL
+  }
   structure(list(estimates = estimates, errors = errors[nzchar(errors)],
                  summary = summary, n = n, successful = nrow(estimates),
-                 seed = seed, level = level),
+                 convergence = convergence, replicate_seeds = replicate_seeds,
+                 seed = seed, level = level, type = type, unit = unit,
+                 strata = if (nzchar(strata)) strata else NULL,
+                 cluster = if (nzchar(cluster)) cluster else NULL,
+                 fit_fingerprint = .nm_fit_fingerprint(fit)),
             class = "nm_bootstrap")
 }
 

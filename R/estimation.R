@@ -557,6 +557,26 @@
   engine <- if (inherits(model, "NMEngine")) model else nm_compile(model)
   model <- engine$model
   data <- .nm_engine_data(model, data)
+  if (!is.null(model$MU) && nrow(model$MU)) {
+    declared <- unique(unlist(strsplit(
+      paste(model$MU$COVARIATES, collapse = ";"), "\\s*[;,]\\s*", perl = TRUE
+    )))
+    declared <- declared[nzchar(declared)]
+    for (covariate in declared) {
+      if (!covariate %in% names(data)) {
+        .nm_stop("MU covariate `", covariate, "` is absent from the dataset.")
+      }
+      varying <- vapply(split(data[[covariate]], data$.ID_INDEX), function(value) {
+        length(unique(value[!is.na(value)])) > 1L
+      }, logical(1))
+      if (any(varying)) {
+        .nm_stop(
+          "MU covariate `", covariate,
+          "` varies within subject; MU references require subject-level covariates."
+        )
+      }
+    }
+  }
   user_likelihood <- identical(model$LIK_CONFIG$error, "likelihood")
   if (model$LIK_CONFIG$error == "none" || (!user_likelihood && !nrow(model$SIGMAS))) {
     .nm_stop("Estimation requires a residual error model or a compiled user likelihood.")
@@ -1925,6 +1945,19 @@
 #'   (0.5), and `np_max_candidates` (500). `np_estimate_population` controls
 #'   alternating THETA/SIGMA updates. Ordinary covariance is not regular for a
 #'   discrete support distribution; use bootstrap uncertainty for NPML/NPAG.
+#'   IMP, SAEM, and BAYES accept `mu_specialization = TRUE` (the default).
+#'   IMP then re-centres cached conditional-mode starts as MU values change.
+#'   When an affine MU design varies between subjects (for example an estimated
+#'   covariate coefficient), IMP uses the score path as a warm start and
+#'   automatically refines it against the exact finite common-random-number
+#'   objective.
+#'   Eligible affine MU models use a generalized least-squares fixed-effect
+#'   M-step in SAEM, with vectorized OMEGA-keyed normal-equation caching and a
+#'   closed-form-only fast path, and a Metropolis-corrected Gaussian MU block
+#'   in BAYES.
+#'   Non-affine, rank-deficient, or otherwise ineligible models automatically
+#'   retain the ordinary estimator path and record the reason in
+#'   `fit$diagnostics$mu_specialization`.
 #' @export
 nm_est <- function(model, data,
                    method = c("FOCEI", "FOCE", "FO", "LAPLACE", "ITS",

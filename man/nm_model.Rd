@@ -30,6 +30,7 @@ nm_model(
   DAE_CONFIG = NULL,
   RE_CONFIG = NULL,
   COMPONENTS = NULL,
+  MU = NULL,
   PRED_MODE = c("pk", "pred", "pk_pred"),
   PK_SOURCE = NULL,
   PRED_SOURCE = NULL,
@@ -116,6 +117,10 @@ components are evaluated as independent conditional-likelihood units.}
 \item{COMPONENTS}{Optional list of immutable offline [nm_component()]
 declarations expanded into compiled `$PK/$PRED` or `$DES` IR according
 to each component's scope.}
+
+\item{MU}{Optional NONMEM-style population-mean declarations created by
+[nm_mu()]. Existing `MU_1=...` assignments in `$PK/$PRED` are discovered
+automatically and retained as semantic metadata.}
 
 \item{PRED_MODE}{Model-definition route. `"pk"` uses `PRED` as a
 PREDPP/ADVAN-style `$PK` block; `"pred"` uses it as a row-wise direct

@@ -3,7 +3,7 @@ test_that("ecosystem diagnostics report versions without mutating state", {
   expect_s3_class(report, "liber_diagnostics")
   expect_true(all(c("package", "installed", "version", "expected", "compatible") %in%
                   names(report$packages)))
-  expect_identical(as.integer(report$contracts$model), 2L)
+  expect_identical(as.integer(report$contracts$model), 4L)
   expect_true(is.list(report$engine))
 })
 

@@ -733,6 +733,13 @@ liber_gui <- function(model = NULL, data = NULL, queue = NULL,
         }
       } else if (identical(operation, "comparison")) {
         if (same_project) {
+          for (run_id in as.character(metadata$ids %||% character())) {
+            try(nm_project_save_diagnostics(
+              workspace, metadata$project, run_id,
+              list(comparison = result$comparison_object)
+            ), silent = TRUE)
+          }
+          invalidate_ai_context()
           state$comparison_open <- TRUE
           state$result <- result
         }
@@ -1422,7 +1429,8 @@ liber_gui <- function(model = NULL, data = NULL, queue = NULL,
           return(invisible(NULL))
         } else if (kind %in% c("vpc", "npc", "npde", "vpc_categorical", "vpc_count",
                               "vpc_tte", "vpc_competing", "vpc_recurrent",
-                              "bootstrap", "profile", "scm") &&
+                              "bootstrap", "profile", "sir", "ppc", "waic",
+                              "psis_loo", "scm") &&
                    !is.null(state$diagnostics[[kind]])) {
           state$diagnostic_payload <- unique(c(state$diagnostic_payload, kind))
           prepared <- .liber_gui_diagnostics(
@@ -1984,7 +1992,7 @@ liber_gui <- function(model = NULL, data = NULL, queue = NULL,
             label = "Run comparison",
             metadata = list(
               success = "Estimation runs compared",
-              project = state$project
+              project = state$project, ids = ids
             )
           )
           structure(list(), class = "liber_gui_background_started")

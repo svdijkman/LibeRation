@@ -3,14 +3,14 @@
   "release": "0.9.0-research-beta.5",
   "packages": {
     "LibeRtAD": {"version": "0.7.10", "required": true},
-    "LibeRation": {"version": "0.9.4", "required": true},
-    "LibeRary": {"version": "0.7.6", "required": false},
+    "LibeRation": {"version": "0.9.5", "required": true},
+    "LibeRary": {"version": "0.7.7", "required": false},
     "LibeRator": {"version": "0.2.7", "required": false},
     "LibeRality": {"version": "0.2.5", "required": false},
     "LibeRties": {"version": "0.7.5", "required": false}
   },
   "contracts": {
-    "model": 2,
+    "model": 4,
     "job": 2,
     "result": 2,
     "liberation_workspace": 2,

@@ -200,6 +200,11 @@
     has_vpc_recurrent = rep(FALSE, nrow(snapshots)),
     has_bootstrap = rep(FALSE, nrow(snapshots)),
     has_profile = rep(FALSE, nrow(snapshots)),
+    has_sir = rep(FALSE, nrow(snapshots)),
+    has_ppc = rep(FALSE, nrow(snapshots)),
+    has_waic = rep(FALSE, nrow(snapshots)),
+    has_psis_loo = rep(FALSE, nrow(snapshots)),
+    has_comparison = rep(FALSE, nrow(snapshots)),
     has_scm = rep(FALSE, nrow(snapshots)),
     has_covariance = rep(FALSE, nrow(snapshots)),
     queue_id = character(nrow(snapshots)),
@@ -363,7 +368,9 @@ nm_project_create <- function(workspace, name, id = NULL, description = NULL) {
       has_vpc_categorical = logical(), has_vpc_count = logical(),
       has_vpc_tte = logical(), has_vpc_competing = logical(),
       has_vpc_recurrent = logical(),
-      has_bootstrap = logical(), has_profile = logical(), has_scm = logical(),
+      has_bootstrap = logical(), has_profile = logical(), has_sir = logical(),
+      has_ppc = logical(), has_waic = logical(), has_psis_loo = logical(),
+      has_comparison = logical(), has_scm = logical(),
       has_covariance = logical(),
       stringsAsFactors = FALSE
     )
@@ -469,7 +476,9 @@ nm_project_save <- function(workspace, project, model = NULL, data = NULL,
     has_vpc_categorical = FALSE, has_vpc_count = FALSE,
     has_vpc_tte = FALSE, has_vpc_competing = FALSE,
     has_vpc_recurrent = FALSE,
-    has_bootstrap = FALSE, has_profile = FALSE, has_scm = FALSE,
+    has_bootstrap = FALSE, has_profile = FALSE, has_sir = FALSE,
+    has_ppc = FALSE, has_waic = FALSE, has_psis_loo = FALSE,
+    has_comparison = FALSE, has_scm = FALSE,
     has_covariance = FALSE, queue_id = "", queue_job_id = "",
     stringsAsFactors = FALSE
   ))
@@ -552,7 +561,9 @@ nm_project_save_run <- function(workspace, project, version, result, label = NUL
     has_vpc_categorical = FALSE, has_vpc_count = FALSE,
     has_vpc_tte = FALSE, has_vpc_competing = FALSE,
     has_vpc_recurrent = FALSE,
-    has_bootstrap = FALSE, has_profile = FALSE, has_scm = FALSE,
+    has_bootstrap = FALSE, has_profile = FALSE, has_sir = FALSE,
+    has_ppc = FALSE, has_waic = FALSE, has_psis_loo = FALSE,
+    has_comparison = FALSE, has_scm = FALSE,
     has_covariance = inherits(result, "nm_fit") &&
       !is.null(result$covariance) &&
       !identical(result$covariance$status %||% "completed", "failed"),
@@ -592,7 +603,8 @@ nm_project_save_diagnostics <- function(workspace, project, run, diagnostics) {
   allowed <- c(
     "gof", "vpc", "npc", "npde", "vpc_categorical", "vpc_count",
     "vpc_tte", "vpc_competing", "vpc_recurrent",
-    "bootstrap", "profile", "scm"
+    "bootstrap", "profile", "sir", "ppc", "waic", "psis_loo",
+    "comparison", "scm"
   )
   if (length(setdiff(names(diagnostics), allowed))) .nm_stop("Unknown diagnostic type.")
   current <- nm_project_load_diagnostics(workspace, project, run)
@@ -603,7 +615,11 @@ nm_project_save_diagnostics <- function(workspace, project, run, diagnostics) {
   }
   .nm_workspace_atomic_save(merged, file.path(directory, paste0(run, ".rds")))
   for (name in allowed) {
-    manifest$snapshots[[paste0("has_", name)]][[index]] <- !is.null(merged[[name]])
+    column <- paste0("has_", name)
+    if (!column %in% names(manifest$snapshots)) {
+      manifest$snapshots[[column]] <- FALSE
+    }
+    manifest$snapshots[[column]][[index]] <- !is.null(merged[[name]])
   }
   manifest$updated <- format(Sys.time(), "%Y-%m-%dT%H:%M:%OS3Z", tz = "UTC")
   .nm_workspace_atomic_save(manifest, file.path(.nm_project_path(workspace, project), "manifest.rds"))

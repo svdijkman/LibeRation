@@ -35,6 +35,39 @@ knitr::opts_chunk$set(collapse = TRUE, comment = "#>")
 Method-specific controls are supplied through `...`. Use a fixed seed for
 stochastic methods and record all controls in reports or manifests.
 
+### MU-aware stochastic estimation
+
+When a model declares `MU_n` references, `IMP`, `SAEM`, and `BAYES` use the
+mapping by default. The classifier recognizes MU equations that are affine in
+native THETAs or in `log(THETA)` coordinates, including subject-level
+covariate coefficients. For eligible models:
+
+- IMP re-centres the previous conditional modes as the population MU changes,
+  preserving the corresponding individual parameters while finding the next
+  proposal;
+- SAEM replaces repeated model-level optimization of MU-linked fixed effects
+  with a bounded generalized least-squares M-step; and
+- BAYES samples the linked fixed effects with a Gaussian MU proposal,
+  re-centres ETAs to preserve individual parameters, and applies a
+  Metropolis correction so bounds, priors, and any other model dependence
+  remain exact.
+
+Nonlinear expressions, inconsistent links, rank-deficient MU designs, direct
+use of a linked THETA outside its MU equation, explicit linked-THETA priors,
+and currently unsupported random-effect layouts retain the conventional SAEM
+path. The exact decision and any runtime fallback are recorded in
+`fit$diagnostics$mu_specialization`. Set `mu_specialization = FALSE` as a
+reference/debugging control.
+
+```{r mu-estimation-template, eval=FALSE}
+saem_fit <- nm_est(
+  mu_model, data, method = "SAEM",
+  n_iter = 500, mu_specialization = TRUE
+)
+
+saem_fit$diagnostics$mu_specialization
+```
+
 For GQ, `gq_grid = "auto"` uses a tensor grid through three ETA dimensions and
 a Smolyak sparse grid for higher-dimensional models. `gq_order` controls the
 tensor nodes per ETA dimension (default 5), while `gq_level` controls the
@@ -182,14 +215,29 @@ tte_vpc <- nm_vpc_tte(
 )
 ```
 
-## Bootstrap and profile likelihood
+## Bootstrap, SIR, and profile likelihood
 
 ```{r uncertainty-template, eval=FALSE}
-bootstrap <- nm_bootstrap(
+subject_bootstrap <- nm_bootstrap(
   fit,
   n = 1000,
+  strata = "SITE",
   seed = 20260715,
   n_cores = 8
+)
+
+cluster_bootstrap <- nm_bootstrap(
+  fit, n = 1000, unit = "cluster",
+  cluster = "CENTRE", strata = "REGION"
+)
+
+parametric_bootstrap <- nm_bootstrap(
+  fit, n = 1000, type = "parametric"
+)
+
+sir <- nm_sir(
+  fit, n_proposal = 5000, n_resample = 2000,
+  inflation = 1.5, seed = 20260715
 )
 
 profile <- nm_profile(
@@ -201,9 +249,73 @@ profile <- nm_profile(
 )
 ```
 
-Bootstrap resamples subjects, not rows. Profile likelihood fixes one native
-parameter at each grid point and re-estimates the others. These workflows are
-particularly useful when Hessian uncertainty is asymmetric or unreliable.
+Nonparametric bootstrap samples whole subjects or whole user-declared clusters,
+never individual rows, and can preserve the number of units within each
+subject/cluster-level stratum. Parametric bootstrap simulates new ETAs and
+outcomes from the fitted model before each refit. Every run retains its seed,
+resampling design, convergence status, failed-fit messages, parameter samples,
+and percentile intervals.
+
+SIR uses a heavy-tailed multivariate proposal derived from the fitted
+covariance, evaluates the exact population objective at every proposal, and
+reports normalized weights and effective sample size before systematic
+resampling. It is useful for irregular or asymmetric frequentist uncertainty;
+a very small relative ESS indicates that the proposal or inflation should be
+revisited. Profile likelihood fixes one native parameter at each grid point
+and re-estimates the others.
+
+## Bayesian predictive checks and comparison
+
+```{r bayesian-diagnostics, eval=FALSE}
+log_lik <- nm_log_lik(
+  bayes_fit, draws = 500,
+  marginal = TRUE, eta_samples = 128
+)
+
+ppc <- nm_ppc(
+  bayes_fit, draws = 500,
+  predictive = "population", stratify = "SEX"
+)
+waic <- nm_waic(log_lik)
+loo <- nm_psis_loo(log_lik)
+```
+
+The pointwise unit is an independent subject. By default each posterior
+population draw integrates over a new ETA distribution, which is appropriate
+for prediction of a held-out subject. Conditional PPCs can instead reuse the
+saved subject ETAs for within-subject model checking. PSIS-LOO uses the
+optional `loo` package and retains its pointwise Pareto-k diagnostics; inspect
+those diagnostics rather than using the total estimate uncritically.
+
+## Reproducible model comparison
+
+```{r comparison-template, eval=FALSE}
+comparison <- nm_compare(
+  base_fit, covariate_fit,
+  labels = c("base", "WT on CL"),
+  reference = 1,
+  nested = c(TRUE, TRUE),
+  diagnostics = list(
+    base = list(vpc = base_vpc),
+    `WT on CL` = list(vpc = covariate_vpc)
+  ),
+  bic_n = "subjects",
+  parametric_bootstrap = 200,
+  seed = 20260715
+)
+
+nm_compare_save(comparison, "base-vs-wt.rds")
+comparison <- nm_compare_read("base-vs-wt.rds")
+```
+
+`nm_compare()` is a durable analysis object rather than only a displayed
+table. It retains exact model/data/fit and diagnostic fingerprints, parameter
+tables, AIC/BIC and weights, the chosen BIC sample-size convention, comparison
+rules, notes, and optional bootstrap-calibrated likelihood-ratio evidence.
+Likelihood-ratio inference is produced only when the user explicitly declares
+that the candidate nests the reference and the likelihood, data, method, and
+degrees of freedom are compatible. Variance-component and mixture additions
+carry a boundary warning.
 
 ## Stepwise covariate modelling
 
@@ -229,4 +341,7 @@ scm <- nm_scm(
 
 SCM decisions use nested re-estimation and likelihood-ratio thresholds. Keep
 the complete selection log and review biological plausibility rather than
-treating automated selection as a substitute for model judgement.
+treating automated selection as a substitute for model judgement. The SCM
+result contains the same `nm_model_comparison` contract for its base and final
+fits, allowing downstream reporting and Help AI to consume the evidence
+without reconstructing it.

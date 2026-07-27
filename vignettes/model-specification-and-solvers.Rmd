@@ -33,6 +33,43 @@ The principal blocks are:
 Model text can use `THETA(i)`, `ETA(i)`, `SIGMA(i)`, `ERR(i)`, supported
 mathematical functions, and tape-safe `ifelse()` expressions.
 
+## MU referencing
+
+`nm_mu()` records the population mean associated with an ETA and generates
+editable NONMEM-style `MU_n` code. The declaration is optional: conventional
+expressions such as `CL=THETA(1)*exp(ETA(1))` remain fully supported.
+
+```{r mu-reference, eval=FALSE}
+model <- nm_model(
+  INPUT = c("ID", "TIME", "EVID", "AMT", "DV", "MDV", "WT"),
+  COVARIATES = "WT",
+  ADVAN = 1,
+  PRED = "V=THETA(2); S1=V",
+  ERROR = "Y=F+ERR(1)",
+  THETAS = data.frame(THETA=1:3, Value=c(2, 20, 0.75)),
+  OMEGAS = data.frame(OMEGA=1, Value=0.1),
+  SIGMAS = data.frame(SIGMA=1, Value=0.1),
+  MU = nm_mu(
+    eta = 1,
+    expression = "log(THETA(1))+THETA(3)*log(WT/70)",
+    parameter = "CL"
+  )
+)
+```
+
+The resulting code contains `MU_1=...` and
+`CL=exp(MU_1+ETA(1))`. Covariates are inferred from the expression, must be
+declared in `COVARIATES`, and must be constant within each subject. MU metadata
+is preserved by model-contract version 4 and NONMEM control-stream
+round-tripping. The current estimators use the algebraically equivalent
+differentiable model. Eligible affine MU structures use vectorized,
+OMEGA-keyed generalized least-squares SAEM updates and a closed-form-only
+M-step when no ordinary parameters remain. IMP re-centres cached modes and,
+for subject-varying MU designs such as estimated covariate coefficients,
+automatically refines the practical score solution against the exact finite
+common-random-number objective. These estimator specializations do not change
+the model meaning and record their use or fallback reason in fit diagnostics.
+
 ## Experimental mechanistic and latent-state engines
 
 Longer-range engines are opt-in so that exploratory methods cannot be mistaken
