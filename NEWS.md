@@ -1,3 +1,9 @@
+# LibeRation 0.9.6
+
+- Opens the browser by default when `liber_gui()` is started by a
+  non-interactive desktop launcher; hosted callers continue to request and
+  receive the application object with `launch.browser = NULL`.
+
 # LibeRation 0.9.5
 
 - Adds explicit MU-reference metadata and editable `MU_n` code generation,

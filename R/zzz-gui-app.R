@@ -55,7 +55,7 @@
 liber_gui <- function(model = NULL, data = NULL, queue = NULL,
                       workspace = NULL, project = NULL, session_workspace = FALSE,
                       allow_ollama = NULL,
-                      launch.browser = getOption("shiny.launch.browser", interactive()), ...) {
+                      launch.browser = TRUE, ...) {
   dots <- list(...)
   model_input <- model
   data_input <- data

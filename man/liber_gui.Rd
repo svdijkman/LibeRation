@@ -12,7 +12,7 @@ liber_gui(
   project = NULL,
   session_workspace = FALSE,
   allow_ollama = NULL,
-  launch.browser = getOption("shiny.launch.browser", interactive()),
+  launch.browser = TRUE,
   ...
 )
 }
