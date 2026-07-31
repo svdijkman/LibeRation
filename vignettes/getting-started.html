@@ -445,26 +445,40 @@ over persistent PSOCK workers with <code>n_cores</code>.</p>
 <span id="cb3-16"><a href="#cb3-16" tabindex="-1"></a><span class="co">#&gt; 6  1  8.0    0 4.857779   5.260419</span></span>
 <span id="cb3-17"><a href="#cb3-17" tabindex="-1"></a><span class="co">#&gt; 7  1 12.0    0 3.834321   3.692978</span></span></code></pre></div>
 </div>
+<div id="noncompartmental-exposure-summaries" class="section level2">
+<h2>Noncompartmental exposure summaries</h2>
+<p><code>nm_nca()</code> runs the independent native C++ NCA engine on
+one or many profiles. It makes integration, duplicate-time, and BLQ
+policies explicit. Install <code>ncar</code> and <code>NonCompart</code>
+only when the optional reference comparison or fallback is required.</p>
+<div class="sourceCode" id="cb4"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb4-1"><a href="#cb4-1" tabindex="-1"></a>observed <span class="ot">&lt;-</span> simulated[simulated<span class="sc">$</span>EVID <span class="sc">==</span> <span class="dv">0</span> <span class="sc">&amp;</span> simulated<span class="sc">$</span>MDV <span class="sc">==</span> <span class="dv">0</span>, ]</span>
+<span id="cb4-2"><a href="#cb4-2" tabindex="-1"></a>nca <span class="ot">&lt;-</span> <span class="fu">nm_nca</span>(</span>
+<span id="cb4-3"><a href="#cb4-3" tabindex="-1"></a>  observed, <span class="at">concentration =</span> <span class="st">&quot;IPRED&quot;</span>, <span class="at">id =</span> <span class="st">&quot;ID&quot;</span>, <span class="at">dose =</span> <span class="dv">320</span>,</span>
+<span id="cb4-4"><a href="#cb4-4" tabindex="-1"></a>  <span class="at">method =</span> <span class="st">&quot;lin_up_log_down&quot;</span>, <span class="at">validate =</span> <span class="cn">TRUE</span></span>
+<span id="cb4-5"><a href="#cb4-5" tabindex="-1"></a>)</span>
+<span id="cb4-6"><a href="#cb4-6" tabindex="-1"></a>nca<span class="sc">$</span>results[<span class="fu">c</span>(<span class="st">&quot;ID&quot;</span>, <span class="st">&quot;CMAX&quot;</span>, <span class="st">&quot;TMAX&quot;</span>, <span class="st">&quot;AUCLAST&quot;</span>, <span class="st">&quot;HALF_LIFE&quot;</span>, <span class="st">&quot;CL_F&quot;</span>)]</span>
+<span id="cb4-7"><a href="#cb4-7" tabindex="-1"></a>nca<span class="sc">$</span>validation</span></code></pre></div>
+</div>
 <div id="estimate-and-run-covariance" class="section level2">
 <h2>Estimate and run covariance</h2>
 <p>The deterministic approximation estimators are FO, FOCE, FOCEI,
 Laplace, and ITS. GQ provides deterministic adaptive Gauss–Hermite
 integration. IMP, SAEM, and Bayesian estimation use the same compiled
 subject evaluators with method-specific stochastic controls.</p>
-<div class="sourceCode" id="cb4"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb4-1"><a href="#cb4-1" tabindex="-1"></a>fit <span class="ot">&lt;-</span> <span class="fu">nm_est</span>(</span>
-<span id="cb4-2"><a href="#cb4-2" tabindex="-1"></a>  model,</span>
-<span id="cb4-3"><a href="#cb4-3" tabindex="-1"></a>  simulated,</span>
-<span id="cb4-4"><a href="#cb4-4" tabindex="-1"></a>  <span class="at">method =</span> <span class="st">&quot;FOCEI&quot;</span>,</span>
-<span id="cb4-5"><a href="#cb4-5" tabindex="-1"></a>  <span class="at">maxit =</span> <span class="dv">200</span>,</span>
-<span id="cb4-6"><a href="#cb4-6" tabindex="-1"></a>  <span class="at">eta_maxit =</span> <span class="dv">100</span>,</span>
-<span id="cb4-7"><a href="#cb4-7" tabindex="-1"></a>  <span class="at">covariance =</span> <span class="cn">TRUE</span>,</span>
-<span id="cb4-8"><a href="#cb4-8" tabindex="-1"></a>  <span class="at">covariance_type =</span> <span class="st">&quot;auto&quot;</span>,</span>
-<span id="cb4-9"><a href="#cb4-9" tabindex="-1"></a>  <span class="at">print_every =</span> <span class="dv">10</span>,</span>
-<span id="cb4-10"><a href="#cb4-10" tabindex="-1"></a>  <span class="at">n_cores =</span> <span class="dv">1</span></span>
-<span id="cb4-11"><a href="#cb4-11" tabindex="-1"></a>)</span>
-<span id="cb4-12"><a href="#cb4-12" tabindex="-1"></a></span>
-<span id="cb4-13"><a href="#cb4-13" tabindex="-1"></a><span class="fu">summary</span>(fit)</span>
-<span id="cb4-14"><a href="#cb4-14" tabindex="-1"></a>fit<span class="sc">$</span>covariance</span></code></pre></div>
+<div class="sourceCode" id="cb5"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb5-1"><a href="#cb5-1" tabindex="-1"></a>fit <span class="ot">&lt;-</span> <span class="fu">nm_est</span>(</span>
+<span id="cb5-2"><a href="#cb5-2" tabindex="-1"></a>  model,</span>
+<span id="cb5-3"><a href="#cb5-3" tabindex="-1"></a>  simulated,</span>
+<span id="cb5-4"><a href="#cb5-4" tabindex="-1"></a>  <span class="at">method =</span> <span class="st">&quot;FOCEI&quot;</span>,</span>
+<span id="cb5-5"><a href="#cb5-5" tabindex="-1"></a>  <span class="at">maxit =</span> <span class="dv">200</span>,</span>
+<span id="cb5-6"><a href="#cb5-6" tabindex="-1"></a>  <span class="at">eta_maxit =</span> <span class="dv">100</span>,</span>
+<span id="cb5-7"><a href="#cb5-7" tabindex="-1"></a>  <span class="at">covariance =</span> <span class="cn">TRUE</span>,</span>
+<span id="cb5-8"><a href="#cb5-8" tabindex="-1"></a>  <span class="at">covariance_type =</span> <span class="st">&quot;auto&quot;</span>,</span>
+<span id="cb5-9"><a href="#cb5-9" tabindex="-1"></a>  <span class="at">print_every =</span> <span class="dv">10</span>,</span>
+<span id="cb5-10"><a href="#cb5-10" tabindex="-1"></a>  <span class="at">n_cores =</span> <span class="dv">1</span></span>
+<span id="cb5-11"><a href="#cb5-11" tabindex="-1"></a>)</span>
+<span id="cb5-12"><a href="#cb5-12" tabindex="-1"></a></span>
+<span id="cb5-13"><a href="#cb5-13" tabindex="-1"></a><span class="fu">summary</span>(fit)</span>
+<span id="cb5-14"><a href="#cb5-14" tabindex="-1"></a>fit<span class="sc">$</span>covariance</span></code></pre></div>
 <p>The covariance step returns standard errors, relative standard
 errors, correlations, eigenvalues, conditioning diagnostics, and the
 selected fallback path. It can also be run later with
@@ -472,12 +486,12 @@ selected fallback path. It can also be run later with
 </div>
 <div id="continue-to-diagnostics-or-the-gui" class="section level2">
 <h2>Continue to diagnostics or the GUI</h2>
-<div class="sourceCode" id="cb5"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb5-1"><a href="#cb5-1" tabindex="-1"></a>gof <span class="ot">&lt;-</span> <span class="fu">nm_gof</span>(fit)</span>
-<span id="cb5-2"><a href="#cb5-2" tabindex="-1"></a>vpc <span class="ot">&lt;-</span> <span class="fu">nm_vpc</span>(fit, <span class="at">nsim =</span> <span class="dv">200</span>, <span class="at">stratify =</span> <span class="st">&quot;SEX&quot;</span>)</span>
-<span id="cb5-3"><a href="#cb5-3" tabindex="-1"></a>npde <span class="ot">&lt;-</span> <span class="fu">nm_npde</span>(fit, <span class="at">nsim =</span> <span class="dv">200</span>)</span>
-<span id="cb5-4"><a href="#cb5-4" tabindex="-1"></a>npc <span class="ot">&lt;-</span> <span class="fu">nm_npc</span>(fit, <span class="at">nsim =</span> <span class="dv">200</span>)</span>
-<span id="cb5-5"><a href="#cb5-5" tabindex="-1"></a></span>
-<span id="cb5-6"><a href="#cb5-6" tabindex="-1"></a><span class="fu">liber_gui</span>(<span class="at">model =</span> model, <span class="at">data =</span> simulated)</span></code></pre></div>
+<div class="sourceCode" id="cb6"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb6-1"><a href="#cb6-1" tabindex="-1"></a>gof <span class="ot">&lt;-</span> <span class="fu">nm_gof</span>(fit)</span>
+<span id="cb6-2"><a href="#cb6-2" tabindex="-1"></a>vpc <span class="ot">&lt;-</span> <span class="fu">nm_vpc</span>(fit, <span class="at">nsim =</span> <span class="dv">200</span>, <span class="at">stratify =</span> <span class="st">&quot;SEX&quot;</span>)</span>
+<span id="cb6-3"><a href="#cb6-3" tabindex="-1"></a>npde <span class="ot">&lt;-</span> <span class="fu">nm_npde</span>(fit, <span class="at">nsim =</span> <span class="dv">200</span>)</span>
+<span id="cb6-4"><a href="#cb6-4" tabindex="-1"></a>npc <span class="ot">&lt;-</span> <span class="fu">nm_npc</span>(fit, <span class="at">nsim =</span> <span class="dv">200</span>)</span>
+<span id="cb6-5"><a href="#cb6-5" tabindex="-1"></a></span>
+<span id="cb6-6"><a href="#cb6-6" tabindex="-1"></a><span class="fu">liber_gui</span>(<span class="at">model =</span> model, <span class="at">data =</span> simulated)</span></code></pre></div>
 <p>See the other package vignettes for solver selection, uncertainty
 workflows, project persistence, queues, and NONMEM control-stream
 interoperability.</p>

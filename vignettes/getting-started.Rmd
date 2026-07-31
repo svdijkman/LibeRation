@@ -93,6 +93,23 @@ simulated <- nm_simulate(
 simulated[c("ID", "TIME", "EVID", "DV", "IPRED")]
 ```
 
+## Noncompartmental exposure summaries
+
+`nm_nca()` runs the independent native C++ NCA engine on one or many profiles.
+It makes integration, duplicate-time, and BLQ policies explicit. Install
+`ncar` and `NonCompart` only when the optional reference comparison or fallback
+is required.
+
+```{r nca, eval=FALSE}
+observed <- simulated[simulated$EVID == 0 & simulated$MDV == 0, ]
+nca <- nm_nca(
+  observed, concentration = "IPRED", id = "ID", dose = 320,
+  method = "lin_up_log_down", validate = TRUE
+)
+nca$results[c("ID", "CMAX", "TMAX", "AUCLAST", "HALF_LIFE", "CL_F")]
+nca$validation
+```
+
 ## Estimate and run covariance
 
 The deterministic approximation estimators are FO, FOCE, FOCEI, Laplace, and

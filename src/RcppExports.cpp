@@ -28,6 +28,25 @@ BEGIN_RCPP
     return rcpp_result_gen;
 END_RCPP
 }
+// liberation_nca_profile
+Rcpp::List liberation_nca_profile(const Rcpp::NumericVector& time_input, const Rcpp::NumericVector& concentration_input, std::string method, double dose, double tau, std::string route, const Rcpp::IntegerVector& terminal_indices, const Rcpp::NumericVector& partial_start, const Rcpp::NumericVector& partial_end);
+RcppExport SEXP _LibeRation_liberation_nca_profile(SEXP time_inputSEXP, SEXP concentration_inputSEXP, SEXP methodSEXP, SEXP doseSEXP, SEXP tauSEXP, SEXP routeSEXP, SEXP terminal_indicesSEXP, SEXP partial_startSEXP, SEXP partial_endSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< const Rcpp::NumericVector& >::type time_input(time_inputSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::NumericVector& >::type concentration_input(concentration_inputSEXP);
+    Rcpp::traits::input_parameter< std::string >::type method(methodSEXP);
+    Rcpp::traits::input_parameter< double >::type dose(doseSEXP);
+    Rcpp::traits::input_parameter< double >::type tau(tauSEXP);
+    Rcpp::traits::input_parameter< std::string >::type route(routeSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::IntegerVector& >::type terminal_indices(terminal_indicesSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::NumericVector& >::type partial_start(partial_startSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::NumericVector& >::type partial_end(partial_endSEXP);
+    rcpp_result_gen = Rcpp::wrap(liberation_nca_profile(time_input, concentration_input, method, dose, tau, route, terminal_indices, partial_start, partial_end));
+    return rcpp_result_gen;
+END_RCPP
+}
 // liberation_population_objective_create
 SEXP liberation_population_objective_create(SEXP engine_pointer, const Rcpp::List& subject_data, const Rcpp::List& primary_tape_pointers, const Rcpp::List& curvature_tape_pointers, const Rcpp::List& config);
 RcppExport SEXP _LibeRation_liberation_population_objective_create(SEXP engine_pointerSEXP, SEXP subject_dataSEXP, SEXP primary_tape_pointersSEXP, SEXP curvature_tape_pointersSEXP, SEXP configSEXP) {
@@ -560,6 +579,7 @@ END_RCPP
 
 static const R_CallMethodDef CallEntries[] = {
     {"_LibeRation_liberation_native_optimizer", (DL_FUNC) &_LibeRation_liberation_native_optimizer, 8},
+    {"_LibeRation_liberation_nca_profile", (DL_FUNC) &_LibeRation_liberation_nca_profile, 9},
     {"_LibeRation_liberation_population_objective_create", (DL_FUNC) &_LibeRation_liberation_population_objective_create, 5},
     {"_LibeRation_liberation_population_objective_value", (DL_FUNC) &_LibeRation_liberation_population_objective_value, 2},
     {"_LibeRation_liberation_population_objective_gradient", (DL_FUNC) &_LibeRation_liberation_population_objective_gradient, 2},

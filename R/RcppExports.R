@@ -5,6 +5,10 @@
     .Call(`_LibeRation_liberation_native_optimizer`, objective, gradient, start, lower, upper, maxit, tolerance, trace)
 }
 
+.liberation_nca_profile <- function(time_input, concentration_input, method, dose, tau, route, terminal_indices, partial_start, partial_end) {
+    .Call(`_LibeRation_liberation_nca_profile`, time_input, concentration_input, method, dose, tau, route, terminal_indices, partial_start, partial_end)
+}
+
 .liberation_population_objective_create <- function(engine_pointer, subject_data, primary_tape_pointers, curvature_tape_pointers, config) {
     .Call(`_LibeRation_liberation_population_objective_create`, engine_pointer, subject_data, primary_tape_pointers, curvature_tape_pointers, config)
 }

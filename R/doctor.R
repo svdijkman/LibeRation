@@ -1,12 +1,12 @@
 .liber_compatibility_fallback <- function() {
   list(
-    schema = "liber.ecosystem/1", release = "0.9.0-research-beta.8",
+    schema = "liber.ecosystem/1", release = "0.9.0-research-beta.10",
     packages = list(
       LibeRtAD = list(version = "0.7.12", required = TRUE),
-      LibeRation = list(version = "0.9.7", required = TRUE),
+      LibeRation = list(version = "0.9.8", required = TRUE),
       LibeRary = list(version = "0.7.10", required = FALSE),
-      LibeRator = list(version = "0.3.4", required = FALSE),
-      LibeRality = list(version = "0.2.10", required = FALSE),
+      LibeRator = list(version = "0.3.5", required = FALSE),
+      LibeRality = list(version = "0.2.12", required = FALSE),
       LibeRties = list(version = "0.7.6", required = FALSE)
     ),
     contracts = list(model = 4L, job = 2L, result = 2L,

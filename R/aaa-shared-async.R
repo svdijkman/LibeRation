@@ -30,6 +30,55 @@
   )
 }
 
+.liber_shared_task_source_record <- function(package) {
+  package <- as.character(package)[[1L]]
+  if (!nzchar(package) || !isNamespaceLoaded(package)) return(NULL)
+  namespace <- asNamespace(package)
+  package_path <- getNamespaceInfo(namespace, "path")
+  source_files <- if (
+    length(package_path) == 1L && dir.exists(file.path(package_path, "R"))
+  ) {
+    list.files(file.path(package_path, "R"), pattern = "\\.[Rr]$")
+  } else character()
+  if (!length(source_files)) return(NULL)
+  version <- as.character(getNamespaceInfo(namespace, "spec")[["version"]])
+  if (!length(version) || is.na(version)) version <- ""
+  list(
+    package = package,
+    path = normalizePath(package_path, winslash = "/", mustWork = TRUE),
+    version = version
+  )
+}
+
+.liber_shared_task_source_dependencies <- function(path) {
+  description <- file.path(path, "DESCRIPTION")
+  if (!file.exists(description)) return(character())
+  metadata <- read.dcf(description)
+  fields <- intersect(c("Depends", "Imports", "LinkingTo"), colnames(metadata))
+  if (!length(fields)) return(character())
+  declarations <- paste(metadata[1L, fields], collapse = ",")
+  dependencies <- trimws(unlist(strsplit(declarations, ",", fixed = TRUE)))
+  dependencies <- trimws(sub("\\s*\\(.*$", "", dependencies))
+  unique(dependencies[nzchar(dependencies) & startsWith(dependencies, "LibeR")])
+}
+
+.liber_shared_task_source_packages <- function(package) {
+  records <- list()
+  visited <- character()
+  visit <- function(current) {
+    if (current %in% visited) return(invisible(NULL))
+    visited <<- c(visited, current)
+    record <- .liber_shared_task_source_record(current)
+    if (is.null(record)) return(invisible(NULL))
+    dependencies <- .liber_shared_task_source_dependencies(record$path)
+    for (dependency in dependencies) visit(dependency)
+    records[[length(records) + 1L]] <<- record
+    invisible(NULL)
+  }
+  visit(as.character(package)[[1L]])
+  records
+}
+
 .liber_shared_task_start <- function(
     registry, package, fun, args = list(), label = fun, metadata = list(),
     replace = FALSE) {
@@ -58,19 +107,11 @@
   if (!length(expected_version) || is.na(expected_version)) {
     expected_version <- ""
   }
-  package_path <- getNamespaceInfo(namespace, "path")
-  source_files <- if (
-    length(package_path) == 1L && dir.exists(file.path(package_path, "R"))
-  ) {
-    list.files(file.path(package_path, "R"), pattern = "\\.[Rr]$")
-  } else character()
-  source_path <- if (length(source_files)) {
-    normalizePath(package_path, winslash = "/", mustWork = TRUE)
-  } else ""
+  source_packages <- .liber_shared_task_source_packages(package)
   id <- .liber_shared_task_id(fun)
   process <- callr::r_bg(
-    function(package, fun, args, expected_version, source_path) {
-      if (nzchar(source_path)) {
+    function(package, fun, args, expected_version, source_packages) {
+      if (length(source_packages)) {
         if (!requireNamespace("pkgload", quietly = TRUE)) {
           stop(
             "A source-loaded LibeR GUI requires `pkgload` in background ",
@@ -78,9 +119,23 @@
             call. = FALSE
           )
         }
-        pkgload::load_all(
-          source_path, quiet = TRUE, export_all = FALSE, helpers = FALSE
-        )
+        for (record in source_packages) {
+          pkgload::load_all(
+            record$path, quiet = TRUE, export_all = FALSE, helpers = FALSE
+          )
+          actual_source_version <- as.character(
+            getNamespaceInfo(asNamespace(record$package), "spec")[["version"]]
+          )
+          if (nzchar(record$version) &&
+              !identical(actual_source_version, record$version)) {
+            stop(
+              "The active ", record$package, " source version is ",
+              record$version, " but its background worker loaded version ",
+              actual_source_version, ". Restart R and reload the source tree.",
+              call. = FALSE
+            )
+          }
+        }
       }
       namespace <- asNamespace(package)
       actual <- as.character(
@@ -99,7 +154,7 @@
     },
     args = list(
       package = package, fun = fun, args = args,
-      expected_version = expected_version, source_path = source_path
+      expected_version = expected_version, source_packages = source_packages
     ),
     libpath = .libPaths(), stdout = "|", stderr = "|",
     supervise = TRUE

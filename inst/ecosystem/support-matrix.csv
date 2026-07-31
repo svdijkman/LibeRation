@@ -36,6 +36,7 @@ LibeRation,Sampling importance resampling,implemented,verified,Exact population-
 LibeRation,Reproducible model comparison,implemented,verified,Serialized provenance information-criterion nested-LRT and bootstrap-calibration fixtures,LibeRation advanced-inference tests,2026-07-26,Research and teaching
 LibeRation,Bayesian PPC WAIC and subject-marginal PSIS-LOO,implemented,verified,Posterior simulation subject likelihood and deterministic criterion fixtures,LibeRation advanced-inference tests,2026-07-26,Research and teaching
 LibeRation,Stratified cluster-aware and parametric bootstrap,implemented,verified,Seeded resampling and simulation-refit fixtures,LibeRation advanced-inference tests,2026-07-26,Research and teaching
+LibeRation,Native noncompartmental analysis,implemented,validated,Analytic mono-exponential fixtures and multi-subject Theoph agreement with ncar 0.7.0 and NonCompart 0.8.2,LibeRation NCA validation tests,2026-07-31,Research and teaching
 LibeRation,Local and remote graphical workflow,implemented,verified,Browser and queue integration fixtures,Ecosystem integration and browser CI,2026-07-23,Research and teaching
 LibeRties,Typed job and result wire contracts,implemented,verified,Round-trip malformed-input and fuzz fixtures,LibeRties wire and contract tests,2026-07-23,Research and teaching
 LibeRties,Durable local queue cancellation and restart recovery,implemented,verified,Subprocess cancellation checksum and recovery fixtures,LibeRties local-worker tests,2026-07-23,Research and teaching
@@ -45,8 +46,10 @@ LibeRties,Hostile-code isolation,external-control,experimental,Deployment-specif
 LibeRality,Matched population-FO Fisher information,implemented,validated,PopED 0.7.0 and PFIM 7.0.3,Hosted external-validation gate,2026-07-23,Research and teaching
 LibeRality,D-optimal candidate ranking,implemented,validated,PopED 0.7.0 and PFIM 7.0.3,Hosted external-validation gate,2026-07-23,Research and teaching
 LibeRality,Advanced criteria constraints and trial simulation,implemented,verified,Analytic and deterministic simulation fixtures,LibeRality criteria and simulation tests,2026-07-23,Research and teaching
+LibeRality,Endpoint simulation curves tables and NCA summaries,implemented,verified,Seeded complete-trial simulations and payload contract tests,LibeRality simulation tests,2026-07-31,Research and teaching
 LibeRator,Longitudinal patient evidence and parameter updating,implemented,validated,Deterministic longitudinal virtual patient plus matched mapbayr and posologyr MAP ETA comparisons,LibeRator analytic and external-comparator gates,2026-07-24,Research and teaching only
 LibeRator,Endpoint-aware regimen optimisation and prediction,implemented,verified,Analytic virtual-patient and constraint fixtures,LibeRator analytic validation gate,2026-07-23,Research and teaching only
+LibeRator,NCA-based individual and regimen exposure summaries,implemented,verified,Shared native NCA cycle metrics and full LibeRator regression suite,LibeRator assessment tests,2026-07-31,Research and teaching only
 LibeRator,Autonomous clinical recommendation,not-qualified,experimental,None,Separate clinical validation and quality system required,2026-07-23,Do not use
 LibeRary,Synthetic catalogue search and LibeRation import,implemented,verified,Packaged synthetic catalogue fixtures,LibeRary catalogue tests,2026-07-23,Research and teaching
 LibeRary,Deliberative text/vision literature extraction,experimental,experimental,AED reference-corpus development benchmark,LibeRary reference release gate,2026-07-23,Human-reviewed research workflow

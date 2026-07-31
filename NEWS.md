@@ -1,3 +1,11 @@
+# LibeRation 0.9.8
+
+- Adds `nm_nca()`, an independent native C++ noncompartmental-analysis engine
+  with linear and linear-up/log-down integration, automatic or manual terminal
+  slope selection, partial AUC, dose-normalised and dosing-interval summaries.
+- Adds explicit BLQ and duplicate-time policies, typed provenance, optional
+  `ncar`/`NonCompart` reference validation, and an automatic reference fallback.
+
 # LibeRation 0.9.7
 
 - Adds `nm_model_update()` as a shared, validated model-editing boundary for

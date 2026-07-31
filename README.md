@@ -6,6 +6,11 @@ The numerical model, event, ADVAN, ODE, likelihood, and automatic-
 differentiation paths run in C++; models can be specified with established
 LibeRation R syntax or the restricted C++ expression form.
 
+Noncompartmental analysis is available through `nm_nca()`. Its independent C++
+engine supports linear or linear-up/log-down integration, terminal-slope and
+partial-AUC analysis; `engine = "ncar"` and `validate = TRUE` provide an optional
+reference path through `ncar`/`NonCompart`.
+
 LibeRation 0.9 is a research beta. Install the exact
 [ecosystem compatibility set](../docs/INSTALL.md), run `liber_doctor()`, and
 use `liber_support_matrix("LibeRation")` to distinguish externally validated,
