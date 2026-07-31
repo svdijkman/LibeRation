@@ -1,5 +1,21 @@
+# LibeRation 0.9.7
+
+- Adds `nm_model_update()` as a shared, validated model-editing boundary for
+  LibeRation and other ecosystem interfaces. Code, parameter tables, bounds,
+  covariance structure, model route, and advanced outcome declarations are
+  rebuilt through the canonical `nm_model()` validator.
+- Sequential estimation now uses the same update boundary when propagating
+  fitted THETA, OMEGA, and SIGMA values between stages.
+
 # LibeRation 0.9.6
 
+- Exposes `nm_advan_template()` as the supported public entry point for the
+  same ADVAN 1--14 templates used by the New Model Version workflow, allowing
+  other LibeR packages to reuse them without duplicating model definitions.
+- NONMEM control-stream imports now honour `$MODEL` `DEFDOSE` and
+  `DEFOBSERVATION` declarations for ODE and other non-general-linear ADVAN
+  models. This is required for safe oral depot/central translations in the
+  AEDapt catalogue migration.
 - Opens the browser by default when `liber_gui()` is started by a
   non-interactive desktop launcher; hosted callers continue to request and
   receive the application object with `launch.browser = NULL`.

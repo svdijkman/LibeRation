@@ -52,13 +52,55 @@
   if (!nzchar(package) || !nzchar(fun) || !is.list(args)) {
     stop("Invalid background GUI task specification.", call. = FALSE)
   }
+  namespace <- asNamespace(package)
+  specification <- getNamespaceInfo(namespace, "spec")
+  expected_version <- as.character(specification[["version"]])
+  if (!length(expected_version) || is.na(expected_version)) {
+    expected_version <- ""
+  }
+  package_path <- getNamespaceInfo(namespace, "path")
+  source_files <- if (
+    length(package_path) == 1L && dir.exists(file.path(package_path, "R"))
+  ) {
+    list.files(file.path(package_path, "R"), pattern = "\\.[Rr]$")
+  } else character()
+  source_path <- if (length(source_files)) {
+    normalizePath(package_path, winslash = "/", mustWork = TRUE)
+  } else ""
   id <- .liber_shared_task_id(fun)
   process <- callr::r_bg(
-    function(package, fun, args) {
-      target <- get(fun, envir = asNamespace(package), inherits = FALSE)
+    function(package, fun, args, expected_version, source_path) {
+      if (nzchar(source_path)) {
+        if (!requireNamespace("pkgload", quietly = TRUE)) {
+          stop(
+            "A source-loaded LibeR GUI requires `pkgload` in background ",
+            "workers. Install the package or install `pkgload`.",
+            call. = FALSE
+          )
+        }
+        pkgload::load_all(
+          source_path, quiet = TRUE, export_all = FALSE, helpers = FALSE
+        )
+      }
+      namespace <- asNamespace(package)
+      actual <- as.character(
+        getNamespaceInfo(namespace, "spec")[["version"]]
+      )
+      if (nzchar(expected_version) && !identical(actual, expected_version)) {
+        stop(
+          "The active ", package, " GUI is version ", expected_version,
+          " but its background worker loaded version ", actual,
+          ". Restart R after reinstalling the package.",
+          call. = FALSE
+        )
+      }
+      target <- get(fun, envir = namespace, inherits = FALSE)
       do.call(target, args)
     },
-    args = list(package = package, fun = fun, args = args),
+    args = list(
+      package = package, fun = fun, args = args,
+      expected_version = expected_version, source_path = source_path
+    ),
     libpath = .libPaths(), stdout = "|", stderr = "|",
     supervise = TRUE
   )

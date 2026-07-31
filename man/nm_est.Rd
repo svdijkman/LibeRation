@@ -104,8 +104,8 @@ automatically refines it against the exact finite common-random-number
 objective.
 Eligible affine MU models use a generalized least-squares fixed-effect
 M-step in SAEM, with vectorized OMEGA-keyed normal-equation caching and a
-closed-form-only fast path, and a Metropolis-corrected Gaussian MU block in
-BAYES.
+closed-form-only fast path, and a Metropolis-corrected Gaussian MU block
+in BAYES.
 Non-affine, rank-deficient, or otherwise ineligible models automatically
 retain the ordinary estimator path and record the reason in
 `fit$diagnostics$mu_specialization`.}

@@ -15,6 +15,44 @@ test_that("legacy model syntax compiles to serializable IR", {
   expect_equal(roundtrip$PRED, model$PRED)
 })
 
+test_that("model updates reuse complete nm_model validation", {
+  direct <- nm_model(
+    INPUT = c("ID", "TIME", "DV"),
+    ADVAN = 1, TRANS = 1, PRED_MODE = "pred",
+    PRED_SOURCE = "CL=THETA(1); F=CL*TIME",
+    THETAS = data.frame(
+      THETA = 1, Value = 2, LOWER = 0.1, UPPER = 10
+    ),
+    ERROR = "Y=F+ERR(1)",
+    SIGMAS = data.frame(SIGMA = 1, Value = 0.1)
+  )
+  attr(direct, "name") <- "Direct teaching model"
+  theta <- direct$THETAS
+  theta$Value <- 3
+  theta$LOWER <- 0.2
+  updated <- nm_model_update(
+    direct,
+    PRED_SOURCE = "CL=THETA(1); F=CL*(TIME+1)",
+    THETAS = theta
+  )
+  expect_identical(updated$PRED_MODE, "pred")
+  expect_identical(updated$SOLVER, "direct")
+  expect_equal(updated$THETAS$Value, 3)
+  expect_equal(updated$THETAS$LOWER, 0.2)
+  expect_match(updated$PRED_SOURCE, "TIME\\+1")
+  expect_identical(attr(updated, "name"), "Direct teaching model")
+  repaired <- nm_model_update(
+    updated,
+    THETAS = transform(theta, LOWER = 4, UPPER = 2)
+  )
+  expect_lt(repaired$THETAS$LOWER, repaired$THETAS$Value)
+  expect_gt(repaired$THETAS$UPPER, repaired$THETAS$Value)
+  expect_error(
+    nm_model_update(updated, PRED_SOURCE = "CL=THETA(2); F=CL"),
+    "THETA"
+  )
+})
+
 test_that("layout is separate from semantic graph", {
   model <- nm_model(
     INPUT = c("ID", "TIME"), ADVAN = 1,

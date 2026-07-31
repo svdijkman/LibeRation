@@ -54,7 +54,6 @@ nm_est_stage <- function(method, ..., label = NULL) {
 }
 
 .nm_model_with_estimates <- function(model, fit) {
-  arguments <- model[intersect(names(model), names(formals(nm_model)))]
   theta <- model$THETAS
   omega <- model$OMEGAS
   sigma <- model$SIGMAS
@@ -65,14 +64,9 @@ nm_est_stage <- function(method, ..., label = NULL) {
   theta$Value <- as.numeric(fit$theta)
   omega$Value <- as.numeric(fit$omega)
   sigma$Value <- as.numeric(fit$sigma)
-  arguments$THETAS <- theta
-  arguments$OMEGAS <- omega
-  arguments$SIGMAS <- sigma
-  updated <- do.call(nm_model, arguments)
-  attr(updated, "name") <- attr(model, "name", exact = TRUE)
-  control <- attr(model, "nonmem_control", exact = TRUE)
-  if (!is.null(control)) attr(updated, "nonmem_control") <- control
-  updated
+  nm_model_update(
+    model, THETAS = theta, OMEGAS = omega, SIGMAS = sigma
+  )
 }
 
 .nm_est_stage_record <- function(fit, specification, index, initial) {

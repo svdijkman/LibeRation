@@ -45,6 +45,10 @@ test_that("legacy workbench layout and workflow controls are present", {
   expect_match(source, '"New project"', fixed = TRUE)
   expect_match(source, '"Empty project"', fixed = TRUE)
   expect_match(source, '"Initial model version"', fixed = TRUE)
+  expect_match(
+    style, ".lw-choice-cards + .lw-modal-section { margin-top: 18px; }",
+    fixed = TRUE
+  )
   expect_match(source, '"Dose amounts (TIME AMT per line, or AMT only)"', fixed = TRUE)
   expect_match(source, '"Edit server"', fixed = TRUE)
   expect_match(source, 'Manual X breaks', fixed = TRUE)

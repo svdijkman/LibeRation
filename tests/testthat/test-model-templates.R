@@ -29,6 +29,18 @@ test_that("templates cover event, Markov, and hidden-state model families", {
   expect_equal(cthmm$HMM_CONFIG$transition_type, "continuous")
 })
 
+test_that("public ADVAN templates use the workbench template implementation", {
+  public <- nm_advan_template(2L, trans = 2L, problem = "Oral PK")
+  internal <- LibeRation:::.liber_model_template(
+    2L, trans = 2L, problem = "Oral PK"
+  )
+
+  expect_s3_class(public, "nm_model")
+  expect_equal(public, internal)
+  expect_equal(attr(public, "name", exact = TRUE), "Oral PK")
+  expect_s3_class(nm_advan_template(13L, n_state = 4L), "nm_model")
+})
+
 test_that("piecewise expressions are editable and tape-safe", {
   code <- nm_piecewise("TIME", c(2, 5), c("THETA(1)", "THETA(2)", "THETA(3)"))
   expect_match(code, "ifelse\\(TIME < 2")

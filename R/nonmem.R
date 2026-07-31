@@ -246,15 +246,13 @@
   code
 }
 
-.nm_control_general_linear_graph <- function(model_record, pred, advan) {
+.nm_control_compartment_declarations <- function(model_record) {
   text <- paste(model_record, collapse = "\n")
   matches <- regmatches(
     text,
     gregexpr("(?i)\\bCOMP(?:ARTMENT)?\\s*=\\s*\\([^)]*\\)", text, perl = TRUE)
   )[[1L]]
-  if (!length(matches)) {
-    .nm_stop("ADVAN", advan, " import requires explicit COMP declarations in $MODEL.")
-  }
+  if (!length(matches)) return(NULL)
   bodies <- sub("^[^(]*\\((.*)\\)$", "\\1", matches, perl = TRUE)
   attributes <- lapply(bodies, function(value) {
     trimws(strsplit(value, ",", fixed = TRUE)[[1L]])
@@ -264,6 +262,25 @@
     if (!nzchar(name)) "COMPARTMENT" else toupper(name)
   }, character(1))
   compartment_names <- make.unique(compartment_names, sep = "_")
+  flags <- lapply(attributes, function(value) toupper(value[-1L]))
+  dose <- which(vapply(flags, function(value) "DEFDOSE" %in% value, logical(1)))
+  observe <- which(vapply(flags, function(value) {
+    "DEFOBSERVATION" %in% value || "DEFOBS" %in% value
+  }, logical(1)))
+  list(
+    names = compartment_names,
+    attributes = attributes,
+    dose = if (length(dose)) dose[[1L]] else NULL,
+    observe = if (length(observe)) observe[[1L]] else NULL
+  )
+}
+
+.nm_control_general_linear_graph <- function(model_record, pred, advan) {
+  declarations <- .nm_control_compartment_declarations(model_record)
+  if (is.null(declarations)) {
+    .nm_stop("ADVAN", advan, " import requires explicit COMP declarations in $MODEL.")
+  }
+  compartment_names <- declarations$names
   n_compartments <- length(compartment_names)
   assignment_matches <- regmatches(
     pred,
@@ -291,14 +308,10 @@
     stringsAsFactors = FALSE
   )
   graph <- nm_matrix_model(compartments, flows)
-  flags <- lapply(attributes, function(value) toupper(value[-1L]))
-  dose <- which(vapply(flags, function(value) "DEFDOSE" %in% value, logical(1)))
-  observe <- which(vapply(flags, function(value) "DEFOBSERVATION" %in% value ||
-                           "DEFOBS" %in% value, logical(1)))
   list(
     graph = graph,
-    dose = if (length(dose)) dose[[1L]] else 1L,
-    observe = if (length(observe)) observe[[1L]] else 1L
+    dose = declarations$dose %||% 1L,
+    observe = declarations$observe %||% 1L
   )
 }
 
@@ -426,6 +439,14 @@ nm_control_read <- function(x, strict = TRUE) {
     graph <- general_linear$graph
     dose_cmp <- general_linear$dose
     obs_cmp <- general_linear$observe
+  } else {
+    declarations <- .nm_control_compartment_declarations(
+      .nm_control_first(sections, "MODEL")
+    )
+    if (!is.null(declarations)) {
+      dose_cmp <- declarations$dose %||% dose_cmp
+      obs_cmp <- declarations$observe %||% obs_cmp
+    }
   }
   warnings <- omega_result$warnings
   if (has_pk && has_direct && is.null(post_marked)) {

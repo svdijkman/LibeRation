@@ -89,6 +89,26 @@ nm_structural_templates <- function() {
   )
 }
 
+#' Create an editable standard ADVAN model template
+#'
+#' This is the public entry point for the same ADVAN 1--14 templates used by
+#' the LibeRation New Model Version workflow. Other LibeR packages can
+#' therefore create compatible starting models without copying template code.
+#'
+#' @param advan ADVAN number from 1 through 14.
+#' @param trans Optional TRANS number from 1 through 6. ODE ADVANs ignore this
+#'   argument and use their template default.
+#' @param n_state Optional number of states for ADVAN 6, 8, 9, 13, or 14.
+#' @param problem Optional display name for the model.
+#' @return An editable [nm_model()] object.
+#' @export
+nm_advan_template <- function(advan = 1L, trans = NULL, n_state = NULL,
+                              problem = NULL) {
+  .liber_model_template(
+    advan = advan, trans = trans, n_state = n_state, problem = problem
+  )
+}
+
 .nm_likelihood_model_template <- function(template, iiv = TRUE) {
   input <- c("ID", "TIME", "DV", "MDV", "DVID", "EVID", "AMT", "CMT")
   eta <- if (isTRUE(iiv)) " + ETA(1)" else ""

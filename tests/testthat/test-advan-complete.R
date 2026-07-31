@@ -137,6 +137,28 @@ test_that("general linear NONMEM streams retain their model graph", {
   expect_equal(anyDuplicated(names), 0L)
 })
 
+test_that("ODE imports honour $MODEL dose and observation flags", {
+  control <- c(
+    "$PROBLEM nonlinear oral model",
+    "$SUBROUTINES ADVAN13",
+    "$INPUT ID TIME EVID AMT CMT DV MDV WT",
+    "$MODEL",
+    "  COMP=(DEPOT,DEFDOSE)",
+    "  COMP=(CENTRAL,DEFOBSERVATION)",
+    "$THETA 1",
+    "$OMEGA 0.1",
+    "$SIGMA 0.1",
+    "$PK KA=THETA(1); V=10",
+    "$DES",
+    "  DADT(1)=-KA*A(1)",
+    "  DADT(2)=KA*A(1)-A(2)",
+    "$ERROR Y=F*(1+ERR(1))"
+  )
+  imported <- nm_control_read(control, strict = FALSE)
+  expect_equal(imported$model$DOSECMP, 1L)
+  expect_equal(imported$model$OBSCMP, 2L)
+})
+
 test_that("ADVAN9 AES imports require an explicit safe DAE translation", {
   control <- c(
     "$PROBLEM ADVAN9 equilibrium",
