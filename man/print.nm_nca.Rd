@@ -7,7 +7,13 @@
 \method{print}{nm_nca}(x, ...)
 }
 \arguments{
-\item{x}{An \code{nm_nca} object.}
+\item{x}{An `nm_nca` object.}
+
 \item{...}{Unused.}
 }
-\description{Print a compact noncompartmental analysis summary.}
+\value{
+`x`, invisibly.
+}
+\description{
+Print an NCA result
+}

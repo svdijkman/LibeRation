@@ -705,6 +705,64 @@ nm_etab <- function(fit) {
   gradient
 }
 
+.nm_marginal_score_information <- function(objective, at,
+                                           relative_step = 1e-4) {
+  gradient <- attr(objective, "gradient", exact = TRUE)
+  if (!is.function(gradient)) {
+    .nm_stop("The marginal objective does not expose an estimator score.")
+  }
+  at <- as.numeric(at)
+  dimension <- length(at)
+  jacobian <- matrix(NA_real_, dimension, dimension)
+  baseline <- NULL
+  evaluations <- 0L
+  one_sided <- integer()
+  for (index in seq_len(dimension)) {
+    step <- relative_step * max(abs(at[[index]]), 1)
+    upper <- lower <- at
+    upper[[index]] <- upper[[index]] + step
+    lower[[index]] <- lower[[index]] - step
+    high <- tryCatch(as.numeric(gradient(upper)), error = function(error) NULL)
+    low <- tryCatch(as.numeric(gradient(lower)), error = function(error) NULL)
+    evaluations <- evaluations + 2L
+    high_ok <- length(high) == dimension && all(is.finite(high))
+    low_ok <- length(low) == dimension && all(is.finite(low))
+    if (high_ok && low_ok) {
+      jacobian[, index] <- (high - low) / (2 * step)
+      next
+    }
+    if (is.null(baseline)) {
+      baseline <- tryCatch(as.numeric(gradient(at)), error = function(error) NULL)
+      evaluations <- evaluations + 1L
+    }
+    baseline_ok <- length(baseline) == dimension && all(is.finite(baseline))
+    if (high_ok && baseline_ok) {
+      jacobian[, index] <- (high - baseline) / step
+      one_sided <- c(one_sided, index)
+    } else if (low_ok && baseline_ok) {
+      jacobian[, index] <- (baseline - low) / step
+      one_sided <- c(one_sided, index)
+    } else {
+      .nm_stop(
+        "Unable to evaluate the marginal score around outer parameter ",
+        index, "."
+      )
+    }
+  }
+  # Monte-Carlo and fixed-grid score Jacobians need not be exactly symmetric
+  # at finite sample size. The observed-information estimate is its symmetric
+  # part; retain asymmetry as a diagnostic rather than silently discarding it.
+  asymmetry <- max(abs(jacobian - t(jacobian)))
+  list(
+    matrix = (jacobian + t(jacobian)) / 2,
+    raw_jacobian = jacobian,
+    evaluations = evaluations,
+    one_sided_parameters = one_sided,
+    maximum_asymmetry = asymmetry,
+    relative_step = relative_step
+  )
+}
+
 .nm_deterministic_subject_scores <- function(fit, context, map, parameters) {
   transform <- .nm_native_transform_jacobian(fit$model, map, parameters)
   scores <- matrix(0, context$n_subjects, ncol(transform))
@@ -779,9 +837,19 @@ nm_etab <- function(fit) {
 #' Covariance step for a fitted model
 #'
 #' @param fit An `nm_fit`.
-#' @param type `hessian`/`r` uses objective curvature, `opg`/`s` uses the
-#'   subject-score matrix, and `sandwich` uses R-inverse S R-inverse. `auto`
-#'   prefers a well-conditioned R matrix and falls back to sandwich or S.
+#' @param type `hessian`/`r` uses the population-objective Hessian,
+#'   `opg`/`s` uses the subject-score matrix, and `sandwich` (the
+#'   default) uses R-inverse S R-inverse. `auto` prefers a well-conditioned R
+#'   matrix and falls back to sandwich or S.
+#' @param hessian_backend Hessian implementation. `"auto"` uses the native
+#'   CppAD/implicit-mode Hessian for deterministic compiled objectives. GQ,
+#'   IMP, and SAEM use an estimator-specific numerical Jacobian of their fixed
+#'   quadrature/importance score; this is deliberately distinct from a generic
+#'   objective `optimHess` calculation.
+#'   Deterministic objectives fall back explicitly to a numerical Jacobian of
+#'   the population gradient.
+#'   `"cppad"` requires the native path; `"numerical"` is retained as a
+#'   comparator and for stochastic marginal objectives.
 #' @param convention Information-matrix scaling. `"nonmem"` uses derivatives
 #'   of the reported objective function for NONMEM-compatible R and S matrices.
 #'   `"likelihood"` uses one-half of those derivatives and retains the former
@@ -802,13 +870,15 @@ nm_etab <- function(fit) {
 #'   modes warm-started the covariance calculation.
 #' @export
 nm_cov_step <- function(fit,
-                        type = c("auto", "hessian", "opg", "sandwich", "r", "s"),
+                        type = c("sandwich", "auto", "hessian", "opg", "r", "s"),
                         tolerance = 1e-8,
                         samples = NULL, seed = NULL, eta_maxit = NULL,
-                        convention = c("nonmem", "likelihood")) {
+                        convention = c("nonmem", "likelihood"),
+                        hessian_backend = c("auto", "cppad", "numerical")) {
   if (!inherits(fit, "nm_fit")) .nm_stop("`fit` must be an nm_fit.")
   type <- match.arg(type)
   convention <- match.arg(convention)
+  hessian_backend <- match.arg(hessian_backend)
   information_scale <- if (convention == "nonmem") 1 else 0.5
   requested_type <- type
   if (type == "r") type <- "hessian"
@@ -874,6 +944,10 @@ nm_cov_step <- function(fit,
   bread <- meat <- scores <- NULL
   bread_compiled <- NULL
   bread_error <- meat_error <- NULL
+  bread_source <- NULL
+  bread_exact <- FALSE
+  bread_fallback <- NULL
+  marginal_information <- NULL
   objective <- NULL
   if (marginal && (need_bread || need_meat)) {
     objective <- .nm_cov_objective(
@@ -896,15 +970,87 @@ nm_cov_step <- function(fit,
       )
     }
     bread_compiled <- attr(objective, "compiled_objective", exact = TRUE)
-    bread <- tryCatch(
-      information_scale * stats::optimHess(
-        at, objective, gr = attr(objective, "gradient", exact = TRUE)
-      ),
-      error = function(error) {
-        bread_error <<- conditionMessage(error)
-        NULL
+    native_available <- !is.null(bread_compiled$pointer) && !marginal
+    if (hessian_backend != "numerical" && native_available) {
+      bread <- tryCatch(
+        information_scale * .liberation_population_objective_hessian(
+          bread_compiled$pointer, at
+        ),
+        error = function(error) {
+          bread_error <<- conditionMessage(error)
+          NULL
+        }
+      )
+      if (!is.null(bread)) {
+        bread_source <- paste(
+          "native CppAD Hessian with implicit conditional-mode,",
+          "curvature-determinant, and parameter-transform derivatives"
+        )
+        bread_exact <- TRUE
+      } else if (hessian_backend == "cppad") {
+        .nm_stop("Native CppAD R-matrix covariance failed: ", bread_error, ".")
+      } else {
+        bread_fallback <- bread_error
       }
-    )
+    } else if (hessian_backend == "cppad") {
+      .nm_stop(
+        "A native CppAD Hessian is unavailable for this objective backend; ",
+        "use `hessian_backend = \"auto\"` or `\"numerical\"`."
+      )
+    }
+    if (is.null(bread) && marginal) {
+      marginal_error <- NULL
+      marginal_information <- tryCatch(
+        .nm_marginal_score_information(objective, at),
+        error = function(error) {
+          marginal_error <<- conditionMessage(error)
+          NULL
+        }
+      )
+      if (!is.null(marginal_information)) {
+        bread <- information_scale * marginal_information$matrix
+        bread_source <- switch(
+          fit$method,
+          GQ = paste(
+            "fixed-proposal quadrature-score Jacobian",
+            "(CppAD node scores; proposal/node derivatives held at the fitted point)"
+          ),
+          IMP = paste(
+            "fixed-proposal importance-score Jacobian",
+            "(common integration design at the fitted point)"
+          ),
+          SAEM = paste(
+            "post-fit fixed-proposal importance-score Jacobian",
+            "(observed marginal-information approximation)"
+          )
+        )
+      } else {
+        bread_error <- paste(
+          Filter(nzchar, c(bread_error %||% "", marginal_error %||% "")),
+          collapse = "; "
+        )
+      }
+    }
+    if (is.null(bread) && !marginal) {
+      numerical_error <- NULL
+      bread <- tryCatch(
+        information_scale * stats::optimHess(
+          at, objective, gr = attr(objective, "gradient", exact = TRUE)
+        ),
+        error = function(error) {
+          numerical_error <<- conditionMessage(error)
+          NULL
+        }
+      )
+      if (!is.null(bread)) {
+        bread_source <- "stats::optimHess numerical Jacobian of the population gradient"
+      } else {
+        bread_error <- paste(
+          Filter(nzchar, c(bread_error %||% "", numerical_error %||% "")),
+          collapse = "; "
+        )
+      }
+    }
   }
   if (type == "auto" && (is.null(bread) ||
       !.nm_regularized_information(bread, tolerance)$stable)) {
@@ -988,6 +1134,10 @@ nm_cov_step <- function(fit,
     condition = selected$condition,
     regularization = selected$regularization,
     bread = bread, meat = meat, scores = scores,
+    bread_source = bread_source,
+    bread_exact = bread_exact,
+    bread_fallback = bread_fallback,
+    hessian_backend = if (bread_exact) "cppad" else if (!is.null(bread)) "numerical" else NULL,
     bread_condition = bread_info$condition %||% NA_real_,
     meat_condition = meat_info$condition %||% NA_real_,
     bread_regularization = bread_info$regularization %||% NA_real_,
@@ -1005,6 +1155,17 @@ nm_cov_step <- function(fit,
         .liberation_population_objective_telemetry(bread_compiled$pointer)
       } else NULL
     },
+    marginal_information = if (marginal) c(
+      list(
+        estimator = fit$method,
+        finite_sample = TRUE,
+        exact_cppad_hessian = FALSE
+      ),
+      marginal_information[c(
+        "evaluations", "one_sided_parameters", "maximum_asymmetry",
+        "relative_step"
+      )]
+    ) else NULL,
     samples = if (marginal) samples else NULL,
     actual_samples = if (marginal) marginal_design$actual_samples else NULL,
     sampling = if (marginal) marginal_design$method else NULL,
@@ -1876,11 +2037,33 @@ summary.nm_fit <- function(object, covariance = NULL, ...) {
   if (is.null(covariance) && !is.null(object$covariance)) covariance <- object$covariance
   parameter <- c(object$theta, object$sigma, object$omega)
   names(parameter) <- .nm_parameter_names(object$theta, object$sigma, object$omega)
+  gradient_description <- object$diagnostics$population_gradient %||%
+    object$diagnostics$optimizer$population_gradient %||% "not reported"
+  gradient_fallbacks <- object$diagnostics$optimizer$gradient_fallbacks %||% 0L
+  gradient_class <- if (gradient_fallbacks > 0L) {
+    "finite-difference fallback used"
+  } else if (grepl(
+    "omitted|finite common-random|finite adaptive-grid|derivative-free",
+    gradient_description, ignore.case = TRUE
+  )) {
+    "score-incomplete or finite-grid derivative"
+  } else if (grepl("exact|CppAD", gradient_description, ignore.case = TRUE)) {
+    "CppAD-derived on the recorded smooth path"
+  } else "estimator-specific; inspect description"
   structure(list(
     method = object$method, objective = object$objective,
     convergence = object$convergence, parameters = parameter,
     covariance = covariance, posterior = object$posterior$population %||% NULL,
-    eta = nm_etab(object)
+    eta = nm_etab(object),
+    derivative_provenance = list(
+      gradient_class = gradient_class,
+      gradient_description = gradient_description,
+      gradient_fallbacks = as.integer(gradient_fallbacks),
+      objective_backend = object$diagnostics$optimizer$objective_backend %||%
+        object$diagnostics$optimizer$backend %||% "not reported",
+      covariance_bread_source = covariance$bread_source %||% "not calculated",
+      covariance_bread_exact = isTRUE(covariance$bread_exact)
+    )
   ), class = "summary.nm_fit")
 }
 
@@ -1889,6 +2072,15 @@ print.summary.nm_fit <- function(x, ...) {
   cat("LibeRation fit summary\n")
   cat("  method:", x$method, " objective:", format(x$objective),
       " convergence:", x$convergence, "\n\n")
+  cat("Derivative provenance\n")
+  cat("  gradient:", x$derivative_provenance$gradient_class, "\n")
+  cat("  detail:", x$derivative_provenance$gradient_description, "\n")
+  cat("  objective backend:", x$derivative_provenance$objective_backend, "\n")
+  if (!identical(x$derivative_provenance$covariance_bread_source, "not calculated")) {
+    cat("  covariance bread:", x$derivative_provenance$covariance_bread_source,
+        "(exact:", x$derivative_provenance$covariance_bread_exact, ")\n")
+  }
+  cat("\n")
   print(x$parameters)
   if (!is.null(x$covariance$se)) {
     cat("\nNative-scale standard errors\n")

@@ -1,10 +1,45 @@
+# LibeRation 0.10.0
+
+- Makes the compiled engine pointer read-only and routes every engine input
+  through one canonical ADDL materializer. Native entry points now fail closed
+  if an unexpanded ADDL record bypasses that boundary.
+- Disables silent finite-difference recovery for a non-finite outer gradient by
+  default. `allow_fd_gradient = TRUE` is an explicit, warned, and telemetered
+  compatibility escape hatch.
+- Uses the complete CppAD population-objective Hessian for supported
+  deterministic estimators. GQ, IMP, and SAEM covariance now use
+  estimator-specific observed marginal score information at the final fit,
+  with proposal adaptation held fixed and full provenance; they no longer use
+  `optimHess` as their ordinary covariance bread.
+- Keeps covariance repair opt-in, records spectral and adjustment diagnostics,
+  and never silently changes a materially indefinite ETA covariance matrix.
+- Completes the seam-aligned engine source split, adds regression coverage for
+  parameter recovery and native-boundary invariants, and publishes the related
+  NONMEM and covariance validation evidence.
+
 # LibeRation 0.9.8
 
+- Extends explicit covariance recovery with a symmetric pivoted
+  modified-Cholesky option and adds downstream repair-sensitivity reporting.
+  Estimated diagonal and correlated OMEGA structures continue to use intrinsic
+  log-variance and log-Cholesky parameterizations rather than post-hoc repair.
 - Adds `nm_nca()`, an independent native C++ noncompartmental-analysis engine
   with linear and linear-up/log-down integration, automatic or manual terminal
   slope selection, partial AUC, dose-normalised and dosing-interval summaries.
 - Adds explicit BLQ and duplicate-time policies, typed provenance, optional
   `ncar`/`NonCompart` reference validation, and an automatic reference fallback.
+- Adds an exact CppAD population-objective Hessian for deterministic FO, ITS,
+  FOCE, FOCEI, and Laplace covariance calculations. Conditional-mode,
+  curvature, log-determinant, transform, and prior derivatives are included;
+  the numerical Hessian remains an explicitly labelled comparator/fallback.
+- Adds `nm_covariance_repair()` with opt-in round-off clipping, diagonal jitter,
+  and Higham nearest-PSD repair plus complete spectral and adjustment
+  diagnostics. Material indefiniteness is never repaired silently.
+- Adds local parameter-recovery estimation fixtures for FOCEI/Laplace and
+  estimation coverage for ADVAN5/7/8/9/10/14. The former monolithic engine is
+  partitioned into named event/ADVAN, differential-system, differentiable-
+  propagation, likelihood, population, and state-space implementation units,
+  with a separately compiled stable population-objective API seam.
 
 # LibeRation 0.9.7
 

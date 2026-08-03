@@ -49,6 +49,10 @@ resampling, stratified subject/cluster and parametric bootstrap, Bayesian
 posterior predictive checks, WAIC, PSIS-LOO, and durable fingerprinted model
 comparisons with explicit nested-model rules.
 
+Paired NONMEM reference validation currently covers ADVAN1-13. ADVAN14 is
+internally verified against its stiff-system reference but remains explicitly
+pending external comparison with NONMEM 7.4 or newer.
+
 The model editor exposes three definition routes:
 
 - **ADVAN/PREDPP (`$PK`)** for the conventional compartment workflow.
@@ -120,6 +124,12 @@ and retain divergence, acceptance, R-hat, and effective-sample-size
 diagnostics. `method = "NPML"` estimates weights on a fixed ETA support;
 `method = "NPAG"` expands and prunes the support grid. Bootstrap is the
 recommended uncertainty procedure for the nonparametric methods.
+
+Deterministic FO, ITS, FOCE, FOCEI, and Laplace covariance steps use the native
+CppAD marginal-objective Hessian, including implicit conditional-mode and
+curvature derivatives. `nm_covariance_repair()` is a separate, explicit
+recovery/diagnostic API for indefinite covariance matrices; it never changes a
+fitted matrix merely because the matrix has a negative eigenvalue.
 
 ## Validation
 

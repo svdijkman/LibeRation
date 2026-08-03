@@ -9,26 +9,6 @@
     .Call(`_LibeRation_liberation_nca_profile`, time_input, concentration_input, method, dose, tau, route, terminal_indices, partial_start, partial_end)
 }
 
-.liberation_population_objective_create <- function(engine_pointer, subject_data, primary_tape_pointers, curvature_tape_pointers, config) {
-    .Call(`_LibeRation_liberation_population_objective_create`, engine_pointer, subject_data, primary_tape_pointers, curvature_tape_pointers, config)
-}
-
-.liberation_population_objective_value <- function(pointer, encoded) {
-    .Call(`_LibeRation_liberation_population_objective_value`, pointer, encoded)
-}
-
-.liberation_population_objective_gradient <- function(pointer, encoded) {
-    .Call(`_LibeRation_liberation_population_objective_gradient`, pointer, encoded)
-}
-
-.liberation_population_objective_state <- function(pointer, encoded) {
-    .Call(`_LibeRation_liberation_population_objective_state`, pointer, encoded)
-}
-
-.liberation_population_objective_telemetry <- function(pointer) {
-    .Call(`_LibeRation_liberation_population_objective_telemetry`, pointer)
-}
-
 .liberation_engine_create <- function(specification) {
     .Call(`_LibeRation_liberation_engine_create`, specification)
 }
@@ -155,5 +135,29 @@
 
 .liberation_mixture_component_nll <- function(engine_pointer, data, theta, eta, sigma) {
     .Call(`_LibeRation_liberation_mixture_component_nll`, engine_pointer, data, theta, eta, sigma)
+}
+
+.liberation_population_objective_create <- function(engine_pointer, subject_data, primary_tape_pointers, curvature_tape_pointers, config) {
+    .Call(`_LibeRation_liberation_population_objective_create`, engine_pointer, subject_data, primary_tape_pointers, curvature_tape_pointers, config)
+}
+
+.liberation_population_objective_value <- function(pointer, encoded) {
+    .Call(`_LibeRation_liberation_population_objective_value`, pointer, encoded)
+}
+
+.liberation_population_objective_gradient <- function(pointer, encoded) {
+    .Call(`_LibeRation_liberation_population_objective_gradient`, pointer, encoded)
+}
+
+.liberation_population_objective_hessian <- function(pointer, encoded) {
+    .Call(`_LibeRation_liberation_population_objective_hessian`, pointer, encoded)
+}
+
+.liberation_population_objective_state <- function(pointer, encoded) {
+    .Call(`_LibeRation_liberation_population_objective_state`, pointer, encoded)
+}
+
+.liberation_population_objective_telemetry <- function(pointer) {
+    .Call(`_LibeRation_liberation_population_objective_telemetry`, pointer)
 }
 

@@ -1,5 +1,5 @@
 .nm_engine_data <- function(model, data) {
-  data <- if (inherits(data, "nm_dataset")) data else nm_dataset(data)
+  data <- .nm_materialize_addl(data)
   iov <- model$LIK_CONFIG$iov
   if (iov > 0L) {
     column <- model$LIK_CONFIG$occasion_col
@@ -131,8 +131,6 @@ NMEngine <- R6::R6Class(
   public = list(
     #' @field model Serializable validated [nm_model()] definition.
     model = NULL,
-    #' @field pointer External pointer to the compiled C++ numerical engine.
-    pointer = NULL,
 
     #' @description
     #' Compile a serializable model into a C++ engine.
@@ -141,7 +139,7 @@ NMEngine <- R6::R6Class(
     initialize = function(model) {
       if (!inherits(model, "nm_model")) .nm_stop("`model` must be an nm_model.")
       self$model <- model
-      self$pointer <- .liberation_engine_create(.nm_model_spec(model))
+      private$pointer_ <- .liberation_engine_create(.nm_model_spec(model))
     },
 
     #' @description
@@ -362,7 +360,19 @@ NMEngine <- R6::R6Class(
       cat("  pointer:", if (is.null(self$pointer)) "missing" else "ready", "\n")
       invisible(self)
     }
-  )
+  ),
+  active = list(
+    #' @field pointer Read-only external pointer to the compiled C++ numerical
+    #'   engine. It remains readable for package interoperability but cannot be
+    #'   replaced or cleared from R.
+    pointer = function(value) {
+      if (!missing(value)) {
+        .nm_stop("`NMEngine$pointer` is read-only and owned by the C++ engine.")
+      }
+      private$pointer_
+    }
+  ),
+  private = list(pointer_ = NULL)
 )
 
 #' Compile a serializable model into a pointer-backed engine

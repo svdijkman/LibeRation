@@ -11,8 +11,15 @@ serializable and is the object sent to workers.
   \if{html}{\out{<div class="r6-fields">}}
   \describe{
     \item{\code{model}}{Serializable validated [nm_model()] definition.}
-
-    \item{\code{pointer}}{External pointer to the compiled C++ numerical engine.}
+  }
+  \if{html}{\out{</div>}}
+}
+\section{Active bindings}{
+  \if{html}{\out{<div class="r6-active-bindings">}}
+  \describe{
+    \item{\code{pointer}}{Read-only external pointer to the compiled C++ numerical
+engine. It remains readable for package interoperability but cannot be
+replaced or cleared from R.}
   }
   \if{html}{\out{</div>}}
 }

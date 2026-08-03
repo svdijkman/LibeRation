@@ -6,20 +6,22 @@
 \usage{
 nm_cov_step(
   fit,
-  type = c("auto", "hessian", "opg", "sandwich", "r", "s"),
+  type = c("sandwich", "auto", "hessian", "opg", "r", "s"),
   tolerance = 1e-08,
   samples = NULL,
   seed = NULL,
   eta_maxit = NULL,
-  convention = c("nonmem", "likelihood")
+  convention = c("nonmem", "likelihood"),
+  hessian_backend = c("auto", "cppad", "numerical")
 )
 }
 \arguments{
 \item{fit}{An `nm_fit`.}
 
-\item{type}{`hessian`/`r` uses objective curvature, `opg`/`s` uses the
-subject-score matrix, and `sandwich` uses R-inverse S R-inverse. `auto`
-prefers a well-conditioned R matrix and falls back to sandwich or S.}
+\item{type}{`hessian`/`r` uses the population-objective Hessian,
+`opg`/`s` uses the subject-score matrix, and `sandwich` (the
+default) uses R-inverse S R-inverse. `auto` prefers a well-conditioned R
+matrix and falls back to sandwich or S.}
 
 \item{tolerance}{Positive-definite regularization tolerance.}
 
@@ -40,6 +42,16 @@ information.}
 of the reported objective function for NONMEM-compatible R and S matrices.
 `"likelihood"` uses one-half of those derivatives and retains the former
 log-likelihood convention.}
+
+\item{hessian_backend}{Hessian implementation. `"auto"` uses the native
+CppAD/implicit-mode Hessian for deterministic compiled objectives. GQ,
+IMP, and SAEM use an estimator-specific numerical Jacobian of their fixed
+quadrature/importance score; this is deliberately distinct from a generic
+objective `optimHess` calculation.
+Deterministic objectives fall back explicitly to a numerical Jacobian of
+the population gradient.
+`"cppad"` requires the native path; `"numerical"` is retained as a
+comparator and for stochastic marginal objectives.}
 }
 \value{
 Covariance, correlation, standard errors, relative standard errors,

@@ -59,6 +59,14 @@ test_that("report workflows generate DOCX when Pandoc is available", {
   expect_gt(file.info(bundle$docx)$size, 1000)
 })
 
+test_that("Pandoc discovery safely represents an unavailable executable", {
+  pandoc <- LibeRation:::.nm_report_pandoc()
+  expect_type(pandoc, "character")
+  expect_length(pandoc, 1L)
+  expect_false(is.na(pandoc))
+  if (nzchar(pandoc)) expect_true(file.exists(pandoc))
+})
+
 test_that("specialized outcome diagnostics are selectable report evidence", {
   elements <- c("vpc_count", "vpc_competing", "vpc_recurrent")
   block <- nm_report_block("run", run_ids = "run-1", elements = elements)

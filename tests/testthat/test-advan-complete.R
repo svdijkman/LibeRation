@@ -94,6 +94,71 @@ test_that("ADVAN10 implements NONMEM VM/KM Michaelis-Menten elimination", {
   expect_match(derivatives$propagation_kernel, "advan10")
 })
 
+test_that("general ADVAN families enter population estimation and recover a rate", {
+  recover <- function(model, data, truth, tolerance, label) {
+    generating <- model
+    generating$THETAS$Value[[1L]] <- truth
+    simulated <- nm_simulate(generating, data, residual = FALSE)
+    observed <- data$EVID == 0L
+    data$DV[observed] <- simulated$IPRED[observed]
+    fit <- nm_est(model, data, method = "FO", maxit = 80L, tolerance = 1e-7)
+    expect_equal(fit$convergence, 0L, info = label)
+    expect_equal(fit$theta[[1L]], truth, tolerance = tolerance, info = label)
+  }
+
+  graph <- nm_matrix_model(
+    data.frame(id = 1:2, name = c("CENTRAL", "PERIPHERAL")),
+    data.frame(
+      from = c(1L, 1L, 2L), to = c(0L, 2L, 1L),
+      type = "rate", parameter = c("K10", "K12", "K21")
+    )
+  )
+  linear_data <- advan_event_data(c(0, 0.5, 1, 2, 4))
+  for (advan in c(5L, 7L)) {
+    model <- nm_model(
+      INPUT = names(linear_data), ADVAN = advan, TRANS = 1,
+      PRED = "K10=THETA(1);K12=THETA(2);K21=THETA(3);S1=THETA(4)",
+      ERROR = "Y=F+ERR(1)",
+      THETAS = data.frame(
+        THETA = 1:4, Value = c(.12, .1, .05, 20),
+        FIX = c(FALSE, TRUE, TRUE, TRUE)
+      ),
+      SIGMAS = data.frame(SIGMA = 1, Value = .01, FIX = TRUE), GRAPH = graph
+    )
+    recover(model, linear_data, .2, .01, paste0("ADVAN", advan))
+  }
+
+  stiff_data <- advan_event_data(c(0, .01, .05, .2, 1))
+  for (advan in c(8L, 9L, 14L)) {
+    model <- nm_model(
+      INPUT = names(stiff_data), ADVAN = advan, TRANS = 1,
+      DOSECMP = 1, OBSCMP = 2,
+      PRED = "KFAST=THETA(1);KSLOW=THETA(2);S2=1",
+      DES = "DADT(1)=-KFAST*A(1)\nDADT(2)=KFAST*A(1)-KSLOW*A(2)",
+      ERROR = "Y=F+ERR(1)",
+      THETAS = data.frame(
+        THETA = 1:2, Value = c(30, 1), FIX = c(FALSE, TRUE)
+      ),
+      SIGMAS = data.frame(SIGMA = 1, Value = .01, FIX = TRUE),
+      ODE_CONTROL = list(rtol = 1e-8, atol = 1e-11)
+    )
+    recover(model, stiff_data, 50, .5, paste0("ADVAN", advan))
+  }
+
+  nonlinear_data <- advan_event_data(c(0, .5, 1, 2, 4))
+  nonlinear <- nm_model(
+    INPUT = names(nonlinear_data), ADVAN = 10, TRANS = 1,
+    PRED = "VM=THETA(1);KM=THETA(2);V=THETA(3);S1=V",
+    ERROR = "Y=F+ERR(1)",
+    THETAS = data.frame(
+      THETA = 1:3, Value = c(12, 50, 20), FIX = c(FALSE, TRUE, TRUE)
+    ),
+    SIGMAS = data.frame(SIGMA = 1, Value = .01, FIX = TRUE),
+    ODE_CONTROL = list(rtol = 1e-9, atol = 1e-11)
+  )
+  recover(nonlinear, nonlinear_data, 20, .2, "ADVAN10")
+})
+
 test_that("general linear NONMEM streams retain their model graph", {
   control <- c(
     "$PROBLEM ADVAN5 graph",

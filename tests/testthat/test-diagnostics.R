@@ -116,6 +116,57 @@ test_that("FOCE and ITS covariance start from fitted conditional modes", {
   }
 })
 
+test_that("native conditional Hessians agree with the numerical gradient Jacobian", {
+  fixture <- estimation_fixture()
+  fixture$model$THETAS$FIX <- c(FALSE, TRUE)
+  fixture$model$SIGMAS$FIX <- TRUE
+  fixture$model$OMEGAS$FIX <- TRUE
+  for (method in c("ITS", "FOCE", "FOCEI", "LAPLACE")) {
+    fit <- nm_est(
+      fixture$model, fixture$data, method = method,
+      maxit = 8, eta_maxit = 80, tolerance = 1e-8
+    )
+    exact <- nm_cov_step(
+      fit, type = "hessian", hessian_backend = "cppad"
+    )
+    numerical <- nm_cov_step(
+      fit, type = "hessian", hessian_backend = "numerical"
+    )
+    expect_true(exact$bread_exact, info = method)
+    expect_identical(exact$hessian_backend, "cppad", info = method)
+    expect_false(numerical$bread_exact, info = method)
+    expect_lt(
+      max(abs(exact$bread - numerical$bread)) /
+        max(1, max(abs(numerical$bread))),
+      2e-4, label = method
+    )
+  }
+})
+
+test_that("native Hessians include nonlinear variance-parameter transforms", {
+  fixture <- estimation_fixture()
+  fixture$model$THETAS$FIX <- TRUE
+  fixture$model$SIGMAS$FIX <- FALSE
+  fixture$model$OMEGAS$FIX <- FALSE
+  fit <- nm_est(
+    fixture$model, fixture$data, method = "FO",
+    maxit = 12, tolerance = 1e-8
+  )
+  exact <- nm_cov_step(
+    fit, type = "hessian", hessian_backend = "cppad"
+  )
+  numerical <- nm_cov_step(
+    fit, type = "hessian", hessian_backend = "numerical"
+  )
+  expect_true(exact$bread_exact)
+  expect_equal(dim(exact$bread), c(2L, 2L))
+  expect_lt(
+    max(abs(exact$bread - numerical$bread)) /
+      max(1, max(abs(numerical$bread))),
+    5e-4
+  )
+})
+
 test_that("NONMEM and likelihood covariance conventions have explicit scaling", {
   fixture <- estimation_fixture()
   fixture$model$THETAS$FIX <- c(FALSE, TRUE)
@@ -148,6 +199,10 @@ test_that("IMP and SAEM covariance use marginal importance information", {
   expect_equal(
     imp$covariance$objective_backend, "fixed-proposal-importance-score"
   )
+  expect_match(imp$covariance$bread_source, "importance-score Jacobian")
+  expect_false(grepl("optimHess", imp$covariance$bread_source, fixed = TRUE))
+  expect_false(imp$covariance$marginal_information$exact_cppad_hessian)
+  expect_gt(imp$covariance$marginal_information$evaluations, 0L)
   expect_true(imp$covariance$eta_warm_start)
   expect_true(imp$covariance$objective_telemetry$eta_warm_start)
   expect_equal(imp$covariance$objective_telemetry$proposals, 3L)
@@ -173,6 +228,12 @@ test_that("IMP and SAEM covariance use marginal importance information", {
   )
   expect_true(saem$covariance$eta_warm_start)
   expect_true(saem$covariance$objective_telemetry$eta_warm_start)
+
+  saem_bread <- nm_cov_step(
+    saem, type = "hessian", samples = 20, seed = 43
+  )
+  expect_match(saem_bread$bread_source, "post-fit.*importance-score Jacobian")
+  expect_false(grepl("optimHess", saem_bread$bread_source, fixed = TRUE))
 })
 
 test_that("fixed-proposal importance gradients match their marginal objective", {

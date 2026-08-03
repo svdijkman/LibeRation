@@ -705,6 +705,25 @@
     run_info = list(
       Method = fit$method, Objective = fit$objective,
       `Convergence code` = fit$convergence,
+      `Objective backend` = fit$diagnostics$optimizer$objective_backend %||%
+        fit$diagnostics$optimizer$backend %||% "",
+      `Population gradient` = fit$diagnostics$population_gradient %||%
+        fit$diagnostics$optimizer$population_gradient %||% "",
+      `Population gradient class` = {
+        description <- fit$diagnostics$population_gradient %||%
+          fit$diagnostics$optimizer$population_gradient %||% ""
+        fallbacks <- fit$diagnostics$optimizer$gradient_fallbacks %||% 0L
+        if (fallbacks > 0L) "Finite-difference fallback used"
+        else if (grepl(
+          "omitted|finite common-random|finite adaptive-grid|derivative-free",
+          description, ignore.case = TRUE
+        )) "Score-incomplete or finite-grid derivative"
+        else if (grepl("exact|CppAD", description, ignore.case = TRUE)) {
+          "CppAD-derived on the recorded smooth path"
+        } else "Estimator-specific; inspect description"
+      },
+      `Finite-difference gradient fallbacks` =
+        fit$diagnostics$optimizer$gradient_fallbacks %||% 0L,
       `Iterations to convergence` = if (length(iterations) && !is.na(iterations)) iterations else "",
       `Objective evaluations` = if (length(objective_evaluations) &&
         !is.na(objective_evaluations)) objective_evaluations else "",
@@ -728,6 +747,10 @@
         if (identical(covariance$status, "failed")) "Failed" else "Completed",
       `Covariance method` = if (is.null(covariance)) "" else
         toupper(as.character(covariance$type %||% "")),
+      `Covariance bread source` = if (is.null(covariance)) "" else
+        as.character(covariance$bread_source %||% ""),
+      `Covariance bread exact` = if (is.null(covariance)) "" else
+        isTRUE(covariance$bread_exact),
       `Covariance integration` = if (is.null(covariance)) "" else
         as.character(covariance$sampling %||% ""),
       `Covariance integration points` = if (is.null(covariance)) "" else
@@ -1999,7 +2022,7 @@ renderLiberWorkbench <- function(expr, env = parent.frame(), quoted = FALSE) {
     n_cores = max(1L, as.integer(event$nCores %||% 1L)),
     print_every = max(0L, as.integer(event$printEvery %||% 0L)),
     covariance = isTRUE(event$covariance),
-    covariance_type = as.character(event$covarianceType %||% "hessian"),
+    covariance_type = as.character(event$covarianceType %||% "sandwich"),
     covariance_tolerance = as.numeric(event$covarianceTolerance %||% 1e-8),
     covariance_samples = as.integer(event$covarianceSamples %||% 200L),
     covariance_seed = as.integer(event$covarianceSeed %||%

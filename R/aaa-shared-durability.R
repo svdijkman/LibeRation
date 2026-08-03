@@ -6,6 +6,79 @@
   stop(message, call. = FALSE)
 }
 
+.liber_shared_acl_warning <- local({
+  warned <- FALSE
+  function(message) {
+    if (!warned) {
+      warning(message, call. = FALSE)
+      warned <<- TRUE
+    }
+    invisible(FALSE)
+  }
+})
+
+.liber_shared_windows_acl <- function(path, error = NULL) {
+  icacls <- unname(Sys.which("icacls.exe"))
+  whoami <- unname(Sys.which("whoami.exe"))
+  failure <- function(detail) {
+    message <- paste0(
+      "Unable to apply the owner/SYSTEM/Administrators Windows ACL to ",
+      path, ": ", detail,
+      ". Encrypted LibeR workspaces remain encrypted, but filesystem ACL ",
+      "defence in depth is unavailable."
+    )
+    if (isTRUE(getOption("LibeR.strict_windows_acl", FALSE))) {
+      .liber_shared_fail(error, message)
+    }
+    .liber_shared_acl_warning(message)
+  }
+  if (!nzchar(icacls) || !nzchar(whoami)) {
+    return(failure("icacls.exe or whoami.exe was not found"))
+  }
+  identity <- tryCatch(
+    suppressWarnings(system2(
+      whoami, c("/user", "/fo", "csv", "/nh"),
+      stdout = TRUE, stderr = TRUE
+    )), error = identity
+  )
+  if (inherits(identity, "error") || !length(identity)) {
+    return(failure("the current Windows security identifier could not be read"))
+  }
+  row <- tryCatch(
+    utils::read.csv(
+      text = paste(identity, collapse = "\n"), header = FALSE,
+      stringsAsFactors = FALSE
+    ), error = identity
+  )
+  sid <- if (!inherits(row, "error") && ncol(row) >= 2L) {
+    trimws(as.character(row[[2L]][[1L]]))
+  } else ""
+  if (!grepl("^S-[0-9-]+$", sid)) {
+    return(failure("the current Windows security identifier was invalid"))
+  }
+  output <- tryCatch(
+    suppressWarnings(system2(
+      icacls,
+      c(
+        shQuote(normalizePath(path, winslash = "\\", mustWork = TRUE)),
+        "/inheritance:r", "/grant:r",
+        shQuote(paste0("*", sid, ":(F)")),
+        shQuote("*S-1-5-18:(F)"),
+        shQuote("*S-1-5-32-544:(F)"), "/q"
+      ),
+      stdout = TRUE, stderr = TRUE
+    )), error = identity
+  )
+  status <- if (inherits(output, "error")) 1L else attr(output, "status")
+  if (is.null(status)) status <- 0L
+  if (!identical(as.integer(status), 0L)) {
+    detail <- if (inherits(output, "error")) conditionMessage(output) else
+      paste(output, collapse = " ")
+    return(failure(detail))
+  }
+  invisible(TRUE)
+}
+
 .liber_shared_publish_file <- function(
     temporary, path, mode = "0600", error = NULL) {
   backup <- paste0(path, ".previous")
@@ -19,8 +92,12 @@
     .liber_shared_fail(error, paste0("Unable to publish file: ", path))
   }
   if (file.exists(backup)) unlink(backup, force = TRUE)
-  if (!is.null(mode) && .Platform$OS.type != "windows") {
-    try(Sys.chmod(path, mode = mode, use_umask = FALSE), silent = TRUE)
+  if (!is.null(mode)) {
+    if (.Platform$OS.type == "windows") {
+      .liber_shared_windows_acl(path, error = error)
+    } else {
+      try(Sys.chmod(path, mode = mode, use_umask = FALSE), silent = TRUE)
+    }
   }
   invisible(path)
 }

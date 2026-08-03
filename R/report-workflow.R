@@ -513,7 +513,9 @@ nm_report_design_load <- function(workspace, project, id = NULL) {
 
 .nm_report_pandoc <- function() {
   executable <- Sys.which("pandoc")
-  if (nzchar(executable)) return(unname(executable))
+  if (length(executable) == 1L && !is.na(executable) && nzchar(executable)) {
+    return(unname(executable))
+  }
   if (.Platform$OS.type == "windows") {
     candidates <- c(
       file.path(Sys.getenv("ProgramFiles", "C:/Program Files"), "Pandoc", "pandoc.exe"),
@@ -524,8 +526,9 @@ nm_report_design_load <- function(workspace, project, id = NULL) {
   }
   if (requireNamespace("rmarkdown", quietly = TRUE)) {
     location <- tryCatch(rmarkdown::find_pandoc(), error = function(error) NULL)
-    if (!is.null(location) && nzchar(location$dir)) {
-      candidate <- file.path(location$dir, if (.Platform$OS.type == "windows") "pandoc.exe" else "pandoc")
+    directory <- if (is.list(location)) location$dir else NULL
+    if (length(directory) == 1L && !is.na(directory) && nzchar(directory)) {
+      candidate <- file.path(directory, if (.Platform$OS.type == "windows") "pandoc.exe" else "pandoc")
       if (file.exists(candidate)) return(candidate)
     }
   }

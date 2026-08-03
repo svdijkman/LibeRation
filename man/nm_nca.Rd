@@ -29,26 +29,48 @@ nm_nca(
 }
 \arguments{
 \item{data}{A data frame containing one or more concentration-time profiles.}
+
 \item{time, concentration}{Column names for time and concentration.}
-\item{id}{Optional grouping columns. With \code{NULL}, the data form one profile.}
+
+\item{id}{Optional grouping columns. With `NULL`, the data form one profile.}
+
 \item{dose}{Dose scalar or column name.}
+
 \item{tau}{Dosing interval scalar or column name for steady-state summaries.}
+
 \item{route}{Administration route: extravascular/oral, bolus, or infusion.}
+
 \item{method}{Integration method: linear-up/log-down or linear trapezoidal.}
+
 \item{terminal}{Optional terminal-phase row indices, or a named list by group.}
-\item{partial_auc}{Optional data frame with \code{name}, \code{start}, and \code{end}.}
-\item{engine}{Native engine, ncar reference backend, or automatic native with ncar fallback.}
+
+\item{partial_auc}{Optional data frame with `name`, `start`, and `end`.}
+
+\item{engine}{Native engine, ncar reference backend, or automatic native with
+ncar fallback.}
+
 \item{validate}{Compare native values with ncar when available.}
+
 \item{duplicate}{Duplicate-time policy.}
+
 \item{blq}{BLQ/non-positive concentration policy.}
+
 \item{lloq}{LLOQ used by the half-LLOQ policy.}
+
 \item{steady_state}{Passed to the ncar reference backend.}
+
 \item{infusion_duration}{Infusion duration passed to the reference backend.}
-\item{dose_unit, time_unit, concentration_unit}{Units passed to the ncar reference backend. Native results retain the input units.}
+
+\item{dose_unit, time_unit, concentration_unit}{Units passed to the ncar
+reference backend. Native results retain the input units.}
 }
 \value{
-An \code{nm_nca} object containing a wide results table, provenance, and optional validation differences.
+An `nm_nca` object containing a wide results table, provenance, and
+  optional validation differences.
 }
 \description{
-Calculates noncompartmental exposure and disposition summaries with a native C++ implementation. The optional \code{ncar}/\code{NonCompart} route can be selected as a reference backend, used automatically as a fallback, or run alongside the native engine for validation.
+Calculates noncompartmental exposure and disposition summaries with a
+native C++ implementation. The optional `ncar`/`NonCompart` route can be
+selected as a reference backend, used automatically as a fallback, or run
+alongside the native engine for validation.
 }

@@ -32,6 +32,23 @@
   data
 }
 
+.nm_materialize_addl <- function(data) {
+  if (!inherits(data, "nm_dataset")) {
+    return(nm_dataset(data, expand_addl = TRUE))
+  }
+  addl <- suppressWarnings(as.integer(data$ADDL))
+  materialized <- isTRUE(attr(data, "addl_materialized")) &&
+    length(addl) == nrow(data) && !anyNA(addl) && all(addl == 0L)
+  if (materialized) return(data)
+  raw <- as.data.frame(data, stringsAsFactors = FALSE)
+  internal <- intersect(
+    c(".ID_INDEX", ".source_row", ".generated", ".sort_priority"),
+    names(raw)
+  )
+  raw[internal] <- NULL
+  nm_dataset(raw, expand_addl = TRUE)
+}
+
 #' Normalize a NONMEM event dataset
 #'
 #' @param data Data frame containing at least `ID` and `TIME`.
@@ -90,6 +107,7 @@ nm_dataset <- function(data, expand_addl = TRUE) {
     if (is.unsorted(times, strictly = FALSE)) .nm_stop("TIME ordering failed for subject index ", id, ".")
   }
   attr(data, "id_levels") <- id_levels
+  attr(data, "addl_materialized") <- isTRUE(expand_addl)
   class(data) <- c("nm_dataset", "data.frame")
   data
 }

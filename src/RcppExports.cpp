@@ -47,68 +47,6 @@ BEGIN_RCPP
     return rcpp_result_gen;
 END_RCPP
 }
-// liberation_population_objective_create
-SEXP liberation_population_objective_create(SEXP engine_pointer, const Rcpp::List& subject_data, const Rcpp::List& primary_tape_pointers, const Rcpp::List& curvature_tape_pointers, const Rcpp::List& config);
-RcppExport SEXP _LibeRation_liberation_population_objective_create(SEXP engine_pointerSEXP, SEXP subject_dataSEXP, SEXP primary_tape_pointersSEXP, SEXP curvature_tape_pointersSEXP, SEXP configSEXP) {
-BEGIN_RCPP
-    Rcpp::RObject rcpp_result_gen;
-    Rcpp::RNGScope rcpp_rngScope_gen;
-    Rcpp::traits::input_parameter< SEXP >::type engine_pointer(engine_pointerSEXP);
-    Rcpp::traits::input_parameter< const Rcpp::List& >::type subject_data(subject_dataSEXP);
-    Rcpp::traits::input_parameter< const Rcpp::List& >::type primary_tape_pointers(primary_tape_pointersSEXP);
-    Rcpp::traits::input_parameter< const Rcpp::List& >::type curvature_tape_pointers(curvature_tape_pointersSEXP);
-    Rcpp::traits::input_parameter< const Rcpp::List& >::type config(configSEXP);
-    rcpp_result_gen = Rcpp::wrap(liberation_population_objective_create(engine_pointer, subject_data, primary_tape_pointers, curvature_tape_pointers, config));
-    return rcpp_result_gen;
-END_RCPP
-}
-// liberation_population_objective_value
-double liberation_population_objective_value(SEXP pointer, const Rcpp::NumericVector& encoded);
-RcppExport SEXP _LibeRation_liberation_population_objective_value(SEXP pointerSEXP, SEXP encodedSEXP) {
-BEGIN_RCPP
-    Rcpp::RObject rcpp_result_gen;
-    Rcpp::RNGScope rcpp_rngScope_gen;
-    Rcpp::traits::input_parameter< SEXP >::type pointer(pointerSEXP);
-    Rcpp::traits::input_parameter< const Rcpp::NumericVector& >::type encoded(encodedSEXP);
-    rcpp_result_gen = Rcpp::wrap(liberation_population_objective_value(pointer, encoded));
-    return rcpp_result_gen;
-END_RCPP
-}
-// liberation_population_objective_gradient
-Rcpp::NumericVector liberation_population_objective_gradient(SEXP pointer, const Rcpp::NumericVector& encoded);
-RcppExport SEXP _LibeRation_liberation_population_objective_gradient(SEXP pointerSEXP, SEXP encodedSEXP) {
-BEGIN_RCPP
-    Rcpp::RObject rcpp_result_gen;
-    Rcpp::RNGScope rcpp_rngScope_gen;
-    Rcpp::traits::input_parameter< SEXP >::type pointer(pointerSEXP);
-    Rcpp::traits::input_parameter< const Rcpp::NumericVector& >::type encoded(encodedSEXP);
-    rcpp_result_gen = Rcpp::wrap(liberation_population_objective_gradient(pointer, encoded));
-    return rcpp_result_gen;
-END_RCPP
-}
-// liberation_population_objective_state
-Rcpp::List liberation_population_objective_state(SEXP pointer, const Rcpp::NumericVector& encoded);
-RcppExport SEXP _LibeRation_liberation_population_objective_state(SEXP pointerSEXP, SEXP encodedSEXP) {
-BEGIN_RCPP
-    Rcpp::RObject rcpp_result_gen;
-    Rcpp::RNGScope rcpp_rngScope_gen;
-    Rcpp::traits::input_parameter< SEXP >::type pointer(pointerSEXP);
-    Rcpp::traits::input_parameter< const Rcpp::NumericVector& >::type encoded(encodedSEXP);
-    rcpp_result_gen = Rcpp::wrap(liberation_population_objective_state(pointer, encoded));
-    return rcpp_result_gen;
-END_RCPP
-}
-// liberation_population_objective_telemetry
-Rcpp::List liberation_population_objective_telemetry(SEXP pointer);
-RcppExport SEXP _LibeRation_liberation_population_objective_telemetry(SEXP pointerSEXP) {
-BEGIN_RCPP
-    Rcpp::RObject rcpp_result_gen;
-    Rcpp::RNGScope rcpp_rngScope_gen;
-    Rcpp::traits::input_parameter< SEXP >::type pointer(pointerSEXP);
-    rcpp_result_gen = Rcpp::wrap(liberation_population_objective_telemetry(pointer));
-    return rcpp_result_gen;
-END_RCPP
-}
 // liberation_engine_create
 SEXP liberation_engine_create(const Rcpp::List& specification);
 RcppExport SEXP _LibeRation_liberation_engine_create(SEXP specificationSEXP) {
@@ -576,15 +514,84 @@ BEGIN_RCPP
     return rcpp_result_gen;
 END_RCPP
 }
+// liberation_population_objective_create
+SEXP liberation_population_objective_create(SEXP engine_pointer, const Rcpp::List& subject_data, const Rcpp::List& primary_tape_pointers, const Rcpp::List& curvature_tape_pointers, const Rcpp::List& config);
+RcppExport SEXP _LibeRation_liberation_population_objective_create(SEXP engine_pointerSEXP, SEXP subject_dataSEXP, SEXP primary_tape_pointersSEXP, SEXP curvature_tape_pointersSEXP, SEXP configSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< SEXP >::type engine_pointer(engine_pointerSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::List& >::type subject_data(subject_dataSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::List& >::type primary_tape_pointers(primary_tape_pointersSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::List& >::type curvature_tape_pointers(curvature_tape_pointersSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::List& >::type config(configSEXP);
+    rcpp_result_gen = Rcpp::wrap(liberation_population_objective_create(engine_pointer, subject_data, primary_tape_pointers, curvature_tape_pointers, config));
+    return rcpp_result_gen;
+END_RCPP
+}
+// liberation_population_objective_value
+double liberation_population_objective_value(SEXP pointer, const Rcpp::NumericVector& encoded);
+RcppExport SEXP _LibeRation_liberation_population_objective_value(SEXP pointerSEXP, SEXP encodedSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< SEXP >::type pointer(pointerSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::NumericVector& >::type encoded(encodedSEXP);
+    rcpp_result_gen = Rcpp::wrap(liberation_population_objective_value(pointer, encoded));
+    return rcpp_result_gen;
+END_RCPP
+}
+// liberation_population_objective_gradient
+Rcpp::NumericVector liberation_population_objective_gradient(SEXP pointer, const Rcpp::NumericVector& encoded);
+RcppExport SEXP _LibeRation_liberation_population_objective_gradient(SEXP pointerSEXP, SEXP encodedSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< SEXP >::type pointer(pointerSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::NumericVector& >::type encoded(encodedSEXP);
+    rcpp_result_gen = Rcpp::wrap(liberation_population_objective_gradient(pointer, encoded));
+    return rcpp_result_gen;
+END_RCPP
+}
+// liberation_population_objective_hessian
+Rcpp::NumericMatrix liberation_population_objective_hessian(SEXP pointer, const Rcpp::NumericVector& encoded);
+RcppExport SEXP _LibeRation_liberation_population_objective_hessian(SEXP pointerSEXP, SEXP encodedSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< SEXP >::type pointer(pointerSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::NumericVector& >::type encoded(encodedSEXP);
+    rcpp_result_gen = Rcpp::wrap(liberation_population_objective_hessian(pointer, encoded));
+    return rcpp_result_gen;
+END_RCPP
+}
+// liberation_population_objective_state
+Rcpp::List liberation_population_objective_state(SEXP pointer, const Rcpp::NumericVector& encoded);
+RcppExport SEXP _LibeRation_liberation_population_objective_state(SEXP pointerSEXP, SEXP encodedSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< SEXP >::type pointer(pointerSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::NumericVector& >::type encoded(encodedSEXP);
+    rcpp_result_gen = Rcpp::wrap(liberation_population_objective_state(pointer, encoded));
+    return rcpp_result_gen;
+END_RCPP
+}
+// liberation_population_objective_telemetry
+Rcpp::List liberation_population_objective_telemetry(SEXP pointer);
+RcppExport SEXP _LibeRation_liberation_population_objective_telemetry(SEXP pointerSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< SEXP >::type pointer(pointerSEXP);
+    rcpp_result_gen = Rcpp::wrap(liberation_population_objective_telemetry(pointer));
+    return rcpp_result_gen;
+END_RCPP
+}
 
 static const R_CallMethodDef CallEntries[] = {
     {"_LibeRation_liberation_native_optimizer", (DL_FUNC) &_LibeRation_liberation_native_optimizer, 8},
     {"_LibeRation_liberation_nca_profile", (DL_FUNC) &_LibeRation_liberation_nca_profile, 9},
-    {"_LibeRation_liberation_population_objective_create", (DL_FUNC) &_LibeRation_liberation_population_objective_create, 5},
-    {"_LibeRation_liberation_population_objective_value", (DL_FUNC) &_LibeRation_liberation_population_objective_value, 2},
-    {"_LibeRation_liberation_population_objective_gradient", (DL_FUNC) &_LibeRation_liberation_population_objective_gradient, 2},
-    {"_LibeRation_liberation_population_objective_state", (DL_FUNC) &_LibeRation_liberation_population_objective_state, 2},
-    {"_LibeRation_liberation_population_objective_telemetry", (DL_FUNC) &_LibeRation_liberation_population_objective_telemetry, 1},
     {"_LibeRation_liberation_engine_create", (DL_FUNC) &_LibeRation_liberation_engine_create, 1},
     {"_LibeRation_liberation_engine_simulate", (DL_FUNC) &_LibeRation_liberation_engine_simulate, 5},
     {"_LibeRation_liberation_engine_hmm_filter", (DL_FUNC) &_LibeRation_liberation_engine_hmm_filter, 5},
@@ -617,6 +624,12 @@ static const R_CallMethodDef CallEntries[] = {
     {"_LibeRation_liberation_objective_tape_point_gradients", (DL_FUNC) &_LibeRation_liberation_objective_tape_point_gradients, 2},
     {"_LibeRation_liberation_objective_tape_eta_metropolis", (DL_FUNC) &_LibeRation_liberation_objective_tape_eta_metropolis, 9},
     {"_LibeRation_liberation_mixture_component_nll", (DL_FUNC) &_LibeRation_liberation_mixture_component_nll, 5},
+    {"_LibeRation_liberation_population_objective_create", (DL_FUNC) &_LibeRation_liberation_population_objective_create, 5},
+    {"_LibeRation_liberation_population_objective_value", (DL_FUNC) &_LibeRation_liberation_population_objective_value, 2},
+    {"_LibeRation_liberation_population_objective_gradient", (DL_FUNC) &_LibeRation_liberation_population_objective_gradient, 2},
+    {"_LibeRation_liberation_population_objective_hessian", (DL_FUNC) &_LibeRation_liberation_population_objective_hessian, 2},
+    {"_LibeRation_liberation_population_objective_state", (DL_FUNC) &_LibeRation_liberation_population_objective_state, 2},
+    {"_LibeRation_liberation_population_objective_telemetry", (DL_FUNC) &_LibeRation_liberation_population_objective_telemetry, 1},
     {NULL, NULL, 0}
 };
 

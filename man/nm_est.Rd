@@ -17,12 +17,13 @@ nm_est(
   n_cores = 1L,
   optimizer_backend = c("auto", "native", "r"),
   covariance = FALSE,
-  covariance_type = c("auto", "hessian", "opg", "sandwich", "r", "s"),
+  covariance_type = c("sandwich", "auto", "hessian", "opg", "r", "s"),
   covariance_tolerance = 1e-08,
   covariance_samples = NULL,
   covariance_seed = NULL,
   initial_eta = NULL,
   collect_output = TRUE,
+  allow_fd_gradient = FALSE,
   ...
 )
 }
@@ -55,7 +56,8 @@ covariance derivatives remain in the persistent C++ population evaluator.}
 
 \item{covariance}{Run a covariance step after estimation.}
 
-\item{covariance_type}{Covariance estimator: automatic R/S fallback,
+\item{covariance_type}{Covariance estimator: robust sandwich (default),
+automatic R/S fallback,
 objective Hessian (`"hessian"`), subject-score OPG (`"opg"`), or robust
 sandwich (`"sandwich"`). `"r"` and `"s"` are accepted aliases.}
 
@@ -75,6 +77,10 @@ compatible conditional or SAEM estimation steps.}
 
 \item{collect_output}{Whether selected generated OUTPUT columns should be
 evaluated and retained with the completed fit.}
+
+\item{allow_fd_gradient}{Permit an explicit finite-difference replacement
+if an advertised population gradient is non-finite. The default is
+`FALSE`; enabling it records and warns about every fallback.}
 
 \item{...}{Method-specific controls. For `method = "GQ"`, use `gq_grid`
 (`"auto"`, `"tensor"`, or `"smolyak"`), `gq_order` (tensor nodes per ETA

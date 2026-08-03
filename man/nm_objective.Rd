@@ -2,7 +2,7 @@
 % Please edit documentation in R/objective.R
 \name{nm_objective}
 \alias{nm_objective}
-\title{Evaluate the exact C++ population joint objective}
+\title{Evaluate a C++ population joint objective and its taped derivatives}
 \usage{
 nm_objective(
   model,
@@ -22,9 +22,9 @@ nm_objective(
 
 \item{theta, eta, sigma, omega}{Parameter values.}
 
-\item{gradient}{Return the exact gradient.}
+\item{gradient}{Return the taped joint-objective gradient.}
 
-\item{hessian}{Return the exact Hessian.}
+\item{hessian}{Return the taped joint-objective Hessian.}
 }
 \value{
 Objective value and requested derivatives.
@@ -32,5 +32,8 @@ Objective value and requested derivatives.
 \description{
 The objective is minus twice the observation log likelihood plus the ETA
 Gaussian prior. The complete prediction and likelihood calculation is
-recorded by CppAD, so gradients and Hessians do not use finite differences.
+recorded by CppAD, so gradients and Hessians of this joint objective do not
+use finite differences on a valid smooth tape path. This statement does not
+extend to outer marginal estimation, conditional-mode sensitivity, or the
+covariance-step bread, whose provenance is reported separately.
 }

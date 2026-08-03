@@ -1,3 +1,13 @@
+.nm_parallel_registry <- new.env(parent = emptyenv())
+
+.nm_parallel_worker_state <- function() {
+  state <- .nm_parallel_registry$state
+  if (!is.environment(state)) {
+    .nm_stop("Parallel estimation worker state is not initialized.")
+  }
+  state
+}
+
 .nm_subject_data <- function(data, subject) {
   out <- as.data.frame(data[data$.ID_INDEX == subject, , drop = FALSE])
   internal <- intersect(c(".ID_INDEX", ".source_row", ".generated", ".sort_priority"), names(out))
@@ -34,11 +44,15 @@
   if (!length(matrix)) return(list(matrix = matrix, logdet = 0, jitter = 0))
   eigenvalues <- eigen(matrix, symmetric = TRUE, only.values = TRUE)$values
   largest <- max(abs(eigenvalues), 1)
-  jitter <- max(0, largest * 1e-9 - min(eigenvalues))
+  repair <- nm_covariance_repair(
+    matrix, method = "jitter", tolerance = 1e-9,
+    preserve_diagonal = FALSE
+  )
+  jitter <- repair$diagnostics$diagonal_shift
   if (jitter > largest * 1e-2) {
     .nm_stop(context, " is not sufficiently positive definite.")
   }
-  adjusted <- matrix + diag(jitter, nrow(matrix))
+  adjusted <- repair$matrix
   determinant <- determinant(adjusted, logarithm = TRUE)
   if (determinant$sign <= 0 || !is.finite(determinant$modulus)) {
     .nm_stop(context, " determinant is not positive and finite.")
@@ -647,7 +661,8 @@
           state <- new.env(parent = emptyenv())
           state$subjects <- evaluators
           state$model <- specification
-          assign(".liber_parallel_state", state, envir = .GlobalEnv)
+          registry <- get(".nm_parallel_registry", envir = namespace)
+          registry$state <- state
           TRUE
         },
         data_chunks = lapply(chunks, function(rows) subject_data[rows]),
@@ -835,6 +850,7 @@
        decode = decode, encode = encode, in_bounds = in_bounds, theta_free = theta_free,
        sigma_free = sigma_free, omega_free = omega_free,
        omega_full = omega_full, log_jacobian = log_jacobian,
+       omega_parameterization = if (omega_full) "log_cholesky" else "log_variance",
        log_jacobian_gradient = log_jacobian_gradient, jacobian = jacobian)
 }
 
@@ -995,7 +1011,10 @@
                             print_every = 0L, gradient = NULL,
                             optimizer_backend = c("auto", "native", "r"),
                             compiled_objective = NULL,
-                            strict_convergence = FALSE) {
+                            strict_convergence = FALSE,
+                            allow_fd_gradient = getOption(
+                              "LibeRation.allow_fd_gradient", FALSE
+                            )) {
   optimizer_backend <- match.arg(optimizer_backend)
   if (optimizer_backend == "auto") optimizer_backend <- "r"
   compiled_pointer <- compiled_objective$pointer %||% NULL
@@ -1006,6 +1025,7 @@
   gradient_evaluations <- 0L
   gradient_fallbacks <- 0L
   gradient_fallback_evaluations <- 0L
+  fd_warning_emitted <- FALSE
   pending_log <- NULL
   objective_scale <- 1
   raw <- function(parameters) {
@@ -1097,10 +1117,26 @@
           return(objective_scale * inward / largest)
         }
       }
+      if (!isTRUE(allow_fd_gradient)) {
+        .nm_stop(
+          "The population objective gradient is not finite. Automatic finite-",
+          "difference substitution is disabled because it changes the estimator's ",
+          "derivative contract. Resolve the tape/path failure or rerun with ",
+          "`allow_fd_gradient = TRUE` and inspect `gradient_fallbacks`."
+        )
+      }
       fallback <- finite_difference_gradient(parameters, point_value)
       if (length(fallback) == length(parameters) &&
           all(is.finite(fallback))) {
         gradient_fallbacks <<- gradient_fallbacks + 1L
+        if (!fd_warning_emitted) {
+          warning(
+            "Using an explicitly enabled finite-difference population-gradient fallback; ",
+            "the completed fit must be reviewed via `diagnostics$gradient_fallbacks`.",
+            call. = FALSE
+          )
+          fd_warning_emitted <<- TRUE
+        }
         value <- fallback
       } else {
         .nm_stop("The population objective gradient is not finite.")
@@ -1295,7 +1331,10 @@
       context$parallel$cluster, seq_along(chunks),
        function(index, start_chunks, theta, sigma, omega, maxit, tolerance,
                 interaction, exact_hessian) {
-        evaluators <- get(".liber_parallel_state", envir = .GlobalEnv)$subjects
+        worker_state <- get(
+          ".nm_parallel_worker_state", envir = asNamespace("LibeRation")
+        )
+        evaluators <- worker_state()$subjects
         worker_starts <- start_chunks[[index]]
         context <- list(n_eta = ncol(worker_starts))
         parameters <- list(theta = theta, sigma = sigma, omega = omega)
@@ -1431,7 +1470,10 @@
     pieces <- parallel::clusterApply(
       context$parallel$cluster, seq_along(context$parallel$chunks),
       function(index, eta_chunks, parameters, interaction) {
-        evaluators <- get(".liber_parallel_state", envir = .GlobalEnv)$subjects
+        worker_state <- get(
+          ".nm_parallel_worker_state", envir = asNamespace("LibeRation")
+        )
+        evaluators <- worker_state()$subjects
         collection <- get(
           ".nm_objective_collection_gradient", envir = asNamespace("LibeRation")
         )
@@ -1485,7 +1527,10 @@
     pieces <- parallel::clusterApply(
       context$parallel$cluster, seq_along(context$parallel$chunks),
       function(index, eta_chunks, n_eta, parameters, approximation, transform) {
-        evaluators <- get(".liber_parallel_state", envir = .GlobalEnv)$subjects
+        worker_state <- get(
+          ".nm_parallel_worker_state", envir = asNamespace("LibeRation")
+        )
+        evaluators <- worker_state()$subjects
         batch <- get(".nm_nested_gradient_batch", envir = asNamespace("LibeRation"))
         batch(
           evaluators, n_eta, parameters, eta_chunks[[index]],
@@ -1663,7 +1708,9 @@
       function(index, parameters) {
         namespace <- asNamespace("LibeRation")
         subject_objective <- get(".nm_fo_subject", envir = namespace)
-        state <- get(".liber_parallel_state", envir = .GlobalEnv)
+        state <- get(
+          ".nm_parallel_worker_state", envir = namespace
+        )()
         evaluators <- state$subjects
         model <- state$model
         vapply(
@@ -1698,7 +1745,10 @@
     pieces <- parallel::clusterCall(
       context$parallel$cluster,
       function(parameters) {
-        evaluators <- get(".liber_parallel_state", envir = .GlobalEnv)$subjects
+        worker_state <- get(
+          ".nm_parallel_worker_state", envir = asNamespace("LibeRation")
+        )
+        evaluators <- worker_state()$subjects
         collection <- get(".nm_fo_collection_gradient", envir = asNamespace("LibeRation"))
         colSums(collection(evaluators, parameters))
       }, parameters = parameters
@@ -1910,7 +1960,8 @@
 #'   its objective, gradient, conditional-mode state, parameter transforms, and
 #'   covariance derivatives remain in the persistent C++ population evaluator.
 #' @param covariance Run a covariance step after estimation.
-#' @param covariance_type Covariance estimator: automatic R/S fallback,
+#' @param covariance_type Covariance estimator: robust sandwich (default),
+#'   automatic R/S fallback,
 #'   objective Hessian (`"hessian"`), subject-score OPG (`"opg"`), or robust
 #'   sandwich (`"sandwich"`). `"r"` and `"s"` are accepted aliases.
 #' @param covariance_tolerance Positive-definite regularization tolerance for
@@ -1925,6 +1976,9 @@
 #'   compatible conditional or SAEM estimation steps.
 #' @param collect_output Whether selected generated OUTPUT columns should be
 #'   evaluated and retained with the completed fit.
+#' @param allow_fd_gradient Permit an explicit finite-difference replacement
+#'   if an advertised population gradient is non-finite. The default is
+#'   `FALSE`; enabling it records and warns about every fallback.
 #' @param ... Method-specific controls. For `method = "GQ"`, use `gq_grid`
 #'   (`"auto"`, `"tensor"`, or `"smolyak"`), `gq_order` (tensor nodes per ETA
 #'   dimension, default 5), `gq_level` (Smolyak level, default 3),
@@ -1967,14 +2021,22 @@ nm_est <- function(model, data,
                    trace = 0L, print_every = 0L, n_cores = 1L,
                    optimizer_backend = c("auto", "native", "r"),
                    covariance = FALSE,
-                   covariance_type = c("auto", "hessian", "opg", "sandwich", "r", "s"),
+                   covariance_type = c("sandwich", "auto", "hessian", "opg", "r", "s"),
                    covariance_tolerance = 1e-8,
                    covariance_samples = NULL, covariance_seed = NULL,
-                   initial_eta = NULL, collect_output = TRUE, ...) {
+                   initial_eta = NULL, collect_output = TRUE,
+                   allow_fd_gradient = FALSE, ...) {
   estimation_started <- proc.time()[["elapsed"]]
   method <- match.arg(method)
   optimizer_backend <- match.arg(optimizer_backend)
   covariance_type <- match.arg(covariance_type)
+  if (length(allow_fd_gradient) != 1L || is.na(allow_fd_gradient)) {
+    .nm_stop("`allow_fd_gradient` must be TRUE or FALSE.")
+  }
+  previous_fd_option <- options(
+    LibeRation.allow_fd_gradient = isTRUE(allow_fd_gradient)
+  )
+  on.exit(options(previous_fd_option), add = TRUE)
   print_every <- as.integer(print_every)
   if (length(print_every) != 1L || is.na(print_every) || print_every < 0L) {
     .nm_stop("`print_every` must be a non-negative integer.")

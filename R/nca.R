@@ -243,6 +243,11 @@ nm_nca <- function(data, time = "TIME", concentration = "DV", id = "ID",
   ), class = "nm_nca")
 }
 
+#' Print an NCA result
+#'
+#' @param x An `nm_nca` object.
+#' @param ... Unused.
+#' @return `x`, invisibly.
 #' @export
 print.nm_nca <- function(x, ...) {
   cat("LibeRation noncompartmental analysis\n")
