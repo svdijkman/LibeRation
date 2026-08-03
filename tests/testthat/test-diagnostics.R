@@ -305,7 +305,11 @@ test_that("LAPLACE covariance reuses fitted conditional modes for large Theo dat
   )
   fit <- nm_est(
     model, data, method = "LAPLACE", maxit = 100L,
-    eta_maxit = 100L, tolerance = 1e-6
+    eta_maxit = 100L, tolerance = 1e-6,
+    # This stress test targets covariance warm-starting, not the separate
+    # strict-gradient policy. Permit the documented recovery explicitly so a
+    # platform-specific optimizer probe cannot prevent the covariance check.
+    allow_fd_gradient = TRUE
   )
   covariance <- nm_cov_step(fit, type = "hessian")
 
