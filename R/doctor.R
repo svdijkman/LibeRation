@@ -3,7 +3,7 @@
     schema = "liber.ecosystem/1", release = "0.9.0-research-beta.11",
     packages = list(
       LibeRtAD = list(version = "0.8.0", required = TRUE),
-      LibeRation = list(version = "0.10.0", required = TRUE),
+      LibeRation = list(version = "0.10.1", required = TRUE),
       LibeRary = list(version = "0.8.0", required = FALSE),
       LibeRator = list(version = "0.4.0", required = FALSE),
       LibeRality = list(version = "0.3.0", required = FALSE),

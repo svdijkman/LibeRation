@@ -1,3 +1,10 @@
+# LibeRation 0.10.1
+
+- Requires LibeRtAD 0.8.1 so native builds inherit the complete CppAD
+  R-console adapter and do not link direct `puts`/`putchar` calls.
+- Refreshes the embedded beta.12 compatibility contract without rewriting the
+  immutable LibeRation 0.10.0 release.
+
 # LibeRation 0.10.0
 
 - Makes the compiled engine pointer read-only and routes every engine input
