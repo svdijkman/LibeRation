@@ -143,6 +143,18 @@ the workspace. Remote queues use the same typed job contract. A completed
 queue result is attached to its originating model version through stored queue
 and job identifiers, preventing duplicate run entries during repeated polls.
 
+When the GUI itself is running locally, the Jobs popup can manage a
+loopback-only OpenSSH tunnel to a LibeRties service that is reachable from an
+SSH destination but is not publicly exposed. The guided setup supports an
+optional jump host, an SSH agent or identity file, a temporary connection test,
+and automatic reopening during the GUI session. Its readiness assistant can
+install the Windows OpenSSH Client, enable `ssh-agent`, discover or generate a
+protected key, install its public key on either SSH hop and test the gateway
+and destination separately. Passwords, key passphrases and MFA responses stay
+inside visible OpenSSH terminals; LibeRation does not capture or store them.
+Hosted sessions use direct HTTPS or an externally administered network route
+instead.
+
 See the LibeRties vignettes for service deployment, authentication, resource
 limits, cancellation, logs, and reverse-proxy guidance.
 

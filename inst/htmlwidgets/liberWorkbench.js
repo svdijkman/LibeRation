@@ -1573,7 +1573,43 @@
   function JobsPage(props) {
     var jobs = list(props.jobs), selected = React.useState(null), poll = React.useState(5), remoteModal = React.useState(false);
     var remoteName = React.useState("Remote server"), remoteUrl = React.useState("https://"), remoteToken = React.useState(""), remoteEditId = React.useState(null);
+    var remoteMode = React.useState("direct"), remoteTesting = React.useState(false);
+    var sshHost = React.useState("myriad.rc.ucl.ac.uk"), sshUser = React.useState(""), sshPort = React.useState(22);
+    var sshRemoteHost = React.useState("127.0.0.1"), sshRemotePort = React.useState(8000), sshLocalPort = React.useState(0);
+    var sshUseJump = React.useState(false), sshJumpHost = React.useState("ssh-gateway.ucl.ac.uk"), sshJumpUser = React.useState(""), sshJumpPort = React.useState(22);
+    var sshIdentityFile = React.useState(""), sshAcceptNew = React.useState(true), sshAutoStart = React.useState(true);
     var queues = list(props.server.queues), selectedQueue = queues.filter(function (queue) { return queue.id === props.server.queue_id; })[0] || {};
+    var connectionTest = props.server.connection_test || {};
+    var sshSetup = props.server.ssh_setup || {}, sshKeys = list(sshSetup.keys), sshAgent = sshSetup.agent || {};
+    var selectedSshKey = sshKeys.filter(function(item){return item.path===sshIdentityFile[0];})[0] || {};
+    React.useEffect(function(){remoteTesting[1](false);},[connectionTest.nonce]);
+    React.useEffect(function(){if(!sshIdentityFile[0]&&sshSetup.recommended_key)sshIdentityFile[1](sshSetup.recommended_key);},[sshSetup.nonce]);
+    React.useEffect(function(){if(!remoteModal[0]||sshSetup.status!=="working")return;var timer=window.setInterval(function(){emit(props,"ssh_setup_refresh",remotePayload());},1800);return function(){window.clearInterval(timer);};},[sshSetup.status,remoteModal[0]]);
+    function remotePayload() {
+      return {
+        id:remoteEditId[0],name:remoteName[0],url:remoteUrl[0],token:remoteToken[0],connectionMode:remoteMode[0],
+        sshHost:sshHost[0],sshUser:sshUser[0],sshPort:sshPort[0],sshRemoteHost:sshRemoteHost[0],sshRemotePort:sshRemotePort[0],sshLocalPort:sshLocalPort[0],
+        sshUseJump:sshUseJump[0],sshJumpHost:sshJumpHost[0],sshJumpUser:sshJumpUser[0],sshJumpPort:sshJumpPort[0],sshIdentityFile:sshIdentityFile[0],
+        sshAcceptNew:sshAcceptNew[0],sshAutoStart:sshAutoStart[0]
+      };
+    }
+    function sshAction(action, extra) { emit(props,action,Object.assign(remotePayload(),extra||{})); }
+    function copyPublicKey() {
+      var key=value(selectedSshKey.public_key,"");
+      if(!key)return;
+      if(navigator.clipboard&&navigator.clipboard.writeText)navigator.clipboard.writeText(key);
+      else window.prompt("Copy this public key",key);
+    }
+    function openRemote(queue) {
+      queue=queue||{};var ssh=queue.ssh||{};
+      remoteEditId[1](queue.id||null);remoteName[1](value(queue.name,"Remote server"));remoteUrl[1](value(queue.url,"https://"));remoteToken[1]("");
+      remoteMode[1](value(queue.connection_mode,"direct"));sshHost[1](value(ssh.host,"myriad.rc.ucl.ac.uk"));sshUser[1](value(ssh.user,""));sshPort[1](Number(value(ssh.port,22)));
+      sshRemoteHost[1](value(ssh.remote_host,"127.0.0.1"));sshRemotePort[1](Number(value(ssh.remote_port,8000)));sshLocalPort[1](Number(value(ssh.local_port,0)));
+      sshUseJump[1](!!ssh.proxy_host);sshJumpHost[1](value(ssh.proxy_host,"ssh-gateway.ucl.ac.uk"));sshJumpUser[1](value(ssh.proxy_user,""));sshJumpPort[1](Number(value(ssh.proxy_port,22)));
+      var initialIdentity=value(ssh.identity_file,value(sshSetup.recommended_key,""));
+      sshIdentityFile[1](initialIdentity);sshAcceptNew[1](ssh.accept_new_host_key!==false);sshAutoStart[1](ssh.auto_start!==false);
+      remoteTesting[1](false);emit(props,"queue_test_reset",{sshIdentityFile:initialIdentity});remoteModal[1](true);
+    }
     React.useEffect(function () { var timer = window.setInterval(function () { emit(props, "jobs_refresh"); }, Math.max(1, poll[0]) * 1000); return function () { window.clearInterval(timer); }; }, [poll[0], props.inputId]);
     return e("div", { className: "lw-ribbon-page lw-jobs-page" },
       e("div", { className: "lw-jobs-toolbar" },
@@ -1583,10 +1619,10 @@
           e(Button, { className: "lw-button-quiet", onClick: function () { emit(props, "jobs_refresh"); } }, "Refresh"),
           e(Button, { className: "lw-button-warning", disabled: !selected[0], onClick: function () { emit(props, "job_cancel", { id: selected[0] }); } }, "Cancel selected"),
           e(Button, { className: "lw-button-quiet", onClick: function () { emit(props, "jobs_clear"); } }, "Clear finished"),
-          e(Button, { className: "lw-button-quiet", onClick: function () { remoteEditId[1](null); remoteName[1]("Remote server"); remoteUrl[1]("https://"); remoteToken[1](""); remoteModal[1](true); } }, "Add server"),
-          e(Button, { className: "lw-button-quiet", disabled: value(props.server.queue_id, "local") === "local", onClick: function () { remoteEditId[1](props.server.queue_id); remoteName[1](value(selectedQueue.name, "Remote server")); remoteUrl[1](value(selectedQueue.url, "https://")); remoteToken[1](""); remoteModal[1](true); } }, "Edit server"),
+          e(Button, { className: "lw-button-quiet", onClick: function () { openRemote(null); } }, "Add server"),
+          e(Button, { className: "lw-button-quiet", disabled: value(props.server.queue_id, "local") === "local", onClick: function () { openRemote(selectedQueue); } }, "Edit server"),
           e(Button, { className: "lw-button-danger", disabled: value(props.server.queue_id, "local") === "local", onClick: function () { emit(props, "queue_remove", { id: props.server.queue_id }); } }, "Remove server"))),
-      e("div", { className: "lw-jobs-clock" }, value(props.server.refreshed, "Queue ready"), " | LibeRation ", value(props.server.package_version,"unknown"), props.server.queue_root ? " | "+props.server.queue_root : ""),
+      e("div", { className: "lw-jobs-clock" }, value(props.server.refreshed, "Queue ready"), " | LibeRation ", value(props.server.package_version,"unknown"), props.server.queue_root ? " | "+props.server.queue_root : "", selectedQueue && selectedQueue.connection_mode === "ssh_tunnel" ? " | SSH: " + value(selectedQueue.tunnel_status, "disconnected") : ""),
       e(Panel, { title: "Jobs", subtitle: jobs.length + " jobs", className: "lw-jobs-table-panel" },
         jobs.length ? e("div", { className: "lw-job-tree" }, jobs.map(function (job, index) { var id = value(job.id, String(index)); return e("div", { key: id, className: "lw-job-row " + (selected[0] === id ? "selected" : ""), onClick: function () { selected[1](id); emit(props, "job_select", { id: id }); } },
           e(StatusDot, { status: job.status === "failed" ? "error" : job.status === "completed" ? "ready" : "running" }),
@@ -1596,16 +1632,68 @@
       e(Panel, { title: "Worker log", className: "lw-worker-log-panel" }, e("pre", { className: "lw-worker-log" }, list(props.job_log).join("\n") || "Select a job to view its worker log.")),
       e("p", { className: "lw-muted lw-worker-location" }, value(props.server.worker, "in-process"), " | ", value(props.server.isolation, "current R session")),
       e(Modal, {
-        open: remoteModal[0], onClose: function () { remoteModal[1](false); },
+        open: remoteModal[0], className:"lw-modal-wide", onClose: function () { remoteModal[1](false); },
         title: remoteEditId[0] ? "Edit remote LibeRties server" : "Add remote LibeRties server",
-        footer: e(Button, { className: "lw-button-primary", onClick: function () {
-          emit(props, "queue_add", { id: remoteEditId[0], name: remoteName[0], url: remoteUrl[0], token: remoteToken[0] });
-          remoteToken[1](""); remoteModal[1](false);
-        } }, remoteEditId[0] ? "Save and reconnect" : "Connect")
+        footer: e(React.Fragment,null,
+          e(Button,{className:"lw-button-quiet",onClick:function(){remoteModal[1](false);}},"Cancel"),
+          e(Button,{className:"lw-button-quiet",disabled:remoteTesting[0],onClick:function(){remoteTesting[1](true);emit(props,"queue_test",remotePayload());}},remoteTesting[0]?"Testing...":"Test connection"),
+          e(Button, { className: "lw-button-primary", onClick: function () {
+            emit(props, "queue_add", remotePayload());
+            remoteToken[1](""); remoteModal[1](false);
+          } }, remoteEditId[0] ? "Save and reconnect" : "Connect"))
       }, e("div", { className: "lw-form-stack" },
         e(Field, { label: "Name" }, e("input", { value: remoteName[0], onChange: function (event) { remoteName[1](event.target.value); } })),
-        e(Field, { label: "Server URL" }, e("input", { value: remoteUrl[0], onChange: function (event) { remoteUrl[1](event.target.value); } })),
+        e("div",{className:"lw-modal-section lw-modal-section-tinted"},
+          e("h4",null,"Connection route"),
+          e("div",{className:"lw-choice-row"},
+            e("label",{className:"lw-check"},e("input",{type:"radio",name:"remote-connection-mode",checked:remoteMode[0]==="direct",onChange:function(){remoteMode[1]("direct");}})," Direct HTTPS"),
+            e("label",{className:"lw-check",title:props.server.ssh_tunnel_allowed?"Create a loopback-only OpenSSH port forward":"Available only in a local LibeRation session"},e("input",{type:"radio",name:"remote-connection-mode",disabled:!props.server.ssh_tunnel_allowed,checked:remoteMode[0]==="ssh_tunnel",onChange:function(){remoteMode[1]("ssh_tunnel");}})," SSH tunnel")),
+          e("p",{className:"lw-help-text"},remoteMode[0]==="ssh_tunnel"?"LibeRation starts OpenSSH on this computer and connects LibeRties through a loopback-only forwarded port.":"Use the maintained HTTPS address exposed by the LibeRties reverse proxy.")),
+        remoteMode[0]==="direct"?
+          e(Field, { label: "Server URL" }, e("input", { value: remoteUrl[0], placeholder:"https://liberties.example.org", onChange: function (event) { remoteUrl[1](event.target.value); } })):
+          e(React.Fragment,null,
+            e("div",{className:"lw-modal-section lw-modal-section-tinted lw-ssh-readiness"},
+              e("div",{className:"lw-ssh-section-heading"},e("div",null,e("h4",null,"SSH readiness"),e("p",{className:"lw-help-text"},"LibeRation checks this computer before opening a tunnel.")),e(Button,{className:"lw-button-quiet",onClick:function(){sshAction("ssh_setup_refresh");}},"Refresh")),
+              e("div",{className:"lw-ssh-readiness-grid"},
+                e("div",{className:"lw-ssh-readiness-row"},e(StatusDot,{status:sshSetup.available?"ready":"error"}),e("div",null,e("strong",null,"OpenSSH Client"),e("small",null,sshSetup.available?value(sshSetup.version,"Available")+" · "+value(sshSetup.ssh_path,""):"Not detected"))),
+                e("div",{className:"lw-ssh-readiness-row"},e(StatusDot,{status:sshIdentityFile[0]?"ready":sshKeys.length?"running":"error"}),e("div",null,e("strong",null,"Authentication key"),e("small",null,sshIdentityFile[0]?sshIdentityFile[0]:sshKeys.length?sshKeys.length+" key(s) discovered":"No standard key discovered"))),
+                e("div",{className:"lw-ssh-readiness-row"},e(StatusDot,{status:sshAgent.status==="ready"?"ready":sshAgent.status==="empty"?"running":"error"}),e("div",null,e("strong",null,"ssh-agent"),e("small",null,value(sshAgent.message,"Not available"))))),
+              e("div",{className:"lw-inline-actions lw-ssh-setup-actions"},
+                !sshSetup.available?e(Button,{className:"lw-button-primary",onClick:function(){sshAction("ssh_install_client");}},sshSetup.platform==="windows"?"Install & enable OpenSSH":"Installation instructions"):null,
+                sshSetup.available&&sshAgent.status==="unavailable"?e(Button,{className:"lw-button-quiet",onClick:function(){sshAction("ssh_enable_agent");}},"Enable ssh-agent"):null,
+                sshSetup.available?e(Button,{className:"lw-button-quiet",onClick:function(){sshAction("ssh_generate_key");}},"Generate protected key…"):null,
+                e(Button,{className:"lw-button-quiet",onClick:function(){sshAction("ssh_browse_key");}},"Browse for key…"),
+                sshIdentityFile[0]&&sshSetup.available?e(Button,{className:"lw-button-quiet",onClick:function(){sshAction("ssh_load_key");}},"Load key into agent…"):null),
+              sshKeys.length?e(Field,{label:"Discovered identities"},e("select",{value:sshIdentityFile[0],onChange:function(event){sshIdentityFile[1](event.target.value);}},e("option",{value:""},"Use ssh-agent/default OpenSSH keys"),sshKeys.map(function(item){return e("option",{key:item.path,value:item.path},item.name+(item.fingerprint?" · "+item.fingerprint:""));}))):null,
+              sshSetup.message?e("div",{className:sshSetup.status==="error"?"lw-destructive-note":"lw-info-banner"},sshSetup.message):null),
+            e("div",{className:"lw-info-banner"},"Passwords, passphrases and MFA responses are entered only in OpenSSH terminals. LibeRation stores a selected key path, never private-key contents."),
+            e("div",{className:"lw-modal-section"},e("h4",null,"1. SSH destination"),
+              e("div",{className:"lw-form-grid lw-form-grid-two"},
+                e(Field,{label:"SSH host"},e("input",{value:sshHost[0],placeholder:"myriad.rc.ucl.ac.uk",onChange:function(event){sshHost[1](event.target.value);}})),
+                e(Field,{label:"SSH user"},e("input",{value:sshUser[0],placeholder:"UCL user name",onChange:function(event){sshUser[1](event.target.value);}})),
+                e(Field,{label:"SSH port"},e("input",{type:"number",min:1,max:65535,value:sshPort[0],onChange:function(event){sshPort[1](Number(event.target.value));}})),
+                e(Field,{label:"Identity file (optional)"},e("input",{value:sshIdentityFile[0],placeholder:"Use ssh-agent or enter a local key path",onChange:function(event){sshIdentityFile[1](event.target.value);}}))),
+              selectedSshKey.public_key?e("div",{className:"lw-ssh-public-key"},e("div",{className:"lw-ssh-section-heading"},e("div",null,e("strong",null,"Public key"),e("small",null,value(selectedSshKey.fingerprint,"Matching .pub file found"))),e(Button,{className:"lw-button-link",onClick:copyPublicKey},"Copy")),e("textarea",{readOnly:true,rows:2,value:selectedSshKey.public_key}),e("div",{className:"lw-inline-actions"},sshUseJump[0]?e(Button,{className:"lw-button-quiet",onClick:function(){sshAction("ssh_install_public_key",{hop:"gateway"});}},"Install on gateway…"):null,e(Button,{className:"lw-button-quiet",onClick:function(){sshAction("ssh_install_public_key",{hop:"destination"});}},"Install on destination…"))):null),
+            e("div",{className:"lw-modal-section lw-modal-section-tinted"},e("h4",null,"2. Remote LibeRties endpoint"),
+              e("div",{className:"lw-form-grid lw-form-grid-two"},
+                e(Field,{label:"Remote host"},e("input",{value:sshRemoteHost[0],onChange:function(event){sshRemoteHost[1](event.target.value);}})),
+                e(Field,{label:"Remote port"},e("input",{type:"number",min:1,max:65535,value:sshRemotePort[0],onChange:function(event){sshRemotePort[1](Number(event.target.value));}})),
+                e(Field,{label:"Local forwarded port"},e("input",{type:"number",min:0,max:65535,value:sshLocalPort[0],onChange:function(event){sshLocalPort[1](Number(event.target.value));}}))),
+              e("p",{className:"lw-help-text"},"Use 0 for an automatically selected local port. The local listener is always restricted to 127.0.0.1.")),
+            e("div",{className:"lw-modal-section"},e("h4",null,"3. Optional jump host"),
+              e("label",{className:"lw-check"},e("input",{type:"checkbox",checked:sshUseJump[0],onChange:function(event){sshUseJump[1](event.target.checked);}})," Connect through an SSH gateway"),
+              sshUseJump[0]?e("div",{className:"lw-form-grid"},
+                e(Field,{label:"Jump host"},e("input",{value:sshJumpHost[0],onChange:function(event){sshJumpHost[1](event.target.value);}})),
+                e(Field,{label:"Jump user"},e("input",{value:sshJumpUser[0],placeholder:"Defaults to SSH user",onChange:function(event){sshJumpUser[1](event.target.value);}})),
+                e(Field,{label:"Jump port"},e("input",{type:"number",min:1,max:65535,value:sshJumpPort[0],onChange:function(event){sshJumpPort[1](Number(event.target.value));}}))):null,
+              e("div",{className:"lw-inline-actions"},sshUseJump[0]?e(Button,{className:"lw-button-quiet",onClick:function(){sshAction("ssh_test_hop",{hop:"gateway"});}},"Test gateway"):null,e(Button,{className:"lw-button-quiet",onClick:function(){sshAction("ssh_test_hop",{hop:"destination"});}},sshUseJump[0]?"Test destination through gateway":"Test destination")),
+              sshUseJump[0]&&String(sshJumpHost[0]).toLowerCase()==="ssh-gateway.ucl.ac.uk"?e("p",{className:"lw-help-text"},"UCL's gateway pool has separate home directories. After installing a key, synchronize ~/.ssh across both gateway machines as required by UCL Research Computing guidance."):null),
+            e("div",{className:"lw-modal-section lw-modal-section-tinted"},e("h4",null,"4. Safety and lifecycle"),
+              e("label",{className:"lw-check"},e("input",{type:"checkbox",checked:sshAcceptNew[0],onChange:function(event){sshAcceptNew[1](event.target.checked);}})," Accept a new host key, but reject a changed key"),
+              e("label",{className:"lw-check"},e("input",{type:"checkbox",checked:sshAutoStart[0],onChange:function(event){sshAutoStart[1](event.target.checked);}})," Reopen this tunnel when the local GUI starts"),
+              e("p",{className:"lw-help-text"},"The tunnel closes with this LibeRation session. Saved settings contain host names, ports and an optional key path, but no SSH password or key material."))),
         e(Field, { label: "Bearer token" }, e("input", { type: "password", value: remoteToken[0], placeholder:remoteEditId[0]?"Leave blank to keep saved token":"Required", onChange: function (event) { remoteToken[1](event.target.value); } })),
+        connectionTest.status&&connectionTest.status!=="idle"?e("div",{className:connectionTest.status==="error"?"lw-destructive-note":"lw-info-banner"},connectionTest.message):null,
         e("p",{className:"lw-help-text"},"Server definitions and tokens are stored in the workspace settings directory so they survive package upgrades. The settings file is restricted to the current OS user where supported.")
       ))
     );

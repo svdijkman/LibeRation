@@ -45,6 +45,9 @@
 #'   `NULL` enables it only for a locally bound, non-hosted application.
 #'   Remote browser sessions are rejected even when this is `TRUE`. Set this
 #'   to `FALSE` for cluster and hosted deployments.
+#' @param allow_ssh_tunnel Whether LibeRation may manage a local OpenSSH port
+#'   forward for a remote LibeRties connection. `NULL` enables this only for a
+#'   locally bound, non-hosted application. Hosted sessions cannot enable it.
 #' @param project Optional project id to open when the application starts.
 #' @param launch.browser Passed to [shiny::runApp()]. Use `NULL` to return the
 #'   Shiny app object without launching it.
@@ -54,7 +57,7 @@
 #' @export
 liber_gui <- function(model = NULL, data = NULL, queue = NULL,
                       workspace = NULL, project = NULL, session_workspace = FALSE,
-                      allow_ollama = NULL,
+                      allow_ollama = NULL, allow_ssh_tunnel = NULL,
                       launch.browser = TRUE, ...) {
   dots <- list(...)
   model_input <- model
@@ -64,6 +67,11 @@ liber_gui <- function(model = NULL, data = NULL, queue = NULL,
   project_input <- project
   ollama_runtime_allowed <- .liber_ollama_runtime_allowed(
     allow_ollama = allow_ollama,
+    session_workspace = session_workspace,
+    host = dots$host %||% getOption("shiny.host", "127.0.0.1")
+  )
+  ssh_runtime_allowed <- .liber_ssh_runtime_allowed(
+    allow_ssh_tunnel = allow_ssh_tunnel,
     session_workspace = session_workspace,
     host = dots$host %||% getOption("shiny.host", "127.0.0.1")
   )
@@ -112,6 +120,9 @@ liber_gui <- function(model = NULL, data = NULL, queue = NULL,
     ollama_allowed <- .liber_ollama_session_allowed(
       session, runtime_allowed = ollama_runtime_allowed
     )
+    ssh_tunnel_allowed <- .liber_ssh_session_allowed(
+      session, runtime_allowed = ssh_runtime_allowed
+    )
     workspace_path <- if (isTRUE(session_workspace)) {
       base <- if (inherits(workspace_input, "nm_workspace")) {
         workspace_input$path
@@ -137,14 +148,73 @@ liber_gui <- function(model = NULL, data = NULL, queue = NULL,
     client_settings$ai$backend <- .liber_ai_backend_setting(
       client_settings$ai$backend, ollama_allowed = ollama_allowed
     )
+    ssh_tunnels <- new.env(parent = emptyenv())
+    stop_managed_tunnel <- function(id) {
+      id <- as.character(id)[[1L]]
+      if (!exists(id, envir = ssh_tunnels, inherits = FALSE)) return(invisible(FALSE))
+      tunnel <- get(id, envir = ssh_tunnels, inherits = FALSE)
+      .liber_ssh_tunnel_stop(tunnel)
+      rm(list = id, envir = ssh_tunnels)
+      invisible(TRUE)
+    }
+    start_managed_tunnel <- function(id, config, force = FALSE) {
+      if (!isTRUE(ssh_tunnel_allowed)) {
+        .nm_stop(
+          "Managed SSH tunnels are available only when LibeRation is running ",
+          "locally. Use a direct HTTPS connection in hosted deployments."
+        )
+      }
+      id <- as.character(id)[[1L]]
+      if (!isTRUE(force) && exists(id, envir = ssh_tunnels, inherits = FALSE)) {
+        current <- get(id, envir = ssh_tunnels, inherits = FALSE)
+        if (.liber_ssh_tunnel_alive(current)) return(current)
+        stop_managed_tunnel(id)
+      }
+      ssh <- .liber_ssh_tunnel_normalize(config$ssh)
+      if (!ssh$local_port) ssh$local_port <- .liber_ssh_random_port()
+      tunnel <- .liber_ssh_tunnel_start(ssh)
+      assign(id, tunnel, envir = ssh_tunnels)
+      tunnel
+    }
+    session$onSessionEnded(function() {
+      for (id in ls(ssh_tunnels, all.names = TRUE)) stop_managed_tunnel(id)
+    })
     saved_remote_config <- client_settings$remotes
+    requested_queue <- as.character(client_settings$selected_queue %||% "local")[[1L]]
     saved_remote_queues <- list()
     saved_remote_meta <- list()
     if (length(saved_remote_config) && requireNamespace("LibeRties", quietly = TRUE)) {
       for (id in names(saved_remote_config)) {
         config <- saved_remote_config[[id]]
+        mode <- as.character(config$connection_mode %||% "direct")[[1L]]
+        tunnel_status <- if (identical(mode, "ssh_tunnel")) "Not started" else "Direct"
+        url <- as.character(config$url %||% "")[[1L]]
+        if (identical(mode, "ssh_tunnel")) {
+          ssh <- tryCatch(
+            .liber_ssh_tunnel_normalize(config$ssh, check_identity = FALSE),
+            error = function(error) NULL
+          )
+          if (is.null(ssh)) next
+          if (!ssh$local_port) ssh$local_port <- .liber_ssh_random_port()
+          url <- paste0("http://127.0.0.1:", ssh$local_port)
+          if (identical(id, requested_queue) && isTRUE(ssh$auto_start) &&
+              isTRUE(ssh_tunnel_allowed)) {
+            launched <- tryCatch(
+              start_managed_tunnel(id, utils::modifyList(config, list(ssh = ssh))),
+              error = identity
+            )
+            if (inherits(launched, "error")) {
+              tunnel_status <- paste("Unavailable:", conditionMessage(launched))
+            } else {
+              url <- launched$url
+              tunnel_status <- "Connected"
+            }
+          } else if (!isTRUE(ssh_tunnel_allowed)) {
+            tunnel_status <- "Unavailable in this hosted session"
+          }
+        }
         remote <- tryCatch(
-          LibeRties::ls_remote(config$url, config$token,
+          LibeRties::ls_remote(url, config$token,
                                timeout = config$timeout %||% 30),
           error = function(error) NULL
         )
@@ -152,13 +222,22 @@ liber_gui <- function(model = NULL, data = NULL, queue = NULL,
         saved_remote_queues[[id]] <- remote
         saved_remote_meta[[id]] <- list(
           name = config$name %||% "Remote server", url = remote$url,
-          user = config$user %||% ""
+          user = config$user %||% "", connection_mode = mode,
+          ssh = if (identical(mode, "ssh_tunnel")) config$ssh else NULL,
+          tunnel_status = tunnel_status
         )
       }
     }
-    selected_queue <- as.character(client_settings$selected_queue %||% "local")[[1L]]
+    selected_queue <- requested_queue
     if (!identical(selected_queue, "local") &&
         is.null(saved_remote_queues[[selected_queue]])) {
+      selected_queue <- "local"
+    }
+    if (!identical(selected_queue, "local") && !isTRUE(ssh_tunnel_allowed) &&
+        identical(
+          as.character(saved_remote_config[[selected_queue]]$connection_mode %||% "direct"),
+          "ssh_tunnel"
+        )) {
       selected_queue <- "local"
     }
     initial_jobs <- if (identical(selected_queue, "local") && !is.null(queue)) {
@@ -238,6 +317,13 @@ liber_gui <- function(model = NULL, data = NULL, queue = NULL,
       snapshot = initial_snapshot, run = initial_run,
       queue_id = selected_queue, remote_queues = saved_remote_queues,
       remote_meta = saved_remote_meta, remote_config = saved_remote_config,
+      remote_test = list(status = "idle", message = "", nonce = 0),
+      ssh_setup = if (isTRUE(ssh_tunnel_allowed)) .liber_ssh_readiness() else list(
+        platform = .liber_ssh_platform(), available = FALSE, keys = list(),
+        recommended_key = "", agent = list(status = "unavailable", message = ""),
+        status = "unavailable", message = "SSH setup is available only in a local session.",
+        nonce = 0
+      ),
       job_context = client_settings$pending_jobs %||% list(),
       hidden_jobs = character(), selected_job = NULL,
       active_page = "home", comparison_open = FALSE,
@@ -251,7 +337,91 @@ liber_gui <- function(model = NULL, data = NULL, queue = NULL,
     poll_backoff$ready <- FALSE
     active_queue <- function(queue_id = state$queue_id) {
       if (identical(queue_id, "local")) return(queue)
-      state$remote_queues[[queue_id]]
+      ensure_remote_connection(queue_id)
+    }
+    ensure_remote_connection <- function(id = state$queue_id, authenticate = FALSE) {
+      id <- as.character(id %||% "local")[[1L]]
+      if (identical(id, "local")) return(queue)
+      config <- state$remote_config[[id]]
+      if (is.null(config)) .nm_stop("Unknown remote execution queue.")
+      mode <- as.character(config$connection_mode %||% "direct")[[1L]]
+      remote <- state$remote_queues[[id]]
+      if (identical(mode, "ssh_tunnel")) {
+        tunnel <- if (exists(id, envir = ssh_tunnels, inherits = FALSE)) {
+          get(id, envir = ssh_tunnels, inherits = FALSE)
+        } else NULL
+        if (!.liber_ssh_tunnel_alive(tunnel)) {
+          tunnel <- start_managed_tunnel(id, config, force = TRUE)
+          remote <- LibeRties::ls_remote(
+            tunnel$url, config$token, timeout = config$timeout %||% 30
+          )
+          queues <- state$remote_queues
+          queues[[id]] <- remote
+          state$remote_queues <- queues
+          metadata <- state$remote_meta
+          metadata[[id]]$url <- tunnel$url
+          metadata[[id]]$tunnel_status <- "Connected"
+          state$remote_meta <- metadata
+        }
+      }
+      if (is.null(remote)) {
+        remote <- LibeRties::ls_remote(
+          config$url, config$token, timeout = config$timeout %||% 30
+        )
+      }
+      if (isTRUE(authenticate)) remote$authenticate()
+      remote
+    }
+    ssh_event_config <- function(event, check_identity = TRUE) {
+      .liber_ssh_tunnel_normalize(list(
+        host = event$sshHost, user = event$sshUser, port = event$sshPort,
+        remote_host = event$sshRemoteHost,
+        remote_port = event$sshRemotePort,
+        local_port = event$sshLocalPort,
+        proxy_host = if (isTRUE(event$sshUseJump)) event$sshJumpHost else "",
+        proxy_user = if (isTRUE(event$sshUseJump)) event$sshJumpUser else "",
+        proxy_port = event$sshJumpPort,
+        identity_file = event$sshIdentityFile,
+        accept_new_host_key = isTRUE(event$sshAcceptNew),
+        auto_start = isTRUE(event$sshAutoStart)
+      ), check_identity = check_identity)
+    }
+    update_ssh_setup <- function(identity_file = "", status = "idle", message = "",
+                                 extra = list()) {
+      value <- .liber_ssh_readiness(
+        identity_file = identity_file, status = status, message = message
+      )
+      if (length(extra)) value <- utils::modifyList(value, extra)
+      state$ssh_setup <- value
+      invisible(value)
+    }
+    remote_event_config <- function(event, previous = NULL) {
+      mode <- tolower(trimws(as.character(event$connectionMode %||% "direct")[[1L]]))
+      if (!mode %in% c("direct", "ssh_tunnel")) {
+        .nm_stop("Connection mode must be direct or SSH tunnel.")
+      }
+      config <- list(
+        name = trimws(as.character(event$name %||% "Remote server")[[1L]]),
+        connection_mode = mode,
+        timeout = 30
+      )
+      if (!nzchar(config$name)) config$name <- "Remote server"
+      if (identical(mode, "direct")) {
+        config$url <- trimws(as.character(event$url %||% "")[[1L]])
+        if (!nzchar(config$url)) .nm_stop("Enter the remote LibeRties server URL.")
+      } else {
+        if (!isTRUE(ssh_tunnel_allowed)) {
+          .nm_stop("Managed SSH tunnels are unavailable in this hosted session.")
+        }
+        config$ssh <- ssh_event_config(event)
+      }
+      token <- as.character(event$token %||% "")[[1L]]
+      if (!nzchar(token) && !is.null(previous)) {
+        token <- as.character(previous$token %||% "")[[1L]]
+      }
+      if (!nzchar(token)) .nm_stop("Enter the server bearer token.")
+      config$token <- token
+      config
     }
     with_ui_remote_timeout <- function(q, background = FALSE, operation) {
       if (!inherits(q, "LibeRRemote")) return(force(operation))
@@ -274,6 +444,112 @@ liber_gui <- function(model = NULL, data = NULL, queue = NULL,
         remotes = state$remote_config, pending_jobs = persistent_jobs,
         ai = state$ai_config
       )
+    }
+    submission_context_key <- function(key, queue_id = state$queue_id) {
+      paste(queue_id, "intent", as.character(key), sep = "::")
+    }
+    submission_due <- function(context, now = Sys.time()) {
+      if (!identical(as.character(context$status %||% ""), "submitting")) {
+        return(FALSE)
+      }
+      attempted <- suppressWarnings(as.POSIXct(
+        as.character(context$submission_attempted_at %||% NA_character_),
+        format = "%Y-%m-%dT%H:%M:%OSZ", tz = "UTC"
+      ))
+      is.na(attempted) ||
+        as.numeric(difftime(now, attempted, units = "secs")) >= 30
+    }
+    attempt_submission <- function(intent_key, q, force = FALSE) {
+      contexts <- state$job_context
+      context <- contexts[[intent_key]]
+      if (is.null(context) ||
+          !identical(as.character(context$status %||% ""), "submitting") ||
+          (!isTRUE(force) && !submission_due(context))) return(NULL)
+      submission_key <- as.character(context$submission_key %||% "")
+      if (!nzchar(submission_key)) {
+        .nm_stop("Queued submission intent is missing its idempotency key.")
+      }
+      context$submission_attempted_at <- .nm_workspace_now()
+      contexts[[intent_key]] <- context
+      state$job_context <- contexts
+      save_client_settings()
+      submitted <- tryCatch({
+        job <- .liber_submission_read(workspace, submission_key)
+        q$submit(job, idempotency_key = submission_key)
+      }, error = identity)
+      if (inherits(submitted, "error")) {
+        contexts <- state$job_context
+        context <- contexts[[intent_key]] %||% context
+        context$submission_error <- conditionMessage(submitted)
+        contexts[[intent_key]] <- context
+        state$job_context <- contexts
+        save_client_settings()
+        stop(submitted)
+      }
+      id <- as.character(submitted)
+      contexts <- state$job_context
+      context <- contexts[[intent_key]] %||% context
+      context$job_id <- id
+      context$status <- "queued"
+      context$idempotency_key <- submission_key
+      context$submission_key <- NULL
+      context$submission_attempted_at <- NULL
+      context$submission_error <- NULL
+      contexts[[intent_key]] <- NULL
+      contexts[[job_context_key(id, context$queue_id)]] <- context
+      state$job_context <- contexts
+      save_client_settings()
+      .liber_submission_remove(workspace, submission_key)
+      id
+    }
+    retry_submission_intents <- function(q, queue_id = state$queue_id,
+                                         force = FALSE) {
+      contexts <- state$job_context
+      keys <- names(contexts)
+      if (!length(keys)) return(invisible(FALSE))
+      keys <- keys[vapply(contexts, function(context) {
+        is.list(context) &&
+          identical(as.character(context$queue_id %||% ""),
+                    as.character(queue_id)) &&
+          identical(as.character(context$status %||% ""), "submitting") &&
+          (isTRUE(force) || submission_due(context))
+      }, logical(1))]
+      changed <- FALSE
+      for (key in keys) {
+        previous <- as.character(
+          state$job_context[[key]]$submission_error %||% ""
+        )
+        result <- tryCatch(
+          attempt_submission(key, q, force = force), error = identity
+        )
+        if (inherits(result, "error")) {
+          message <- conditionMessage(result)
+          if (!identical(previous, message)) {
+            append_log(
+              paste("Queued submission acknowledgement is unresolved; it will be retried safely:",
+                    message),
+              "error"
+            )
+          }
+        } else if (!is.null(result)) {
+          append_log(paste("Recovered queued submission", result), "info")
+          changed <- TRUE
+        }
+      }
+      invisible(changed)
+    }
+    submit_with_intent <- function(q, job, context) {
+      submission_key <- .liber_submission_write(workspace, job)
+      intent_key <- submission_context_key(submission_key, context$queue_id)
+      context$job_id <- ""
+      context$status <- "submitting"
+      context$submission_key <- submission_key
+      context$submission_created <- .nm_workspace_now()
+      contexts <- state$job_context
+      contexts[[intent_key]] <- context
+      state$job_context <- contexts
+      save_client_settings()
+      attempt_submission(intent_key, q, force = TRUE)
     }
     append_log <- function(message, level = "info") {
       message <- as.character(message)
@@ -543,7 +819,18 @@ liber_gui <- function(model = NULL, data = NULL, queue = NULL,
       invisible(changed)
     }
     refresh_jobs <- function(start = FALSE, background = FALSE) {
-      q <- active_queue()
+      q <- if (!identical(state$queue_id, "local") &&
+               identical(
+                 as.character(state$remote_config[[state$queue_id]]$connection_mode %||% "direct"),
+                 "ssh_tunnel"
+               )) {
+        ensure_remote_connection(state$queue_id)
+      } else active_queue()
+      if (!is.null(q)) {
+        retry_submission_intents(
+          q, state$queue_id, force = !isTRUE(background)
+        )
+      }
       jobs <- if (is.null(q)) {
         data.frame()
       } else if (inherits(q, "LibeRQueue")) {
@@ -759,8 +1046,7 @@ liber_gui <- function(model = NULL, data = NULL, queue = NULL,
       shiny::invalidateLater(if (inherits(q, "LibeRQueue")) 1000 else 3000, session)
       contexts <- state$job_context
       needs_reconciliation <- any(vapply(contexts, function(context) {
-        status <- as.character(context$status %||% "queued")
-        status %in% c("queued", "running")
+        .liber_job_context_needs_reconciliation(context, state$queue_id)
       }, logical(1)))
       should_poll <- identical(state$active_page, "home") &&
         !isTRUE(state$comparison_open) && needs_reconciliation &&
@@ -831,7 +1117,10 @@ liber_gui <- function(model = NULL, data = NULL, queue = NULL,
         queue_root = if (inherits(q, "LibeRQueue")) q$root else "",
         package_version = as.character(utils::packageVersion("LibeRation")),
         icon = favicon_href,
-        job_count = nrow(jobs_payload)
+        job_count = nrow(jobs_payload),
+        ssh_tunnel_allowed = ssh_tunnel_allowed,
+        connection_test = state$remote_test,
+        ssh_setup = state$ssh_setup
       )
       run_output <- NULL
       if (isTRUE(state$data_payload)) {
@@ -1678,19 +1967,16 @@ liber_gui <- function(model = NULL, data = NULL, queue = NULL,
               .nm_stop("LibeRties is required for queued execution.")
             }
             parent_version <- ensure_parent_version()
-            id <- q$submit(LibeRties::ls_job(
+            job <- LibeRties::ls_job(
               "simulate", state$model, simulation_data, arguments = arguments,
               label = as.character(event$label %||% "Simulation")
-            ))
-            contexts <- state$job_context
-            contexts[[job_context_key(id)]] <- list(
+            )
+            id <- submit_with_intent(q, job, list(
               project = state$project, model = state$model, data = simulation_data,
               label = as.character(event$label %||% "Simulation"),
               version = parent_version, type = "simulate", method = "simulation",
-              queue_id = state$queue_id, job_id = as.character(id), status = "queued"
-            )
-            state$job_context <- contexts
-            save_client_settings()
+              queue_id = state$queue_id
+            ))
             refresh_jobs(start = TRUE)
             structure(list(id = id), class = "liber_gui_queued")
           }
@@ -1732,20 +2018,17 @@ liber_gui <- function(model = NULL, data = NULL, queue = NULL,
               .nm_stop("LibeRties is required for queued execution.")
             }
             parent_version <- ensure_parent_version()
-            id <- q$submit(LibeRties::ls_job(
+            job <- LibeRties::ls_job(
               if (sequential) "estimate_sequence" else "estimate",
               state$model, state$data, arguments = arguments,
               label = run_label
-            ))
-            contexts <- state$job_context
-            contexts[[job_context_key(id)]] <- list(
+            )
+            id <- submit_with_intent(q, job, list(
               project = state$project, model = state$model, data = state$data,
               label = run_label, version = parent_version,
               type = "estimate", method = method_label,
-              queue_id = state$queue_id, job_id = as.character(id), status = "queued"
-            )
-            state$job_context <- contexts
-            save_client_settings()
+              queue_id = state$queue_id
+            ))
             refresh_jobs(start = TRUE)
             structure(list(id = id), class = "liber_gui_queued")
           }
@@ -2153,6 +2436,7 @@ liber_gui <- function(model = NULL, data = NULL, queue = NULL,
           if (!identical(id, "local") && is.null(state$remote_queues[[id]])) {
             .nm_stop("Unknown execution queue.")
           }
+          if (!identical(id, "local")) ensure_remote_connection(id, authenticate = TRUE)
           state$queue_id <- id
           state$hidden_jobs <- character()
           state$job_log <- character()
@@ -2161,6 +2445,215 @@ liber_gui <- function(model = NULL, data = NULL, queue = NULL,
           refresh_jobs(start = TRUE)
           structure(list(), class = "liber_gui_validation")
         }, update_result = FALSE))
+      }
+      if (identical(action, "ssh_setup_refresh")) {
+        identity <- as.character(event$sshIdentityFile %||% "")[[1L]]
+        previous <- state$ssh_setup
+        updated <- tryCatch({
+          current <- .liber_ssh_readiness(identity)
+          pending <- as.character(previous$pending_action %||% "")[[1L]]
+          pending_path <- as.character(previous$pending_key %||% identity %||% "")[[1L]]
+          fingerprint <- if (nzchar(pending_path) && file.exists(pending_path)) {
+            .liber_ssh_key_fingerprint(pending_path)
+          } else ""
+          fingerprint <- sub("^.*(SHA256:[^ ]+).*$", "\\1", fingerprint)
+          agent_identities <- unlist(current$agent$identities %||% list(), use.names = FALSE)
+          complete <- switch(
+            pending,
+            install_client = isTRUE(current$available),
+            enable_agent = !identical(current$agent$status, "unavailable"),
+            generate_key = nzchar(.liber_ssh_public_key(pending_path)),
+            load_key = nzchar(fingerprint) && any(grepl(
+              fingerprint, agent_identities, fixed = TRUE
+            )),
+            TRUE
+          )
+          elapsed <- as.numeric(Sys.time()) - as.numeric(previous$pending_since %||% 0)
+          if (nzchar(pending) && !isTRUE(complete) && elapsed < 120) {
+            current$status <- "working"
+            current$message <- previous$message
+            current$pending_action <- pending
+            current$pending_since <- previous$pending_since
+            current$pending_key <- previous$pending_key
+          } else if (nzchar(pending) && !isTRUE(complete)) {
+            current$status <- "error"
+            current$message <- paste(
+              "The setup action has not completed after two minutes.",
+              "Check the UAC or OpenSSH terminal and retry or refresh."
+            )
+          } else {
+            current$status <- "success"
+            current$message <- "SSH readiness refreshed."
+          }
+          state$ssh_setup <- current
+          current
+        }, error = base::identity)
+        if (inherits(updated, "error")) {
+          state$ssh_setup <- utils::modifyList(
+            state$ssh_setup,
+            list(status = "error", message = conditionMessage(updated), nonce = as.numeric(Sys.time()))
+          )
+        }
+        return(invisible(NULL))
+      }
+      if (identical(action, "ssh_install_client")) {
+        identity <- as.character(event$sshIdentityFile %||% "")[[1L]]
+        launched <- tryCatch(.liber_ssh_install_client(), error = base::identity)
+        message <- if (inherits(launched, "error")) conditionMessage(launched) else paste(
+          "OpenSSH Client installation and ssh-agent enablement were opened.",
+          "Approve the Windows UAC prompt; readiness will update when installation completes."
+        )
+        update_ssh_setup(
+          identity, if (inherits(launched, "error")) "error" else "working", message,
+          extra = if (inherits(launched, "error")) list() else list(
+            pending_action = "install_client", pending_since = as.numeric(Sys.time())
+          )
+        )
+        return(invisible(NULL))
+      }
+      if (identical(action, "ssh_enable_agent")) {
+        identity <- as.character(event$sshIdentityFile %||% "")[[1L]]
+        launched <- tryCatch(.liber_ssh_enable_agent(), error = base::identity)
+        message <- if (inherits(launched, "error")) conditionMessage(launched) else paste(
+          "ssh-agent enablement was opened.",
+          "Approve the Windows UAC prompt; readiness will update when it completes."
+        )
+        update_ssh_setup(
+          identity, if (inherits(launched, "error")) "error" else "working", message,
+          extra = if (inherits(launched, "error")) list() else list(
+            pending_action = "enable_agent", pending_since = as.numeric(Sys.time())
+          )
+        )
+        return(invisible(NULL))
+      }
+      if (identical(action, "ssh_generate_key")) {
+        path <- .liber_ssh_default_identity()
+        launched <- tryCatch(.liber_ssh_generate_key(path), error = base::identity)
+        message <- if (inherits(launched, "error")) conditionMessage(launched) else paste(
+          "A protected Ed25519 key-generation terminal was opened.",
+          "Choose a passphrase there; LibeRation will not receive it."
+        )
+        update_ssh_setup(
+          if (file.exists(path)) path else "",
+          if (inherits(launched, "error")) "error" else "working", message,
+          extra = if (inherits(launched, "error")) list() else list(
+            pending_action = "generate_key", pending_since = as.numeric(Sys.time()),
+            pending_key = path
+          )
+        )
+        return(invisible(NULL))
+      }
+      if (identical(action, "ssh_browse_key")) {
+        chosen <- tryCatch(file.choose(), error = base::identity)
+        if (inherits(chosen, "error")) {
+          update_ssh_setup("", "error", conditionMessage(chosen))
+        } else {
+          update_ssh_setup(chosen, "success", "Selected the local identity file.")
+        }
+        return(invisible(NULL))
+      }
+      if (identical(action, "ssh_load_key")) {
+        identity_file <- as.character(event$sshIdentityFile %||% "")[[1L]]
+        launched <- tryCatch(.liber_ssh_load_key(identity_file), error = base::identity)
+        message <- if (inherits(launched, "error")) conditionMessage(launched) else paste(
+          "An ssh-add terminal was opened.",
+          "Enter the key passphrase there, then refresh readiness."
+        )
+        update_ssh_setup(
+          identity_file, if (inherits(launched, "error")) "error" else "working", message,
+          extra = if (inherits(launched, "error")) list() else list(
+            pending_action = "load_key", pending_since = as.numeric(Sys.time()),
+            pending_key = identity_file
+          )
+        )
+        return(invisible(NULL))
+      }
+      if (identical(action, "ssh_install_public_key")) {
+        hop <- match.arg(as.character(event$hop %||% "destination")[[1L]],
+                         c("gateway", "destination"))
+        identity_file <- as.character(event$sshIdentityFile %||% "")[[1L]]
+        launched <- tryCatch(
+          .liber_ssh_install_public_key(ssh_event_config(event), hop = hop),
+          error = base::identity
+        )
+        message <- if (inherits(launched, "error")) {
+          conditionMessage(launched)
+        } else paste(
+          "An OpenSSH terminal was opened to install the public key on the", hop,
+          "host. Enter any password, passphrase, or MFA response only in that terminal."
+        )
+        if (!inherits(launched, "error") && identical(hop, "gateway") &&
+            identical(tolower(as.character(event$sshJumpHost %||% "")[[1L]]),
+                      "ssh-gateway.ucl.ac.uk")) {
+          message <- paste(
+            message,
+            "UCL uses two gateway machines; follow the displayed UCL synchronization reminder afterward."
+          )
+        }
+        update_ssh_setup(identity_file, if (inherits(launched, "error")) "error" else "success", message)
+        return(invisible(NULL))
+      }
+      if (identical(action, "ssh_test_hop")) {
+        hop <- match.arg(as.character(event$hop %||% "destination")[[1L]],
+                         c("gateway", "destination"))
+        identity_file <- as.character(event$sshIdentityFile %||% "")[[1L]]
+        tested <- tryCatch(.liber_ssh_test_host(ssh_event_config(event), hop = hop),
+                           error = base::identity)
+        message <- if (inherits(tested, "error")) conditionMessage(tested) else tested
+        update_ssh_setup(
+          identity_file, if (inherits(tested, "error")) "error" else "success", message,
+          extra = stats::setNames(list(list(
+            status = if (inherits(tested, "error")) "error" else "success",
+            message = message
+          )), paste0(hop, "_test"))
+        )
+        return(invisible(NULL))
+      }
+      if (identical(action, "queue_test_reset")) {
+        state$remote_test <- list(status = "idle", message = "", nonce = as.numeric(Sys.time()))
+        identity <- as.character(event$sshIdentityFile %||% "")[[1L]]
+        update_ssh_setup(identity)
+        return(invisible(NULL))
+      }
+      if (identical(action, "queue_test")) {
+        id <- as.character(event$id %||% "")[[1L]]
+        previous <- if (nzchar(id)) state$remote_config[[id]] else NULL
+        tested <- tryCatch({
+          if (!requireNamespace("LibeRties", quietly = TRUE)) {
+            .nm_stop("LibeRties is required for remote execution.")
+          }
+          config <- remote_event_config(event, previous)
+          tunnel <- NULL
+          on.exit(if (!is.null(tunnel)) .liber_ssh_tunnel_stop(tunnel), add = TRUE)
+          url <- config$url %||% ""
+          if (identical(config$connection_mode, "ssh_tunnel")) {
+            ssh <- config$ssh
+            if (!ssh$local_port) ssh$local_port <- .liber_ssh_random_port()
+            tunnel <- .liber_ssh_tunnel_start(ssh)
+            url <- tunnel$url
+          }
+          remote <- LibeRties::ls_remote(url, config$token, timeout = 10)
+          authentication <- remote$authenticate()
+          list(
+            status = "success",
+            message = paste0(
+              "Connected as ", as.character(authentication$username %||% "authenticated user"),
+              if (identical(config$connection_mode, "ssh_tunnel"))
+                paste0(" through 127.0.0.1:", tunnel$local_port) else "", "."
+            ),
+            nonce = as.numeric(Sys.time())
+          )
+        }, error = function(error) list(
+          status = "error", message = conditionMessage(error),
+          nonce = as.numeric(Sys.time())
+        ))
+        state$remote_test <- tested
+        if (identical(tested$status, "success")) {
+          append_log(paste("Remote connection test:", tested$message), "info")
+        } else {
+          append_log(paste("Remote connection test failed:", tested$message), "error")
+        }
+        return(invisible(NULL))
       }
       if (identical(action, "queue_add")) {
         return(record("Remote server connected", {
@@ -2174,31 +2667,51 @@ liber_gui <- function(model = NULL, data = NULL, queue = NULL,
           )
           if (identical(id, "local")) .nm_stop("Remote queue id cannot be `local`.")
           previous <- state$remote_config[[id]]
-          token <- as.character(event$token %||% "")
-          if (!nzchar(token) && !is.null(previous)) token <- as.character(previous$token %||% "")
-          if (!nzchar(token)) .nm_stop("Enter the server bearer token.")
-          remote <- LibeRties::ls_remote(
-            as.character(event$url), token, timeout = 30
-          )
+          connection <- remote_event_config(event, previous)
+          tunnel <- NULL
+          connected <- FALSE
+          on.exit({
+            if (!connected && !is.null(tunnel)) .liber_ssh_tunnel_stop(tunnel)
+          }, add = TRUE)
+          url <- connection$url %||% ""
+          if (identical(connection$connection_mode, "ssh_tunnel")) {
+            stop_managed_tunnel(id)
+            tunnel <- start_managed_tunnel(id, connection, force = TRUE)
+            url <- tunnel$url
+          }
+          remote <- LibeRties::ls_remote(url, connection$token, timeout = 30)
           authentication <- remote$authenticate()
-          server_name <- as.character(event$name %||% "Remote server")
+          connected <- TRUE
+          if (!identical(connection$connection_mode, "ssh_tunnel")) {
+            stop_managed_tunnel(id)
+          }
+          server_name <- connection$name
           queues <- state$remote_queues
           queues[[id]] <- remote
           state$remote_queues <- queues
           metadata <- state$remote_meta
           metadata[[id]] <- list(
             name = server_name,
-            url = remote$url, user = as.character(authentication$username %||% "")
+            url = remote$url, user = as.character(authentication$username %||% ""),
+            connection_mode = connection$connection_mode,
+            ssh = connection$ssh,
+            tunnel_status = if (identical(connection$connection_mode, "ssh_tunnel")) {
+              paste0("Connected through 127.0.0.1:", tunnel$local_port)
+            } else "Direct"
           )
           state$remote_meta <- metadata
           config <- state$remote_config
-          config[[id]] <- list(
-            name = server_name, url = remote$url, token = token, timeout = 30,
-            user = as.character(authentication$username %||% "")
-          )
+          connection$url <- remote$url
+          connection$user <- as.character(authentication$username %||% "")
+          config[[id]] <- connection
           state$remote_config <- config
           state$queue_id <- id
           state$hidden_jobs <- character()
+          state$remote_test <- list(
+            status = "success",
+            message = paste("Connected as", connection$user),
+            nonce = as.numeric(Sys.time())
+          )
           save_client_settings()
           refresh_jobs()
           structure(list(), class = "liber_gui_validation")
@@ -2208,6 +2721,7 @@ liber_gui <- function(model = NULL, data = NULL, queue = NULL,
         return(record("Remote server removed", {
           id <- as.character(event$id)
           if (identical(id, "local")) .nm_stop("The local execution target cannot be removed.")
+          stop_managed_tunnel(id)
           queues <- state$remote_queues
           queues[[id]] <- NULL
           state$remote_queues <- queues

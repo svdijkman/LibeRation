@@ -1,6 +1,6 @@
 dependencies:
   - name: liber-workbench-style
-    version: 0.10.1
+    version: 0.10.2
     src: htmlwidgets
     script: liber-design-system.js
     stylesheet:

@@ -312,6 +312,86 @@
   file.path(.nm_workspace_path(workspace), ".liberation", "client-settings.rds")
 }
 
+.liber_submission_key <- function(workspace) {
+  entropy <- list(
+    workspace = .nm_workspace_path(workspace),
+    time = .nm_workspace_now(), pid = Sys.getpid(),
+    random = stats::runif(4L)
+  )
+  paste0(
+    "liberation-",
+    digest::digest(entropy, algo = "sha256", serialize = TRUE)
+  )
+}
+
+.liber_submission_path <- function(workspace, key) {
+  key <- as.character(key)
+  if (length(key) != 1L || is.na(key) ||
+      !grepl("^liberation-[a-f0-9]{64}$", key)) {
+    .nm_stop("Invalid durable submission key.")
+  }
+  file.path(
+    .nm_workspace_path(workspace), ".liberation", "submissions",
+    paste0(key, ".rds")
+  )
+}
+
+.liber_submission_write <- function(workspace, job, key = NULL) {
+  if (!requireNamespace("LibeRties", quietly = TRUE)) {
+    .nm_stop("LibeRties is required for durable queued submission.")
+  }
+  key <- key %||% .liber_submission_key(workspace)
+  wire <- LibeRties::ls_job_to_wire(job)
+  envelope <- list(
+    schema = "liberation.submission-intent", version = 1L,
+    key = key, created = .nm_workspace_now(),
+    wire_sha256 = digest::digest(wire, algo = "sha256", serialize = TRUE),
+    wire = wire
+  )
+  path <- .liber_submission_path(workspace, key)
+  .nm_workspace_atomic_save(envelope, path)
+  key
+}
+
+.liber_submission_read <- function(workspace, key) {
+  if (!requireNamespace("LibeRties", quietly = TRUE)) {
+    .nm_stop("LibeRties is required to recover a queued submission.")
+  }
+  envelope <- .nm_workspace_read(.liber_submission_path(workspace, key))
+  valid <- is.list(envelope) &&
+    identical(as.character(envelope$schema %||% ""),
+              "liberation.submission-intent") &&
+    identical(as.integer(envelope$version %||% 0L), 1L) &&
+    identical(as.character(envelope$key %||% ""), as.character(key)) &&
+    identical(
+      as.character(envelope$wire_sha256 %||% ""),
+      digest::digest(envelope$wire, algo = "sha256", serialize = TRUE)
+    )
+  if (!isTRUE(valid)) {
+    .nm_stop("Durable queued submission failed integrity validation.")
+  }
+  LibeRties::ls_job_from_wire(envelope$wire)
+}
+
+.liber_submission_remove <- function(workspace, key) {
+  path <- .liber_submission_path(workspace, key)
+  unlink(c(path, paste0(path, ".previous")), force = TRUE)
+  invisible(!file.exists(path))
+}
+
+.liber_job_context_needs_reconciliation <- function(context, queue_id = NULL) {
+  if (!is.list(context)) return(FALSE)
+  if (!is.null(queue_id) &&
+      !identical(as.character(context$queue_id %||% ""),
+                 as.character(queue_id))) return(FALSE)
+  status <- as.character(context$status %||% "queued")
+  if (status %in% c("submitting", "queued", "running")) return(TRUE)
+  identical(status, "completed") &&
+    !nzchar(as.character(context$run_id %||% "")) &&
+    nzchar(as.character(context$project %||% "")) &&
+    nzchar(as.character(context$version %||% ""))
+}
+
 .liber_ai_default_help_model <- function() {
   "Qwen2.5-Coder-3B-Instruct-q4f16_1-MLC"
 }
@@ -413,7 +493,7 @@
 
 .liber_client_settings_read <- function(workspace) {
   path <- .liber_client_settings_path(workspace)
-  defaults <- list(version = 6L, selected_queue = "local", remotes = list(),
+  defaults <- list(version = 8L, selected_queue = "local", remotes = list(),
                    pending_jobs = list(), ai = list(
                      activated = FALSE, consented = FALSE,
                      backend = "webllm",
@@ -431,14 +511,29 @@
   remotes <- value$remotes
   if (!is.list(remotes)) remotes <- list()
   remotes <- Filter(function(item) {
-    is.list(item) && length(item$url) == 1L && !is.na(item$url) && nzchar(item$url)
+    if (!is.list(item)) return(FALSE)
+    mode <- as.character(item$connection_mode %||% "direct")[[1L]]
+    if (identical(mode, "ssh_tunnel")) {
+      ssh <- item$ssh
+      return(
+        is.list(ssh) && length(ssh$host) == 1L && !is.na(ssh$host) &&
+          nzchar(ssh$host) && length(ssh$user) == 1L && !is.na(ssh$user) &&
+          nzchar(ssh$user)
+      )
+    }
+    length(item$url) == 1L && !is.na(item$url) && nzchar(item$url)
   }, remotes)
   pending_jobs <- value$pending_jobs
   if (!is.list(pending_jobs)) pending_jobs <- list()
   pending_jobs <- Filter(function(item) {
-    is.list(item) && length(item$job_id) == 1L && !is.na(item$job_id) &&
-      nzchar(item$job_id) && length(item$queue_id) == 1L &&
-      !is.na(item$queue_id) && nzchar(item$queue_id)
+    if (!is.list(item) || length(item$queue_id) != 1L ||
+        is.na(item$queue_id) || !nzchar(item$queue_id)) return(FALSE)
+    job_id <- as.character(item$job_id %||% "")
+    submission_key <- as.character(item$submission_key %||% "")
+    (length(job_id) == 1L && !is.na(job_id) && nzchar(job_id)) ||
+      (identical(as.character(item$status %||% ""), "submitting") &&
+       length(submission_key) == 1L && !is.na(submission_key) &&
+       grepl("^liberation-[a-f0-9]{64}$", submission_key))
   }, pending_jobs)
   ai <- value$ai
   if (!is.list(ai)) ai <- defaults$ai
@@ -460,7 +555,7 @@
     error = function(error) defaults$ai$ollama_url
   )
   list(
-    version = 6L,
+    version = 8L,
     selected_queue = as.character(value$selected_queue %||% "local")[[1L]],
     remotes = remotes, pending_jobs = pending_jobs,
     ai = list(
@@ -483,7 +578,7 @@
                                          ai = list()) {
   path <- .liber_client_settings_path(workspace)
   .nm_workspace_atomic_save(
-    list(version = 6L, selected_queue = as.character(selected_queue)[[1L]],
+    list(version = 8L, selected_queue = as.character(selected_queue)[[1L]],
          remotes = remotes, pending_jobs = pending_jobs,
          ai = list(
            activated = isTRUE(ai$activated), consented = isTRUE(ai$consented),
@@ -575,17 +670,21 @@
     if (length(pending)) {
       virtual <- unname(lapply(pending, function(context) {
         status <- as.character(context$status %||% "queued")
+        visible_job_id <- as.character(context$job_id %||% "")
+        if (!nzchar(visible_job_id)) {
+          visible_job_id <- as.character(context$submission_key %||% "")
+        }
         if (identical(as.character(context$queue_id), as.character(queue_id)) &&
             nrow(jobs) && all(c("id", "status") %in% names(jobs))) {
-          match <- which(as.character(jobs$id) == as.character(context$job_id))
+          match <- which(as.character(jobs$id) == visible_job_id)
           if (length(match)) status <- as.character(jobs$status[[match[[1L]]]])
         }
         list(
-          id = paste0("queue:", context$queue_id, ":", context$job_id),
+          id = paste0("queue:", context$queue_id, ":", visible_job_id),
           label = as.character(context$label %||% "Queued model run"),
           result_type = if (identical(context$type, "simulate")) "simulation" else "estimation",
           method = as.character(context$method %||% context$type %||% "job"),
-          queued_job = TRUE, job_id = as.character(context$job_id),
+          queued_job = TRUE, job_id = visible_job_id,
           queue_id = as.character(context$queue_id), job_status = status,
           run_number = NULL
         )

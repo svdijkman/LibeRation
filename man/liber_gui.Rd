@@ -12,6 +12,7 @@ liber_gui(
   project = NULL,
   session_workspace = FALSE,
   allow_ollama = NULL,
+  allow_ssh_tunnel = NULL,
   launch.browser = TRUE,
   ...
 )
@@ -39,6 +40,10 @@ demonstrations where application users must not share project files.}
 `NULL` enables it only for a locally bound, non-hosted application.
 Remote browser sessions are rejected even when this is `TRUE`. Set this
 to `FALSE` for cluster and hosted deployments.}
+
+\item{allow_ssh_tunnel}{Whether LibeRation may manage a local OpenSSH port
+forward for a remote LibeRties connection. `NULL` enables this only for a
+locally bound, non-hosted application. Hosted sessions cannot enable it.}
 
 \item{launch.browser}{Passed to [shiny::runApp()]. Use `NULL` to return the
 Shiny app object without launching it.}

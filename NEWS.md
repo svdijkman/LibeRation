@@ -1,3 +1,29 @@
+# LibeRation 0.10.2
+
+- Extends the remote-server dialog with an SSH readiness assistant. On Windows
+  it can install the Microsoft OpenSSH Client through the optional-feature
+  mechanism, enable `ssh-agent`, discover or generate protected Ed25519 keys,
+  load a key into the agent, install its public half on either SSH hop, and
+  test the gateway and destination independently. Passwords, key passphrases,
+  MFA challenges, and host-policy decisions remain in visible OpenSSH
+  terminals and are never passed through or retained by LibeRation.
+- Adds a guided SSH-tunnel connection mode to the remote LibeRties dialog.
+  Local desktop sessions can validate and manage a loopback-only OpenSSH port
+  forward, including optional jump-host routing, ssh-agent or identity-file
+  authentication, connection testing, safe host-key handling and automatic
+  session cleanup. Hosted deployments continue to permit direct HTTPS only.
+- Applies a selected identity file to both the destination and jump host using
+  a restrictive ephemeral OpenSSH configuration, avoiding ProxyJump's failure
+  to inherit `-i`. Automatic local-port selection now excludes ports that the
+  operating system reserves even though they do not accept connections.
+- Journals every queued submission before contacting LibeRties and replays an
+  uncertain acknowledgement with a stable, payload-bound idempotency key.
+  A connection loss after server acceptance can therefore recover the original
+  job identifier without creating a duplicate run.
+- Continues automatic reconciliation for completed jobs whose result has not
+  yet been downloaded and saved under its model version. Transient result
+  transfer failures are retried every 30 seconds and survive GUI/R restarts.
+
 # LibeRation 0.10.1
 
 - Requires LibeRtAD 0.8.1 so native builds inherit the complete CppAD

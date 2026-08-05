@@ -498,7 +498,7 @@ test_that("the initial queue refresh runs inside a reactive isolate", {
   expect_match(source, "needs_reconciliation", fixed = TRUE)
   expect_match(source, 'identical(state$active_page, "home")', fixed = TRUE)
   expect_match(source, "!isTRUE(state$comparison_open)", fixed = TRUE)
-  expect_match(source, 'status %in% c("queued", "running")', fixed = TRUE)
+  expect_match(source, ".liber_job_context_needs_reconciliation", fixed = TRUE)
   expect_match(source, "poll_backoff$until", fixed = TRUE)
   expect_match(source, "background = !inherits(q, \"LibeRQueue\")", fixed = TRUE)
 })
@@ -542,6 +542,185 @@ test_that("client queue settings live in the workspace and survive GUI recreatio
   expect_match(favicon_href, "^liberation-assets-")
   expect_false(startsWith(favicon_href, "data:"))
   expect_lt(nchar(favicon_href), 100L)
+})
+
+test_that("durable submission intents survive before a remote job id exists", {
+  skip_if_not_installed("LibeRties")
+  root <- tempfile("gui-submission-intent-")
+  dir.create(root)
+  workspace <- nm_workspace(root)
+  fixture <- estimation_fixture()
+  job <- LibeRties::ls_job(
+    "simulate", fixture$model, fixture$data,
+    arguments = list(nsim = 1L, random_effects = FALSE, residual = FALSE),
+    label = "Durable intent"
+  )
+  key <- LibeRation:::.liber_submission_write(workspace, job)
+  recovered <- LibeRation:::.liber_submission_read(workspace, key)
+  expect_identical(
+    LibeRties::ls_job_to_wire(recovered),
+    LibeRties::ls_job_to_wire(job)
+  )
+
+  pending <- list(intent = list(
+    queue_id = "team", job_id = "", status = "submitting",
+    submission_key = key, project = "demo", version = "version-1"
+  ))
+  LibeRation:::.liber_client_settings_write(
+    workspace, "team", pending_jobs = pending
+  )
+  restored <- LibeRation:::.liber_client_settings_read(workspace)
+  expect_length(restored$pending_jobs, 1L)
+  expect_equal(restored$pending_jobs[[1L]]$submission_key, key)
+  expect_true(LibeRation:::.liber_submission_remove(workspace, key))
+})
+
+durable_gui_test_queue <- function(ambiguous_submit = FALSE,
+                                   result_failures = 0L) {
+  state <- new.env(parent = emptyenv())
+  state$id <- "remote-job-1"
+  state$key <- NULL
+  state$payload <- NULL
+  state$result <- NULL
+  state$submit_calls <- 0L
+  state$ambiguous_submit <- isTRUE(ambiguous_submit)
+  state$ambiguous_reported <- FALSE
+  state$result_failures <- as.integer(result_failures)
+  queue <- new.env(parent = emptyenv())
+  queue$state <- state
+  queue$submit <- function(job, idempotency_key = NULL) {
+    state$submit_calls <- state$submit_calls + 1L
+    payload <- LibeRties::ls_job_manifest(job)$payload_sha256
+    if (is.null(state$key)) {
+      state$key <- idempotency_key
+      state$payload <- payload
+      state$result <- as.data.frame(job$data)
+      state$result$IPRED <- 0
+    } else {
+      if (!identical(state$key, idempotency_key) ||
+          !identical(state$payload, payload)) {
+        stop("idempotent replay changed its key or payload", call. = FALSE)
+      }
+    }
+    if (state$ambiguous_submit && !state$ambiguous_reported) {
+      state$ambiguous_reported <- TRUE
+      stop("connection lost after server acceptance", call. = FALSE)
+    }
+    state$id
+  }
+  queue$list <- function() {
+    if (is.null(state$key)) return(data.frame())
+    data.frame(
+      id = state$id, user = "remote", type = "simulate",
+      label = "Durable simulation", status = "completed",
+      submitted = "2026-08-04T00:00:00Z", started = "2026-08-04T00:00:01Z",
+      finished = "2026-08-04T00:00:02Z", stringsAsFactors = FALSE
+    )
+  }
+  queue$result <- function(id) {
+    if (!identical(as.character(id), state$id)) stop("unknown job")
+    if (state$result_failures > 0L) {
+      state$result_failures <- state$result_failures - 1L
+      stop("temporary result download failure", call. = FALSE)
+    }
+    state$result
+  }
+  queue$logs <- function(id, stream = c("stdout", "stderr")) character()
+  queue$cancel <- function(id) FALSE
+  class(queue) <- "durable_gui_test_queue"
+  queue
+}
+
+test_that("an ambiguous submission response is replayed without duplication", {
+  skip_if_not_installed("LibeRties")
+  root <- tempfile("gui-ambiguous-submit-")
+  dir.create(root)
+  queue <- durable_gui_test_queue(ambiguous_submit = TRUE)
+  app <- liber_gui(workspace = root, queue = queue, launch.browser = NULL)
+  server_function <- app[["serverFuncSource"]]()
+
+  shiny::testServer(server_function, {
+    send <- function(event) {
+      session$setInputs(liber_workbench_event = event)
+      session$flushReact()
+    }
+    send(list(action = "noop", nonce = 0))
+    send(list(
+      action = "project_create", name = "Ambiguous submission",
+      mode = "template", dataSource = "synthetic", example = "sparse",
+      nSubjects = 1L, advan = 1L, trans = 2L, label = "Model",
+      problem = "Submission recovery", nonce = 1
+    ))
+    send(list(action = "simulate", label = "Durable simulation", seed = 7L,
+              replicates = 1L, useDesign = FALSE, nonce = 2))
+    intent <- shiny::isolate(state$job_context)
+    expect_true(any(vapply(intent, function(x) identical(x$status, "submitting"),
+                           logical(1))))
+  })
+
+  persisted <- LibeRation:::.liber_client_settings_read(nm_workspace(root))
+  expect_true(any(vapply(
+    persisted$pending_jobs,
+    function(x) identical(x$status, "submitting"), logical(1)
+  )))
+  restarted <- liber_gui(workspace = root, queue = queue, launch.browser = NULL)
+  restarted_server <- restarted[["serverFuncSource"]]()
+  shiny::testServer(restarted_server, {
+    send <- function(event) {
+      session$setInputs(liber_workbench_event = event)
+      session$flushReact()
+    }
+    send(list(action = "noop", nonce = 0))
+    send(list(action = "jobs_refresh", nonce = 3))
+    contexts <- shiny::isolate(state$job_context)
+    expect_true(any(vapply(contexts, function(x) identical(x$job_id, queue$state$id),
+                           logical(1))))
+  })
+
+  expect_equal(queue$state$submit_calls, 2L)
+  records <- nm_project_list(nm_workspace(root), "ambiguous-submission")
+  expect_equal(sum(records$entry_type == "run"), 1L)
+  expect_equal(records$queue_job_id[records$entry_type == "run"], queue$state$id)
+})
+
+test_that("completed results keep reconciling after a transient download failure", {
+  skip_if_not_installed("LibeRties")
+  root <- tempfile("gui-result-retry-")
+  dir.create(root)
+  queue <- durable_gui_test_queue(result_failures = 1L)
+  app <- liber_gui(workspace = root, queue = queue, launch.browser = NULL)
+  server_function <- app[["serverFuncSource"]]()
+
+  shiny::testServer(server_function, {
+    send <- function(event) {
+      session$setInputs(liber_workbench_event = event)
+      session$flushReact()
+    }
+    send(list(action = "noop", nonce = 0))
+    send(list(
+      action = "project_create", name = "Result retry", mode = "template",
+      dataSource = "synthetic", example = "sparse", nSubjects = 1L,
+      advan = 1L, trans = 2L, label = "Model", problem = "Result recovery",
+      nonce = 1
+    ))
+    send(list(action = "simulate", label = "Durable simulation", seed = 11L,
+              replicates = 1L, useDesign = FALSE, nonce = 2))
+    contexts <- shiny::isolate(state$job_context)
+    key <- names(contexts)[[1L]]
+    expect_equal(contexts[[key]]$status, "completed")
+    run_id <- contexts[[key]]$run_id
+    expect_false(!is.null(run_id) && nzchar(as.character(run_id)))
+    expect_true(LibeRation:::.liber_job_context_needs_reconciliation(
+      contexts[[key]], "local"
+    ))
+    contexts[[key]]$materialize_attempted_at <- "2000-01-01T00:00:00Z"
+    state$job_context <- contexts
+    if (is.function(session$elapse)) session$elapse(3100)
+    session$flushReact()
+  })
+
+  records <- nm_project_list(nm_workspace(root), "result-retry")
+  expect_equal(sum(records$entry_type == "run"), 1L)
 })
 
 test_that("GUI model editing supports full OMEGA matrices and priors", {
