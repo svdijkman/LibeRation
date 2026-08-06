@@ -159,6 +159,12 @@ Install LibeRtAD first, then install LibeRation with R 4.1 or newer and a
 C++17 toolchain. Install LibeRties as well to enable persistent local and
 remote job queues.
 
+The Jobs tab supports HTTPS LibeRties servers, loopback SSH tunnels to a
+LibeRties server, and daemon-free direct SSH submission to Slurm or Grid
+Engine. Both SSH routes accept an optional gateway/jump host. Direct scheduler
+queues persist encrypted job state on the remote account, allowing completed
+work to be recovered after the client disconnects.
+
 Estimation and simulation dialogs can execute the same validated model through
 the native LibeR engine, NONMEM via an administrator-configured PsN `execute`,
 or the optional nlmixr2/rxode2 stack. External engines run on the selected

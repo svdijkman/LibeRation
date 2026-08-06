@@ -87,7 +87,7 @@ test_that("AI settings persist independent WebLLM and Ollama selections", {
     )
   )
   restored <- LibeRation:::.liber_client_settings_read(workspace)
-  expect_equal(restored$version, 8L)
+  expect_equal(restored$version, 9L)
   expect_equal(restored$ai$backend, "ollama")
   expect_equal(restored$ai$ollama_url, "http://localhost:11434")
   expect_equal(restored$ai$ollama_help_model, "qwen3:8b")

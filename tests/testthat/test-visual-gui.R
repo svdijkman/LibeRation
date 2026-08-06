@@ -107,7 +107,7 @@ test_that("single-model AI settings migrate without losing the old choice", {
     )
   ), path)
   settings <- LibeRation:::.liber_client_settings_read(workspace)
-  expect_equal(settings$version, 8L)
+  expect_equal(settings$version, 9L)
   expect_equal(
     settings$ai$help_model,
     "Qwen2.5-1.5B-Instruct-q4f16_1-MLC"

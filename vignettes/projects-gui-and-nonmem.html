@@ -360,9 +360,9 @@ results.</p>
 <span id="cb1-8"><a href="#cb1-8" tabindex="-1"></a>)</span>
 <span id="cb1-9"><a href="#cb1-9" tabindex="-1"></a><span class="fu">nm_project_list</span>(workspace)</span>
 <span id="cb1-10"><a href="#cb1-10" tabindex="-1"></a><span class="co">#&gt;                    id                name                  created</span></span>
-<span id="cb1-11"><a href="#cb1-11" tabindex="-1"></a><span class="co">#&gt; 1 oral-pk-development Oral PK development 2026-08-06T09:26:03.950Z</span></span>
+<span id="cb1-11"><a href="#cb1-11" tabindex="-1"></a><span class="co">#&gt; 1 oral-pk-development Oral PK development 2026-08-06T13:21:38.639Z</span></span>
 <span id="cb1-12"><a href="#cb1-12" tabindex="-1"></a><span class="co">#&gt;                      description                  updated snapshots versions</span></span>
-<span id="cb1-13"><a href="#cb1-13" tabindex="-1"></a><span class="co">#&gt; 1 Example project created from R 2026-08-06T09:26:03.950Z         0        0</span></span></code></pre></div>
+<span id="cb1-13"><a href="#cb1-13" tabindex="-1"></a><span class="co">#&gt; 1 Example project created from R 2026-08-06T13:21:38.639Z         0        0</span></span></code></pre></div>
 <p>Model and data objects are serializable. Compiled external pointers
 are not stored; they are reconstructed when a version or run is
 opened.</p>
@@ -489,6 +489,17 @@ destination separately. Passwords, key passphrases and MFA responses
 stay inside visible OpenSSH terminals; LibeRation does not capture or
 store them. Hosted sessions use direct HTTPS or an externally
 administered network route instead.</p>
+<p>A local desktop session may alternatively select <strong>Direct SSH
+scheduler</strong>. This route does not require a running LibeRties HTTP
+service: LibeRation opens short-lived SSH sessions to a scheduler
+submission host and invokes a fixed LibeRties typed-job entry point
+there. Slurm and Grid Engine are supported, with the same optional jump
+host and key workflow as the tunnel route. The remote R installation
+must contain compatible LibeRties, LibeRation and engine packages, and
+the selected queue root and R library must be visible on compute nodes.
+Scheduler job identifiers and the encrypted queue remain on the cluster,
+so reopening the GUI safely reconciles work completed while
+disconnected.</p>
 <p>See the LibeRties vignettes for service deployment, authentication,
 resource limits, cancellation, logs, and reverse-proxy guidance.</p>
 <p>The simulation and estimation popups also provide an

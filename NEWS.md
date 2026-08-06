@@ -1,3 +1,15 @@
+# LibeRation 0.10.5
+
+- Adds a direct SSH scheduler target beside HTTPS and SSH-tunnelled LibeRties.
+  Local desktop sessions can submit typed jobs straight to Slurm or Grid
+  Engine without an HTTP daemon, including through an optional SSH gateway.
+- Persists scheduler identifiers and an encrypted remote queue so status,
+  logs, cancellation and completed results can be reconciled after either the
+  SSH connection or LibeRation session disappears.
+- Extends the existing SSH readiness and key-management workflow to the direct
+  scheduler route. Scheduler routing fields are validated and no client shell
+  fragment, private key, or queue encryption key is exposed to browser state.
+
 # LibeRation 0.10.4
 
 - Removes institution-specific cluster and gateway host names from the

@@ -493,7 +493,7 @@
 
 .liber_client_settings_read <- function(workspace) {
   path <- .liber_client_settings_path(workspace)
-  defaults <- list(version = 8L, selected_queue = "local", remotes = list(),
+  defaults <- list(version = 9L, selected_queue = "local", remotes = list(),
                    pending_jobs = list(), ai = list(
                      activated = FALSE, consented = FALSE,
                      backend = "webllm",
@@ -513,12 +513,15 @@
   remotes <- Filter(function(item) {
     if (!is.list(item)) return(FALSE)
     mode <- as.character(item$connection_mode %||% "direct")[[1L]]
-    if (identical(mode, "ssh_tunnel")) {
-      ssh <- item$ssh
+    if (mode %in% c("ssh_tunnel", "ssh_scheduler")) {
+      ssh <- if (identical(mode, "ssh_scheduler")) item$scheduler$ssh else item$ssh
       return(
         is.list(ssh) && length(ssh$host) == 1L && !is.na(ssh$host) &&
           nzchar(ssh$host) && length(ssh$user) == 1L && !is.na(ssh$user) &&
-          nzchar(ssh$user)
+          nzchar(ssh$user) && (!identical(mode, "ssh_scheduler") ||
+            (is.list(item$scheduler) &&
+             as.character(item$scheduler$backend %||% "") %in% c("slurm", "grid_engine") &&
+             grepl("^[a-fA-F0-9]{64}$", as.character(item$scheduler$storage_key %||% ""))))
       )
     }
     length(item$url) == 1L && !is.na(item$url) && nzchar(item$url)
@@ -555,7 +558,7 @@
     error = function(error) defaults$ai$ollama_url
   )
   list(
-    version = 8L,
+    version = 9L,
     selected_queue = as.character(value$selected_queue %||% "local")[[1L]],
     remotes = remotes, pending_jobs = pending_jobs,
     ai = list(
@@ -578,7 +581,7 @@
                                          ai = list()) {
   path <- .liber_client_settings_path(workspace)
   .nm_workspace_atomic_save(
-    list(version = 8L, selected_queue = as.character(selected_queue)[[1L]],
+    list(version = 9L, selected_queue = as.character(selected_queue)[[1L]],
          remotes = remotes, pending_jobs = pending_jobs,
          ai = list(
            activated = isTRUE(ai$activated), consented = isTRUE(ai$consented),

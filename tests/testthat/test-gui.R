@@ -52,7 +52,7 @@ test_that("legacy workbench layout and workflow controls are present", {
     fixed = TRUE
   )
   expect_match(source, '"Dose amounts (TIME AMT per line, or AMT only)"', fixed = TRUE)
-  expect_match(source, '"Edit server"', fixed = TRUE)
+  expect_match(source, '"Edit target"', fixed = TRUE)
   expect_match(source, 'Manual X breaks', fixed = TRUE)
   expect_match(source, 'function CodeEditor', fixed = TRUE)
   expect_match(style, 'lw-syntax-parameter', fixed = TRUE)

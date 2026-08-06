@@ -1,7 +1,7 @@
 Package: LibeRation
 Type: Package
 Title: Population Pharmacometric Simulation and Estimation
-Version: 0.10.4
+Version: 0.10.5
 Authors@R: person("Sven C.", "van Dijkman",
     email = "svdijkman@users.noreply.github.com", role = c("aut", "cre"))
 Author: Sven C. van Dijkman [aut, cre]
@@ -70,7 +70,8 @@ Suggests:
     testthat (>= 3.0.0)
 VignetteBuilder: knitr
 SystemRequirements: C++17; optional licensed NONMEM with PsN execute for
-    NONMEM-backed jobs; optional OpenSSH client for managed remote tunnels;
+    NONMEM-backed jobs; optional OpenSSH client for managed remote tunnels and
+    direct Slurm/Grid Engine queues;
     optional WebGPU-capable browser or local Ollama service for AI assistance
 Config/testthat/edition: 3
 Config/roxygen2/version: 8.0.0

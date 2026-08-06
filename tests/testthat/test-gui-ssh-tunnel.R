@@ -62,7 +62,7 @@ test_that("SSH remote definitions survive client-settings upgrades", {
     workspace, selected_queue = "cluster", remotes = list(cluster = remote)
   )
   restored <- LibeRation:::.liber_client_settings_read(workspace)
-  expect_equal(restored$version, 8L)
+  expect_equal(restored$version, 9L)
   expect_equal(restored$selected_queue, "cluster")
   expect_equal(restored$remotes$cluster$connection_mode, "ssh_tunnel")
   expect_equal(restored$remotes$cluster$ssh$host, "login.cluster.example.org")

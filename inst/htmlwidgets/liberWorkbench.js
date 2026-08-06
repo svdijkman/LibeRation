@@ -1583,6 +1583,13 @@
     var sshRemoteHost = React.useState("127.0.0.1"), sshRemotePort = React.useState(8000), sshLocalPort = React.useState(0);
     var sshUseJump = React.useState(false), sshJumpHost = React.useState(""), sshJumpUser = React.useState(""), sshJumpPort = React.useState(22);
     var sshIdentityFile = React.useState(""), sshAcceptNew = React.useState(true), sshAutoStart = React.useState(true);
+    var schedulerBackend = React.useState("slurm"), schedulerQueueName = React.useState("default"), schedulerRoot = React.useState("");
+    var schedulerRscript = React.useState("Rscript"), schedulerMaxWorkers = React.useState(8), schedulerMaxCores = React.useState(64);
+    var schedulerMaxQueued = React.useState(100), schedulerMaxRuntime = React.useState(86400), schedulerMaxCpu = React.useState(604800), schedulerMaxMemory = React.useState(4096);
+    var schedulerPartition = React.useState(""), schedulerAccount = React.useState(""), schedulerQos = React.useState(""), schedulerConstraint = React.useState("");
+    var schedulerQueue = React.useState(""), schedulerProject = React.useState(""), schedulerPE = React.useState("smp");
+    var schedulerMemoryResource = React.useState("mem"), schedulerRuntimeResource = React.useState("h_rt"), schedulerTmpfsResource = React.useState("tmpfs");
+    var schedulerMemoryPerCore = React.useState(true), schedulerTmpfsMb = React.useState("");
     var queues = list(props.server.queues), selectedQueue = queues.filter(function (queue) { return queue.id === props.server.queue_id; })[0] || {};
     var connectionTest = props.server.connection_test || {};
     var sshSetup = props.server.ssh_setup || {}, sshKeys = list(sshSetup.keys), sshAgent = sshSetup.agent || {};
@@ -1595,7 +1602,10 @@
         id:remoteEditId[0],name:remoteName[0],url:remoteUrl[0],token:remoteToken[0],connectionMode:remoteMode[0],
         sshHost:sshHost[0],sshUser:sshUser[0],sshPort:sshPort[0],sshRemoteHost:sshRemoteHost[0],sshRemotePort:sshRemotePort[0],sshLocalPort:sshLocalPort[0],
         sshUseJump:sshUseJump[0],sshJumpHost:sshJumpHost[0],sshJumpUser:sshJumpUser[0],sshJumpPort:sshJumpPort[0],sshIdentityFile:sshIdentityFile[0],
-        sshAcceptNew:sshAcceptNew[0],sshAutoStart:sshAutoStart[0]
+        sshAcceptNew:sshAcceptNew[0],sshAutoStart:sshAutoStart[0],
+        schedulerBackend:schedulerBackend[0],schedulerQueueName:schedulerQueueName[0],schedulerRoot:schedulerRoot[0],schedulerRscript:schedulerRscript[0],
+        schedulerMaxWorkers:schedulerMaxWorkers[0],schedulerMaxCores:schedulerMaxCores[0],schedulerMaxQueued:schedulerMaxQueued[0],schedulerMaxRuntime:schedulerMaxRuntime[0],schedulerMaxCpu:schedulerMaxCpu[0],schedulerMaxMemory:schedulerMaxMemory[0],schedulerPartition:schedulerPartition[0],schedulerAccount:schedulerAccount[0],schedulerQos:schedulerQos[0],schedulerConstraint:schedulerConstraint[0],
+        schedulerQueue:schedulerQueue[0],schedulerProject:schedulerProject[0],schedulerParallelEnvironment:schedulerPE[0],schedulerMemoryResource:schedulerMemoryResource[0],schedulerRuntimeResource:schedulerRuntimeResource[0],schedulerTmpfsResource:schedulerTmpfsResource[0],schedulerMemoryPerCore:schedulerMemoryPerCore[0],schedulerTmpfsMb:schedulerTmpfsMb[0]
       };
     }
     function sshAction(action, extra) { emit(props,action,Object.assign(remotePayload(),extra||{})); }
@@ -1606,13 +1616,17 @@
       else window.prompt("Copy this public key",key);
     }
     function openRemote(queue) {
-      queue=queue||{};var ssh=queue.ssh||{};
+      queue=queue||{};var ssh=queue.ssh||{},scheduler=queue.scheduler||{},schedulerLimits=scheduler.limits||{};
       remoteEditId[1](queue.id||null);remoteName[1](value(queue.name,"Remote server"));remoteUrl[1](value(queue.url,"https://"));remoteToken[1]("");
       remoteMode[1](value(queue.connection_mode,"direct"));sshHost[1](value(ssh.host,""));sshUser[1](value(ssh.user,""));sshPort[1](Number(value(ssh.port,22)));
       sshRemoteHost[1](value(ssh.remote_host,"127.0.0.1"));sshRemotePort[1](Number(value(ssh.remote_port,8000)));sshLocalPort[1](Number(value(ssh.local_port,0)));
       sshUseJump[1](!!ssh.proxy_host);sshJumpHost[1](value(ssh.proxy_host,""));sshJumpUser[1](value(ssh.proxy_user,""));sshJumpPort[1](Number(value(ssh.proxy_port,22)));
       var initialIdentity=value(ssh.identity_file,value(sshSetup.recommended_key,""));
       sshIdentityFile[1](initialIdentity);sshAcceptNew[1](ssh.accept_new_host_key!==false);sshAutoStart[1](ssh.auto_start!==false);
+      schedulerBackend[1](value(scheduler.backend,"slurm"));schedulerQueueName[1](value(scheduler.queue_name,"default"));schedulerRoot[1](value(scheduler.root,""));schedulerRscript[1](value(scheduler.remote_rscript,"Rscript"));
+      schedulerMaxWorkers[1](Number(value(scheduler.max_workers,8)));schedulerMaxCores[1](Number(value(scheduler.max_cores_per_job,64)));schedulerPartition[1](value(scheduler.partition,""));schedulerAccount[1](value(scheduler.account,""));schedulerQos[1](value(scheduler.qos,""));schedulerConstraint[1](value(scheduler.constraint,""));
+      schedulerMaxQueued[1](Number(value(schedulerLimits.max_queued_jobs,100)));schedulerMaxRuntime[1](Number(value(schedulerLimits.max_runtime_seconds,86400)));schedulerMaxCpu[1](Number(value(schedulerLimits.max_cpu_seconds,604800)));schedulerMaxMemory[1](Number(value(schedulerLimits.max_memory_mb,4096)));
+      schedulerQueue[1](value(scheduler.queue,""));schedulerProject[1](value(scheduler.project,""));schedulerPE[1](value(scheduler.parallel_environment,"smp"));schedulerMemoryResource[1](value(scheduler.memory_resource,"mem"));schedulerRuntimeResource[1](value(scheduler.runtime_resource,"h_rt"));schedulerTmpfsResource[1](value(scheduler.tmpfs_resource,"tmpfs"));schedulerMemoryPerCore[1](scheduler.memory_per_core!==false);schedulerTmpfsMb[1](value(scheduler.tmpfs_mb,""));
       remoteTesting[1](false);emit(props,"queue_test_reset",{sshIdentityFile:initialIdentity});remoteModal[1](true);
     }
     React.useEffect(function () { var timer = window.setInterval(function () { emit(props, "jobs_refresh"); }, Math.max(1, poll[0]) * 1000); return function () { window.clearInterval(timer); }; }, [poll[0], props.inputId]);
@@ -1624,10 +1638,10 @@
           e(Button, { className: "lw-button-quiet", onClick: function () { emit(props, "jobs_refresh"); } }, "Refresh"),
           e(Button, { className: "lw-button-warning", disabled: !selected[0], onClick: function () { emit(props, "job_cancel", { id: selected[0] }); } }, "Cancel selected"),
           e(Button, { className: "lw-button-quiet", onClick: function () { emit(props, "jobs_clear"); } }, "Clear finished"),
-          e(Button, { className: "lw-button-quiet", onClick: function () { openRemote(null); } }, "Add server"),
-          e(Button, { className: "lw-button-quiet", disabled: value(props.server.queue_id, "local") === "local", onClick: function () { openRemote(selectedQueue); } }, "Edit server"),
-          e(Button, { className: "lw-button-danger", disabled: value(props.server.queue_id, "local") === "local", onClick: function () { emit(props, "queue_remove", { id: props.server.queue_id }); } }, "Remove server"))),
-      e("div", { className: "lw-jobs-clock" }, value(props.server.refreshed, "Queue ready"), " | LibeRation ", value(props.server.package_version,"unknown"), props.server.queue_root ? " | "+props.server.queue_root : "", selectedQueue && selectedQueue.connection_mode === "ssh_tunnel" ? " | SSH: " + value(selectedQueue.tunnel_status, "disconnected") : ""),
+          e(Button, { className: "lw-button-quiet", onClick: function () { openRemote(null); } }, "Add target"),
+          e(Button, { className: "lw-button-quiet", disabled: value(props.server.queue_id, "local") === "local", onClick: function () { openRemote(selectedQueue); } }, "Edit target"),
+          e(Button, { className: "lw-button-danger", disabled: value(props.server.queue_id, "local") === "local", onClick: function () { emit(props, "queue_remove", { id: props.server.queue_id }); } }, "Remove target"))),
+      e("div", { className: "lw-jobs-clock" }, value(props.server.refreshed, "Queue ready"), " | LibeRation ", value(props.server.package_version,"unknown"), props.server.queue_root ? " | "+props.server.queue_root : "", selectedQueue && (selectedQueue.connection_mode === "ssh_tunnel" || selectedQueue.connection_mode === "ssh_scheduler") ? " | SSH: " + value(selectedQueue.tunnel_status, "disconnected") : ""),
       e(Panel, { title: "Jobs", subtitle: jobs.length + " jobs", className: "lw-jobs-table-panel" },
         jobs.length ? e("div", { className: "lw-job-tree" }, jobs.map(function (job, index) { var id = value(job.id, String(index)); return e("div", { key: id, className: "lw-job-row " + (selected[0] === id ? "selected" : ""), onClick: function () { selected[1](id); emit(props, "job_select", { id: id }); } },
           e(StatusDot, { status: job.status === "failed" ? "error" : job.status === "completed" ? "ready" : "running" }),
@@ -1638,7 +1652,7 @@
       e("p", { className: "lw-muted lw-worker-location" }, value(props.server.worker, "in-process"), " | ", value(props.server.isolation, "current R session")),
       e(Modal, {
         open: remoteModal[0], className:"lw-modal-wide", onClose: function () { remoteModal[1](false); },
-        title: remoteEditId[0] ? "Edit remote LibeRties server" : "Add remote LibeRties server",
+        title: remoteEditId[0] ? "Edit remote execution target" : "Add remote execution target",
         footer: e(React.Fragment,null,
           e(Button,{className:"lw-button-quiet",onClick:function(){remoteModal[1](false);}},"Cancel"),
           e(Button,{className:"lw-button-quiet",disabled:remoteTesting[0],onClick:function(){remoteTesting[1](true);emit(props,"queue_test",remotePayload());}},remoteTesting[0]?"Testing...":"Test connection"),
@@ -1652,13 +1666,14 @@
           e("h4",null,"Connection route"),
           e("div",{className:"lw-choice-row"},
             e("label",{className:"lw-check"},e("input",{type:"radio",name:"remote-connection-mode",checked:remoteMode[0]==="direct",onChange:function(){remoteMode[1]("direct");}})," Direct HTTPS"),
-            e("label",{className:"lw-check",title:props.server.ssh_tunnel_allowed?"Create a loopback-only OpenSSH port forward":"Available only in a local LibeRation session"},e("input",{type:"radio",name:"remote-connection-mode",disabled:!props.server.ssh_tunnel_allowed,checked:remoteMode[0]==="ssh_tunnel",onChange:function(){remoteMode[1]("ssh_tunnel");}})," SSH tunnel")),
-          e("p",{className:"lw-help-text"},remoteMode[0]==="ssh_tunnel"?"LibeRation starts OpenSSH on this computer and connects LibeRties through a loopback-only forwarded port.":"Use the maintained HTTPS address exposed by the LibeRties reverse proxy.")),
+            e("label",{className:"lw-check",title:props.server.ssh_tunnel_allowed?"Create a loopback-only OpenSSH port forward":"Available only in a local LibeRation session"},e("input",{type:"radio",name:"remote-connection-mode",disabled:!props.server.ssh_tunnel_allowed,checked:remoteMode[0]==="ssh_tunnel",onChange:function(){remoteMode[1]("ssh_tunnel");}})," SSH tunnel"),
+            e("label",{className:"lw-check",title:props.server.ssh_tunnel_allowed?"Submit directly through an SSH login host":"Available only in a local LibeRation session"},e("input",{type:"radio",name:"remote-connection-mode",disabled:!props.server.ssh_tunnel_allowed,checked:remoteMode[0]==="ssh_scheduler",onChange:function(){remoteMode[1]("ssh_scheduler");}})," Direct SSH scheduler")),
+          e("p",{className:"lw-help-text"},remoteMode[0]==="ssh_tunnel"?"LibeRation starts OpenSSH on this computer and connects LibeRties through a loopback-only forwarded port.":remoteMode[0]==="ssh_scheduler"?"LibeRation invokes a fixed typed-job command over SSH and submits directly to Slurm or Grid Engine; no LibeRties HTTP service is required.":"Use the maintained HTTPS address exposed by the LibeRties reverse proxy.")),
         remoteMode[0]==="direct"?
           e(Field, { label: "Server URL" }, e("input", { value: remoteUrl[0], placeholder:"https://liberties.example.org", onChange: function (event) { remoteUrl[1](event.target.value); } })):
           e(React.Fragment,null,
             e("div",{className:"lw-modal-section lw-modal-section-tinted lw-ssh-readiness"},
-              e("div",{className:"lw-ssh-section-heading"},e("div",null,e("h4",null,"SSH readiness"),e("p",{className:"lw-help-text"},"LibeRation checks this computer before opening a tunnel.")),e(Button,{className:"lw-button-quiet",onClick:function(){sshAction("ssh_setup_refresh");}},"Refresh")),
+              e("div",{className:"lw-ssh-section-heading"},e("div",null,e("h4",null,"SSH readiness"),e("p",{className:"lw-help-text"},"LibeRation checks this computer before opening the selected SSH route.")),e(Button,{className:"lw-button-quiet",onClick:function(){sshAction("ssh_setup_refresh");}},"Refresh")),
               e("div",{className:"lw-ssh-readiness-grid"},
                 e("div",{className:"lw-ssh-readiness-row"},e(StatusDot,{status:sshSetup.available?"ready":"error"}),e("div",null,e("strong",null,"OpenSSH Client"),e("small",null,sshSetup.available?value(sshSetup.version,"Available")+" · "+value(sshSetup.ssh_path,""):"Not detected"))),
                 e("div",{className:"lw-ssh-readiness-row"},e(StatusDot,{status:sshIdentityFile[0]?"ready":sshKeys.length?"running":"error"}),e("div",null,e("strong",null,"Authentication key"),e("small",null,sshIdentityFile[0]?sshIdentityFile[0]:sshKeys.length?sshKeys.length+" key(s) discovered":"No standard key discovered"))),
@@ -1679,12 +1694,40 @@
                 e(Field,{label:"SSH port"},e("input",{type:"number",min:1,max:65535,value:sshPort[0],onChange:function(event){sshPort[1](Number(event.target.value));}})),
                 e(Field,{label:"Identity file (optional)"},e("input",{value:sshIdentityFile[0],placeholder:"Use ssh-agent or enter a local key path",onChange:function(event){sshIdentityFile[1](event.target.value);}}))),
               selectedSshKey.public_key?e("div",{className:"lw-ssh-public-key"},e("div",{className:"lw-ssh-section-heading"},e("div",null,e("strong",null,"Public key"),e("small",null,value(selectedSshKey.fingerprint,"Matching .pub file found"))),e(Button,{className:"lw-button-link",onClick:copyPublicKey},"Copy")),e("textarea",{readOnly:true,rows:2,value:selectedSshKey.public_key}),e("div",{className:"lw-inline-actions"},sshUseJump[0]?e(Button,{className:"lw-button-quiet",onClick:function(){sshAction("ssh_install_public_key",{hop:"gateway"});}},"Install on gateway…"):null,e(Button,{className:"lw-button-quiet",onClick:function(){sshAction("ssh_install_public_key",{hop:"destination"});}},"Install on destination…"))):null),
-            e("div",{className:"lw-modal-section lw-modal-section-tinted"},e("h4",null,"2. Remote LibeRties endpoint"),
+            remoteMode[0]==="ssh_tunnel"?e("div",{className:"lw-modal-section lw-modal-section-tinted"},e("h4",null,"2. Remote LibeRties endpoint"),
               e("div",{className:"lw-form-grid lw-form-grid-two"},
                 e(Field,{label:"Remote host"},e("input",{value:sshRemoteHost[0],onChange:function(event){sshRemoteHost[1](event.target.value);}})),
                 e(Field,{label:"Remote port"},e("input",{type:"number",min:1,max:65535,value:sshRemotePort[0],onChange:function(event){sshRemotePort[1](Number(event.target.value));}})),
                 e(Field,{label:"Local forwarded port"},e("input",{type:"number",min:0,max:65535,value:sshLocalPort[0],onChange:function(event){sshLocalPort[1](Number(event.target.value));}}))),
-              e("p",{className:"lw-help-text"},"Use 0 for an automatically selected local port. The local listener is always restricted to 127.0.0.1.")),
+              e("p",{className:"lw-help-text"},"Use 0 for an automatically selected local port. The local listener is always restricted to 127.0.0.1.")):
+              e("div",{className:"lw-modal-section lw-modal-section-tinted"},e("h4",null,"2. Scheduler queue"),
+                e("div",{className:"lw-form-grid lw-form-grid-two"},
+                  e(Field,{label:"Scheduler"},e("select",{value:schedulerBackend[0],onChange:function(event){schedulerBackend[1](event.target.value);}},e("option",{value:"slurm"},"Slurm"),e("option",{value:"grid_engine"},"Grid Engine"))),
+                  e(Field,{label:"Persistent queue name"},e("input",{value:schedulerQueueName[0],onChange:function(event){schedulerQueueName[1](event.target.value);}})),
+                  e(Field,{label:"Remote queue root (optional)"},e("input",{value:schedulerRoot[0],placeholder:"Default: ~/.local/share/LibeR/direct-queues/<name>",onChange:function(event){schedulerRoot[1](event.target.value);}})),
+                  e(Field,{label:"Remote Rscript command/path"},e("input",{value:schedulerRscript[0],onChange:function(event){schedulerRscript[1](event.target.value);}})),
+                  e(Field,{label:"Maximum concurrent jobs"},e("input",{type:"number",min:1,value:schedulerMaxWorkers[0],onChange:function(event){schedulerMaxWorkers[1](Number(event.target.value));}})),
+                  e(Field,{label:"Maximum cores per job"},e("input",{type:"number",min:1,value:schedulerMaxCores[0],onChange:function(event){schedulerMaxCores[1](Number(event.target.value));}})),
+                  e(Field,{label:"Maximum queued jobs"},e("input",{type:"number",min:1,value:schedulerMaxQueued[0],onChange:function(event){schedulerMaxQueued[1](Number(event.target.value));}})),
+                  e(Field,{label:"Memory per job (MB)"},e("input",{type:"number",min:1,value:schedulerMaxMemory[0],onChange:function(event){schedulerMaxMemory[1](Number(event.target.value));}})),
+                  e(Field,{label:"Wall time per job (seconds)"},e("input",{type:"number",min:1,value:schedulerMaxRuntime[0],onChange:function(event){schedulerMaxRuntime[1](Number(event.target.value));}})),
+                  e(Field,{label:"CPU time per job (seconds)"},e("input",{type:"number",min:1,value:schedulerMaxCpu[0],onChange:function(event){schedulerMaxCpu[1](Number(event.target.value));}}))),
+                schedulerBackend[0]==="slurm"?e("div",{className:"lw-form-grid lw-form-grid-two"},
+                  e(Field,{label:"Partition (optional)"},e("input",{value:schedulerPartition[0],onChange:function(event){schedulerPartition[1](event.target.value);}})),
+                  e(Field,{label:"Account (optional)"},e("input",{value:schedulerAccount[0],onChange:function(event){schedulerAccount[1](event.target.value);}})),
+                  e(Field,{label:"QoS (optional)"},e("input",{value:schedulerQos[0],onChange:function(event){schedulerQos[1](event.target.value);}})),
+                  e(Field,{label:"Constraint (optional)"},e("input",{value:schedulerConstraint[0],onChange:function(event){schedulerConstraint[1](event.target.value);}}))):
+                  e(React.Fragment,null,
+                    e("div",{className:"lw-form-grid lw-form-grid-two"},
+                      e(Field,{label:"Queue (optional)"},e("input",{value:schedulerQueue[0],onChange:function(event){schedulerQueue[1](event.target.value);}})),
+                      e(Field,{label:"Project (optional)"},e("input",{value:schedulerProject[0],onChange:function(event){schedulerProject[1](event.target.value);}})),
+                      e(Field,{label:"Parallel environment"},e("input",{value:schedulerPE[0],onChange:function(event){schedulerPE[1](event.target.value);}})),
+                      e(Field,{label:"Memory resource"},e("input",{value:schedulerMemoryResource[0],onChange:function(event){schedulerMemoryResource[1](event.target.value);}})),
+                      e(Field,{label:"Runtime resource"},e("input",{value:schedulerRuntimeResource[0],onChange:function(event){schedulerRuntimeResource[1](event.target.value);}})),
+                      e(Field,{label:"tmpfs resource"},e("input",{value:schedulerTmpfsResource[0],onChange:function(event){schedulerTmpfsResource[1](event.target.value);}})),
+                      e(Field,{label:"tmpfs MB (optional)"},e("input",{type:"number",min:1,value:schedulerTmpfsMb[0],onChange:function(event){schedulerTmpfsMb[1](event.target.value);}}))),
+                    e("label",{className:"lw-check"},e("input",{type:"checkbox",checked:schedulerMemoryPerCore[0],onChange:function(event){schedulerMemoryPerCore[1](event.target.checked);}})," Grid Engine memory resource is per core")),
+                e("p",{className:"lw-help-text"},"The remote login host must provide R, LibeRties and the selected scheduler commands. Package libraries and the queue root must be visible from compute nodes.")),
             e("div",{className:"lw-modal-section"},e("h4",null,"3. Optional jump host"),
               e("label",{className:"lw-check"},e("input",{type:"checkbox",checked:sshUseJump[0],onChange:function(event){sshUseJump[1](event.target.checked);}})," Connect through an SSH gateway"),
               sshUseJump[0]?e("div",{className:"lw-form-grid"},
@@ -1694,11 +1737,11 @@
               e("div",{className:"lw-inline-actions"},sshUseJump[0]?e(Button,{className:"lw-button-quiet",onClick:function(){sshAction("ssh_test_hop",{hop:"gateway"});}},"Test gateway"):null,e(Button,{className:"lw-button-quiet",onClick:function(){sshAction("ssh_test_hop",{hop:"destination"});}},sshUseJump[0]?"Test destination through gateway":"Test destination"))),
             e("div",{className:"lw-modal-section lw-modal-section-tinted"},e("h4",null,"4. Safety and lifecycle"),
               e("label",{className:"lw-check"},e("input",{type:"checkbox",checked:sshAcceptNew[0],onChange:function(event){sshAcceptNew[1](event.target.checked);}})," Accept a new host key, but reject a changed key"),
-              e("label",{className:"lw-check"},e("input",{type:"checkbox",checked:sshAutoStart[0],onChange:function(event){sshAutoStart[1](event.target.checked);}})," Reopen this tunnel when the local GUI starts"),
-              e("p",{className:"lw-help-text"},"The tunnel closes with this LibeRation session. Saved settings contain host names, ports and an optional key path, but no SSH password or key material."))),
-        e(Field, { label: "Bearer token" }, e("input", { type: "password", value: remoteToken[0], placeholder:remoteEditId[0]?"Leave blank to keep saved token":"Required", onChange: function (event) { remoteToken[1](event.target.value); } })),
+              remoteMode[0]==="ssh_tunnel"?e("label",{className:"lw-check"},e("input",{type:"checkbox",checked:sshAutoStart[0],onChange:function(event){sshAutoStart[1](event.target.checked);}})," Reopen this tunnel when the local GUI starts"):null,
+              e("p",{className:"lw-help-text"},remoteMode[0]==="ssh_tunnel"?"The tunnel closes with this LibeRation session. Saved settings contain host names, ports and an optional key path, but no SSH password or key material.":"Each operation opens a short-lived SSH session. The scheduler job and encrypted queue survive client disconnection; reconnecting reconciles their durable state."))),
+        remoteMode[0]!=="ssh_scheduler"?e(Field, { label: "Bearer token" }, e("input", { type: "password", value: remoteToken[0], placeholder:remoteEditId[0]?"Leave blank to keep saved token":"Required", onChange: function (event) { remoteToken[1](event.target.value); } })):null,
         connectionTest.status&&connectionTest.status!=="idle"?e("div",{className:connectionTest.status==="error"?"lw-destructive-note":"lw-info-banner"},connectionTest.message):null,
-        e("p",{className:"lw-help-text"},"Server definitions and tokens are stored in the workspace settings directory so they survive package upgrades. The settings file is restricted to the current OS user where supported.")
+        e("p",{className:"lw-help-text"},"Connection definitions, API tokens and direct-queue encryption keys are stored in the workspace settings directory so they survive package upgrades. The settings file is restricted to the current OS user where supported.")
       ))
     );
   }

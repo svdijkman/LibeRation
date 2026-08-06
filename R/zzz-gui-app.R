@@ -187,7 +187,9 @@ liber_gui <- function(model = NULL, data = NULL, queue = NULL,
       for (id in names(saved_remote_config)) {
         config <- saved_remote_config[[id]]
         mode <- as.character(config$connection_mode %||% "direct")[[1L]]
-        tunnel_status <- if (identical(mode, "ssh_tunnel")) "Not started" else "Direct"
+        tunnel_status <- if (identical(mode, "ssh_tunnel")) "Not started" else if (
+          identical(mode, "ssh_scheduler")
+        ) "SSH on demand" else "Direct"
         url <- as.character(config$url %||% "")[[1L]]
         if (identical(mode, "ssh_tunnel")) {
           ssh <- tryCatch(
@@ -213,17 +215,23 @@ liber_gui <- function(model = NULL, data = NULL, queue = NULL,
             tunnel_status <- "Unavailable in this hosted session"
           }
         }
-        remote <- tryCatch(
-          LibeRties::ls_remote(url, config$token,
-                               timeout = config$timeout %||% 30),
-          error = function(error) NULL
-        )
+        remote <- tryCatch(if (identical(mode, "ssh_scheduler")) {
+          if (!isTRUE(ssh_tunnel_allowed)) NULL else
+            .liber_direct_scheduler(config$scheduler, timeout = config$timeout %||% 30)
+        } else {
+          LibeRties::ls_remote(url, config$token, timeout = config$timeout %||% 30)
+        }, error = function(error) NULL)
         if (is.null(remote)) next
         saved_remote_queues[[id]] <- remote
         saved_remote_meta[[id]] <- list(
           name = config$name %||% "Remote server", url = remote$url,
           user = config$user %||% "", connection_mode = mode,
-          ssh = if (identical(mode, "ssh_tunnel")) config$ssh else NULL,
+          ssh = if (identical(mode, "ssh_tunnel")) config$ssh else if (
+            identical(mode, "ssh_scheduler")
+          ) config$scheduler$ssh else NULL,
+          scheduler = if (identical(mode, "ssh_scheduler")) {
+            .liber_direct_scheduler_public_config(config$scheduler)
+          } else NULL,
           tunnel_status = tunnel_status
         )
       }
@@ -234,10 +242,8 @@ liber_gui <- function(model = NULL, data = NULL, queue = NULL,
       selected_queue <- "local"
     }
     if (!identical(selected_queue, "local") && !isTRUE(ssh_tunnel_allowed) &&
-        identical(
-          as.character(saved_remote_config[[selected_queue]]$connection_mode %||% "direct"),
-          "ssh_tunnel"
-        )) {
+        as.character(saved_remote_config[[selected_queue]]$connection_mode %||% "direct") %in%
+          c("ssh_tunnel", "ssh_scheduler")) {
       selected_queue <- "local"
     }
     initial_jobs <- if (identical(selected_queue, "local") && !is.null(queue)) {
@@ -365,9 +371,17 @@ liber_gui <- function(model = NULL, data = NULL, queue = NULL,
         }
       }
       if (is.null(remote)) {
-        remote <- LibeRties::ls_remote(
+        remote <- if (identical(mode, "ssh_scheduler")) {
+          if (!isTRUE(ssh_tunnel_allowed)) {
+            .nm_stop("Direct SSH scheduler queues are unavailable in this hosted session.")
+          }
+          .liber_direct_scheduler(config$scheduler, timeout = config$timeout %||% 30)
+        } else LibeRties::ls_remote(
           config$url, config$token, timeout = config$timeout %||% 30
         )
+        queues <- state$remote_queues
+        queues[[id]] <- remote
+        state$remote_queues <- queues
       }
       if (isTRUE(authenticate)) remote$authenticate()
       remote
@@ -386,6 +400,37 @@ liber_gui <- function(model = NULL, data = NULL, queue = NULL,
         auto_start = isTRUE(event$sshAutoStart)
       ), check_identity = check_identity)
     }
+    scheduler_event_config <- function(event, previous = NULL, check_identity = TRUE) {
+      previous_scheduler <- previous$scheduler %||% list()
+      storage_key <- as.character(previous_scheduler$storage_key %||% "")[[1L]]
+      if (!nzchar(storage_key)) storage_key <- LibeRties::ls_generate_storage_key()
+      .liber_direct_scheduler_normalize(list(
+        backend = event$schedulerBackend,
+        queue_name = event$schedulerQueueName,
+        root = event$schedulerRoot,
+        remote_rscript = event$schedulerRscript,
+        max_workers = event$schedulerMaxWorkers,
+        max_cores_per_job = event$schedulerMaxCores,
+        max_queued_jobs = event$schedulerMaxQueued,
+        max_runtime_seconds = event$schedulerMaxRuntime,
+        max_cpu_seconds = event$schedulerMaxCpu,
+        max_memory_mb = event$schedulerMaxMemory,
+        partition = event$schedulerPartition,
+        account = event$schedulerAccount,
+        qos = event$schedulerQos,
+        constraint = event$schedulerConstraint,
+        queue = event$schedulerQueue,
+        project = event$schedulerProject,
+        parallel_environment = event$schedulerParallelEnvironment,
+        memory_resource = event$schedulerMemoryResource,
+        runtime_resource = event$schedulerRuntimeResource,
+        tmpfs_resource = event$schedulerTmpfsResource,
+        memory_per_core = isTRUE(event$schedulerMemoryPerCore),
+        tmpfs_mb = event$schedulerTmpfsMb,
+        user = "local", storage_key = storage_key,
+        ssh = ssh_event_config(event, check_identity = check_identity)
+      ), check_identity = check_identity)
+    }
     update_ssh_setup <- function(identity_file = "", status = "idle", message = "",
                                  extra = list()) {
       value <- .liber_ssh_readiness(
@@ -397,8 +442,8 @@ liber_gui <- function(model = NULL, data = NULL, queue = NULL,
     }
     remote_event_config <- function(event, previous = NULL) {
       mode <- tolower(trimws(as.character(event$connectionMode %||% "direct")[[1L]]))
-      if (!mode %in% c("direct", "ssh_tunnel")) {
-        .nm_stop("Connection mode must be direct or SSH tunnel.")
+      if (!mode %in% c("direct", "ssh_tunnel", "ssh_scheduler")) {
+        .nm_stop("Connection mode must be direct, SSH tunnel, or direct SSH scheduler.")
       }
       config <- list(
         name = trimws(as.character(event$name %||% "Remote server")[[1L]]),
@@ -409,25 +454,34 @@ liber_gui <- function(model = NULL, data = NULL, queue = NULL,
       if (identical(mode, "direct")) {
         config$url <- trimws(as.character(event$url %||% "")[[1L]])
         if (!nzchar(config$url)) .nm_stop("Enter the remote LibeRties server URL.")
-      } else {
+      } else if (identical(mode, "ssh_tunnel")) {
         if (!isTRUE(ssh_tunnel_allowed)) {
           .nm_stop("Managed SSH tunnels are unavailable in this hosted session.")
         }
         config$ssh <- ssh_event_config(event)
+      } else {
+        if (!isTRUE(ssh_tunnel_allowed)) {
+          .nm_stop("Direct SSH scheduler queues are unavailable in this hosted session.")
+        }
+        config$scheduler <- scheduler_event_config(event, previous)
       }
-      token <- as.character(event$token %||% "")[[1L]]
-      if (!nzchar(token) && !is.null(previous)) {
-        token <- as.character(previous$token %||% "")[[1L]]
+      if (!identical(mode, "ssh_scheduler")) {
+        token <- as.character(event$token %||% "")[[1L]]
+        if (!nzchar(token) && !is.null(previous)) {
+          token <- as.character(previous$token %||% "")[[1L]]
+        }
+        if (!nzchar(token)) .nm_stop("Enter the server bearer token.")
+        config$token <- token
       }
-      if (!nzchar(token)) .nm_stop("Enter the server bearer token.")
-      config$token <- token
       config
     }
     with_ui_remote_timeout <- function(q, background = FALSE, operation) {
-      if (!inherits(q, "LibeRRemote")) return(force(operation))
+      if (!inherits(q, c("LibeRRemote", "LibeRDirectScheduler"))) return(force(operation))
       original <- q$timeout
       on.exit(q$timeout <- original, add = TRUE)
-      q$timeout <- min(original, if (isTRUE(background)) 2 else 5)
+      q$timeout <- min(original, if (inherits(q, "LibeRDirectScheduler")) {
+        if (isTRUE(background)) 10 else 30
+      } else if (isTRUE(background)) 2 else 5)
       force(operation)
     }
     job_context_key <- function(id, queue_id = state$queue_id) {
@@ -1073,7 +1127,7 @@ liber_gui <- function(model = NULL, data = NULL, queue = NULL,
           tryCatch(refresh_jobs(start = TRUE), error = function(error) {
             append_log(paste("Initial queue refresh failed:", conditionMessage(error)), "error")
           })
-        } else if (inherits(q, "LibeRRemote")) {
+        } else if (inherits(q, c("LibeRRemote", "LibeRDirectScheduler"))) {
           state$refreshed <- "Remote queue restored; open Jobs to connect"
         }
         poll_backoff$ready <- TRUE
@@ -1109,9 +1163,13 @@ liber_gui <- function(model = NULL, data = NULL, queue = NULL,
         connected = TRUE, platform = R.version$platform,
         worker = if (is.null(q)) "in-process" else if (inherits(q, "LibeRQueue")) {
           paste(q$max_workers, "callr worker(s)")
+        } else if (inherits(q, "LibeRDirectScheduler")) {
+          paste0(q$config$backend, " via SSH")
         } else paste0("remote user ", selected_meta$user %||% "authenticated"),
         isolation = if (is.null(q)) "current R session" else if (inherits(q, "LibeRQueue")) {
           paste("tenant", q$user)
+        } else if (inherits(q, "LibeRDirectScheduler")) {
+          "personal scheduler account; encrypted durable queue"
         } else "server-managed tenant",
         queue_id = state$queue_id, queues = queues, refreshed = refreshed_payload,
         queue_root = if (inherits(q, "LibeRQueue")) q$root else "",
@@ -2641,14 +2699,25 @@ liber_gui <- function(model = NULL, data = NULL, queue = NULL,
             tunnel <- .liber_ssh_tunnel_start(ssh)
             url <- tunnel$url
           }
-          remote <- LibeRties::ls_remote(url, config$token, timeout = 10)
+          remote <- if (identical(config$connection_mode, "ssh_scheduler")) {
+            .liber_direct_scheduler(config$scheduler, timeout = 20)
+          } else LibeRties::ls_remote(url, config$token, timeout = 10)
           authentication <- remote$authenticate()
+          capabilities <- if (identical(config$connection_mode, "ssh_scheduler")) {
+            remote$capabilities()
+          } else NULL
+          scheduler_issues <- capabilities$scheduler_preflight$issues %||% list()
+          if (length(scheduler_issues)) {
+            .nm_stop(paste(unlist(scheduler_issues, use.names = FALSE), collapse = " "))
+          }
           list(
             status = "success",
             message = paste0(
               "Connected as ", as.character(authentication$username %||% "authenticated user"),
               if (identical(config$connection_mode, "ssh_tunnel"))
-                paste0(" through 127.0.0.1:", tunnel$local_port) else "", "."
+                paste0(" through 127.0.0.1:", tunnel$local_port) else if (
+                  identical(config$connection_mode, "ssh_scheduler")
+                ) paste0("; ", config$scheduler$backend, " is ready") else "", "."
             ),
             nonce = as.numeric(Sys.time())
           )
@@ -2688,8 +2757,15 @@ liber_gui <- function(model = NULL, data = NULL, queue = NULL,
             tunnel <- start_managed_tunnel(id, connection, force = TRUE)
             url <- tunnel$url
           }
-          remote <- LibeRties::ls_remote(url, connection$token, timeout = 30)
+          remote <- if (identical(connection$connection_mode, "ssh_scheduler")) {
+            .liber_direct_scheduler(connection$scheduler, timeout = 30)
+          } else LibeRties::ls_remote(url, connection$token, timeout = 30)
           authentication <- remote$authenticate()
+          if (identical(connection$connection_mode, "ssh_scheduler")) {
+            capabilities <- remote$capabilities()
+            issues <- capabilities$scheduler_preflight$issues %||% list()
+            if (length(issues)) .nm_stop(paste(unlist(issues, use.names = FALSE), collapse = " "))
+          }
           connected <- TRUE
           if (!identical(connection$connection_mode, "ssh_tunnel")) {
             stop_managed_tunnel(id)
@@ -2703,9 +2779,16 @@ liber_gui <- function(model = NULL, data = NULL, queue = NULL,
             name = server_name,
             url = remote$url, user = as.character(authentication$username %||% ""),
             connection_mode = connection$connection_mode,
-            ssh = connection$ssh,
+            ssh = if (identical(connection$connection_mode, "ssh_scheduler")) {
+              connection$scheduler$ssh
+            } else connection$ssh,
+            scheduler = if (identical(connection$connection_mode, "ssh_scheduler")) {
+              .liber_direct_scheduler_public_config(connection$scheduler)
+            } else NULL,
             tunnel_status = if (identical(connection$connection_mode, "ssh_tunnel")) {
               paste0("Connected through 127.0.0.1:", tunnel$local_port)
+            } else if (identical(connection$connection_mode, "ssh_scheduler")) {
+              paste0("SSH on demand - ", connection$scheduler$backend)
             } else "Direct"
           )
           state$remote_meta <- metadata
