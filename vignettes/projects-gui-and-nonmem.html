@@ -360,9 +360,9 @@ results.</p>
 <span id="cb1-8"><a href="#cb1-8" tabindex="-1"></a>)</span>
 <span id="cb1-9"><a href="#cb1-9" tabindex="-1"></a><span class="fu">nm_project_list</span>(workspace)</span>
 <span id="cb1-10"><a href="#cb1-10" tabindex="-1"></a><span class="co">#&gt;                    id                name                  created</span></span>
-<span id="cb1-11"><a href="#cb1-11" tabindex="-1"></a><span class="co">#&gt; 1 oral-pk-development Oral PK development 2026-07-21T11:47:11.798Z</span></span>
+<span id="cb1-11"><a href="#cb1-11" tabindex="-1"></a><span class="co">#&gt; 1 oral-pk-development Oral PK development 2026-08-06T09:26:03.950Z</span></span>
 <span id="cb1-12"><a href="#cb1-12" tabindex="-1"></a><span class="co">#&gt;                      description                  updated snapshots versions</span></span>
-<span id="cb1-13"><a href="#cb1-13" tabindex="-1"></a><span class="co">#&gt; 1 Example project created from R 2026-07-21T11:47:11.798Z         0        0</span></span></code></pre></div>
+<span id="cb1-13"><a href="#cb1-13" tabindex="-1"></a><span class="co">#&gt; 1 Example project created from R 2026-08-06T09:26:03.950Z         0        0</span></span></code></pre></div>
 <p>Model and data objects are serializable. Compiled external pointers
 are not stored; they are reconstructed when a version or run is
 opened.</p>
@@ -415,34 +415,59 @@ remote queue states with model runs.</p>
 drag-and-drop editor for amount and response compartments, directional
 or bidirectional flows, clearance, Michaelis–Menten elimination, and
 arbitrary nonlinear flux expressions. It previews all generated
-<code>$PK/$PRED</code>, <code>$DES</code>, parameter, and residual-error
-code before applying it. Applying never locks the code editor: the
-generated model and its graph are retained together, while
-<code>$DES</code> remains fully editable. Regenerating from the graph is
-always an explicit action and warns when the editable code differs from
-its previous generated baseline.</p>
+<code>$PK</code>, <code>$DES</code>, parameter, and residual-error code
+before applying it. Applying never locks the code editor: the generated
+model and its graph are retained together, while <code>$DES</code>
+remains fully editable. Regenerating from the graph is always an
+explicit action and warns when the editable code differs from its
+previous generated baseline.</p>
 <p>All visual structural parameters start with log-normal
 between-subject variability
 (<code>PARAM = THETA(i) * exp(ETA(i))</code>). IIV can be disabled per
 parameter in the visual parameter table.</p>
 </div>
-<div id="browser-local-ai" class="section level3">
-<h3>Browser-local AI</h3>
+<div id="model-definition-routes" class="section level3">
+<h3>Model-definition routes</h3>
+<p>The Code tab keeps <code>$PK</code> and <code>$PRED</code> as
+distinct editable sources and provides three radio-button routes:</p>
+<ol style="list-style-type: decimal">
+<li><strong>PREDPP / ADVAN (<code>$PK</code>)</strong> uses the
+conventional <code>$PK -&gt; ADVAN/$DES -&gt; $ERROR</code>
+workflow.</li>
+<li><strong>Direct prediction (<code>$PRED</code>)</strong> evaluates
+each row without compartment propagation and requires <code>$PRED</code>
+to assign <code>F</code>.</li>
+<li><strong>ADVAN + prediction layer (<code>$PK + $PRED</code>)</strong>
+first computes the ADVAN prediction, then evaluates a LibeRation
+post-ADVAN <code>$PRED</code> program. It can read <code>F_ADVAN</code>,
+<code>A(i)</code>, <code>$PK</code> assignments, and input covariates
+and must assign the final <code>F</code>.</li>
+</ol>
+<p>Changing route does not discard either code draft. Validation
+compiles the active route, discovers THETA/ETA/SIGMA references across
+its relevant programs, and refreshes generated output columns without
+running the dataset. The third route is a LibeRation extension; NONMEM
+export folds the post-ADVAN program into a marked <code>$ERROR</code>
+block so the numerical order remains explicit.</p>
+</div>
+<div id="local-ai" class="section level3">
+<h3>Local AI</h3>
 <p><strong>Activate AI</strong> is opt-in and remembers the user’s
-consent, selected open models, and separate Help and Report context
-settings. <code>Auto</code> selects 8K for the recommended 3B Help model
-and a conservative 6K for the 7B Report model; 1K–16K presets and a
-guarded custom value are also available. The status line shows the
-approximate prompt use, output reserve, retained message count, and
-whether older context was compacted. If browser GPU allocation fails
-before generation, LibeRation retries with a smaller context.</p>
-<p>Activation itself does not allocate GPU memory: the dedicated WebGPU
-worker and weights are lazy-loaded only when Help or report drafting is
-first used. The download is cached under LibeRation’s stable local
-browser origin. After initialization, the worker disables its network
-APIs before model or run context is sent, and receives no tools or DOM
-access. A compromised browser, extension, or operating system remains
-outside that isolation boundary.</p>
+consent, selected open models, backend, and separate Help and Report
+context settings. WebLLM uses a dedicated browser WebGPU worker. Ollama
+uses <code>ellmer</code> from the local R session, discovers models
+installed at a loopback endpoint, and streams responses without blocking
+the Shiny session. The context control is an exact WebLLM context
+setting and an input-budget guard for Ollama; Ollama’s actual context is
+set by its model or Modelfile.</p>
+<p>Activation itself does not allocate GPU memory. WebLLM weights are
+lazy-loaded and cached only on first use; after initialization, the
+worker disables its network APIs before model or run context is sent.
+Ollama is contacted only on first generation and is restricted to
+localhost. It is disabled automatically for hosted, proxied,
+session-isolated, or remotely accessed applications; deployments should
+additionally call <code>liber_gui(allow_ollama = FALSE)</code>. Neither
+backend receives LibeRation tools or mutation privileges.</p>
 </div>
 </div>
 <div id="local-and-remote-execution" class="section level2">
@@ -452,40 +477,84 @@ persistent local queue under the workspace. Remote queues use the same
 typed job contract. A completed queue result is attached to its
 originating model version through stored queue and job identifiers,
 preventing duplicate run entries during repeated polls.</p>
+<p>When the GUI itself is running locally, the Jobs popup can manage a
+loopback-only OpenSSH tunnel to a LibeRties service that is reachable
+from an SSH destination but is not publicly exposed. The guided setup
+supports an optional jump host, an SSH agent or identity file, a
+temporary connection test, and automatic reopening during the GUI
+session. Its readiness assistant can install the Windows OpenSSH Client,
+enable <code>ssh-agent</code>, discover or generate a protected key,
+install its public key on either SSH hop and test the gateway and
+destination separately. Passwords, key passphrases and MFA responses
+stay inside visible OpenSSH terminals; LibeRation does not capture or
+store them. Hosted sessions use direct HTTPS or an externally
+administered network route instead.</p>
 <p>See the LibeRties vignettes for service deployment, authentication,
 resource limits, cancellation, logs, and reverse-proxy guidance.</p>
+<p>The simulation and estimation popups also provide an
+<strong>Engine</strong> selector. <code>LibeR</code> is the native
+default; <code>NONMEM</code> invokes an administrator-configured PsN
+<code>execute</code>, and <code>nlmixr2</code> uses the optional
+nlmixr2/rxode2 packages installed on the selected worker. The model and
+event data remain the same typed LibeRation objects. External adapters
+reject unsupported semantics rather than silently changing the model.
+The nlmixr2 adapter currently accepts common solved ADVAN models, direct
+<code>$PRED</code>, and ordinary <code>$DES</code> ODE models with
+additive, proportional, combined, or log-normal residual error.</p>
+<div class="sourceCode" id="cb4"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb4-1"><a href="#cb4-1" tabindex="-1"></a><span class="fu">nm_execution_engines</span>()</span>
+<span id="cb4-2"><a href="#cb4-2" tabindex="-1"></a></span>
+<span id="cb4-3"><a href="#cb4-3" tabindex="-1"></a>fit_nonmem <span class="ot">&lt;-</span> <span class="fu">nm_external_run</span>(</span>
+<span id="cb4-4"><a href="#cb4-4" tabindex="-1"></a>  model, data, <span class="at">engine =</span> <span class="st">&quot;nonmem&quot;</span>, <span class="at">operation =</span> <span class="st">&quot;estimate&quot;</span>,</span>
+<span id="cb4-5"><a href="#cb4-5" tabindex="-1"></a>  <span class="at">method =</span> <span class="st">&quot;FOCEI&quot;</span>, <span class="at">maxit =</span> <span class="dv">500</span>, <span class="at">covariance =</span> <span class="cn">TRUE</span></span>
+<span id="cb4-6"><a href="#cb4-6" tabindex="-1"></a>)</span>
+<span id="cb4-7"><a href="#cb4-7" tabindex="-1"></a></span>
+<span id="cb4-8"><a href="#cb4-8" tabindex="-1"></a>fit_nlmixr <span class="ot">&lt;-</span> <span class="fu">nm_external_run</span>(</span>
+<span id="cb4-9"><a href="#cb4-9" tabindex="-1"></a>  model, data, <span class="at">engine =</span> <span class="st">&quot;nlmixr2&quot;</span>, <span class="at">operation =</span> <span class="st">&quot;estimate&quot;</span>,</span>
+<span id="cb4-10"><a href="#cb4-10" tabindex="-1"></a>  <span class="at">method =</span> <span class="st">&quot;SAEM&quot;</span>, <span class="at">n_iter =</span> <span class="dv">500</span>, <span class="at">burn =</span> <span class="dv">150</span></span>
+<span id="cb4-11"><a href="#cb4-11" tabindex="-1"></a>)</span></code></pre></div>
+<p>Clients choose only the allow-listed engine identifier. Executable
+locations, module commands, and shell text are worker configuration and
+cannot be placed in a remote job. Selecting <strong>Create audit
+artifacts</strong> preserves original NONMEM outputs or creates
+compatible LibeR/nlmixr2 files with provenance and checksums; leaving it
+clear avoids their storage and transfer overhead.</p>
 </div>
 <div id="import-a-nonmem-control-stream" class="section level2">
 <h2>Import a NONMEM control stream</h2>
 <p>The importer translates the supported semantic subset and preserves
 unsupported records in a compatibility report instead of silently
 discarding them.</p>
-<div class="sourceCode" id="cb4"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb4-1"><a href="#cb4-1" tabindex="-1"></a>control <span class="ot">&lt;-</span> <span class="fu">nm_control_read</span>(<span class="st">&quot;run001.ctl&quot;</span>, <span class="at">strict =</span> <span class="cn">FALSE</span>)</span>
-<span id="cb4-2"><a href="#cb4-2" tabindex="-1"></a>control<span class="sc">$</span>model</span>
-<span id="cb4-3"><a href="#cb4-3" tabindex="-1"></a>control<span class="sc">$</span>compatibility</span>
-<span id="cb4-4"><a href="#cb4-4" tabindex="-1"></a></span>
-<span id="cb4-5"><a href="#cb4-5" tabindex="-1"></a>fit <span class="ot">&lt;-</span> <span class="fu">nm_est</span>(control<span class="sc">$</span>model, data, <span class="at">method =</span> <span class="st">&quot;FOCEI&quot;</span>)</span></code></pre></div>
+<div class="sourceCode" id="cb5"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb5-1"><a href="#cb5-1" tabindex="-1"></a>control <span class="ot">&lt;-</span> <span class="fu">nm_control_read</span>(<span class="st">&quot;run001.ctl&quot;</span>, <span class="at">strict =</span> <span class="cn">FALSE</span>)</span>
+<span id="cb5-2"><a href="#cb5-2" tabindex="-1"></a>control<span class="sc">$</span>model</span>
+<span id="cb5-3"><a href="#cb5-3" tabindex="-1"></a>control<span class="sc">$</span>compatibility</span>
+<span id="cb5-4"><a href="#cb5-4" tabindex="-1"></a></span>
+<span id="cb5-5"><a href="#cb5-5" tabindex="-1"></a>fit <span class="ot">&lt;-</span> <span class="fu">nm_est</span>(control<span class="sc">$</span>model, data, <span class="at">method =</span> <span class="st">&quot;FOCEI&quot;</span>)</span></code></pre></div>
 <p>Supported records include <code>$INPUT</code>, <code>$DATA</code>,
-<code>$SUBROUTINES</code>, <code>$MODEL</code>,
-<code>$PK</code>/<code>$PRED</code>, <code>$DES</code>,
-<code>$ERROR</code>, <code>$THETA</code>, diagonal or block
-<code>$OMEGA</code>, <code>$SIGMA</code>, <code>$ESTIMATION</code>,
-<code>$COVARIANCE</code>, and <code>$TABLE</code>. Supported generated
-columns in <code>$TABLE</code> become the model’s <code>OUTPUT</code>
-selection; exporting a model with selected outputs creates the
-corresponding <code>$TABLE</code> record.</p>
+<code>$SUBROUTINES</code>, <code>$MODEL</code>, <code>$PK</code> and
+<code>$PRED</code>, <code>$DES</code>, <code>$ERROR</code>,
+<code>$THETA</code>, diagonal or block <code>$OMEGA</code>,
+<code>$SIGMA</code>, <code>$ESTIMATION</code>, <code>$COVARIANCE</code>,
+and <code>$TABLE</code>. Supported generated columns in
+<code>$TABLE</code> become the model’s <code>OUTPUT</code> selection;
+exporting a model with selected outputs creates the corresponding
+<code>$TABLE</code> record. ADVAN5/7 <code>$MODEL</code> compartments
+and Kmn/Km0 rates are translated to an <code>nm_matrix_model</code>.
+ADVAN9 <code>$AES</code>/<code>$AESINITIAL</code> blocks are preserved
+but require explicit translation to <code>ALG</code> and
+<code>DAE_CONFIG</code>; strict import fails rather than silently
+dropping an equilibrium constraint.</p>
 </div>
 <div id="write-a-control-stream" class="section level2">
 <h2>Write a control stream</h2>
-<div class="sourceCode" id="cb5"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb5-1"><a href="#cb5-1" tabindex="-1"></a>text <span class="ot">&lt;-</span> <span class="fu">nm_control_write</span>(</span>
-<span id="cb5-2"><a href="#cb5-2" tabindex="-1"></a>  model,</span>
-<span id="cb5-3"><a href="#cb5-3" tabindex="-1"></a>  <span class="at">data =</span> <span class="st">&quot;theo.csv IGNORE=@&quot;</span>,</span>
-<span id="cb5-4"><a href="#cb5-4" tabindex="-1"></a>  <span class="at">estimation =</span> <span class="st">&quot;METHOD=1 INTERACTION MAXEVAL=9999 PRINT=10&quot;</span>,</span>
-<span id="cb5-5"><a href="#cb5-5" tabindex="-1"></a>  <span class="at">covariance =</span> <span class="st">&quot;UNCONDITIONAL&quot;</span></span>
-<span id="cb5-6"><a href="#cb5-6" tabindex="-1"></a>)</span>
-<span id="cb5-7"><a href="#cb5-7" tabindex="-1"></a><span class="fu">cat</span>(text)</span>
-<span id="cb5-8"><a href="#cb5-8" tabindex="-1"></a></span>
-<span id="cb5-9"><a href="#cb5-9" tabindex="-1"></a><span class="fu">nm_control_write</span>(model, <span class="at">file =</span> <span class="st">&quot;exported.ctl&quot;</span>, <span class="at">data =</span> <span class="st">&quot;theo.csv&quot;</span>)</span></code></pre></div>
+<div class="sourceCode" id="cb6"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb6-1"><a href="#cb6-1" tabindex="-1"></a>text <span class="ot">&lt;-</span> <span class="fu">nm_control_write</span>(</span>
+<span id="cb6-2"><a href="#cb6-2" tabindex="-1"></a>  model,</span>
+<span id="cb6-3"><a href="#cb6-3" tabindex="-1"></a>  <span class="at">data =</span> <span class="st">&quot;theo.csv IGNORE=@&quot;</span>,</span>
+<span id="cb6-4"><a href="#cb6-4" tabindex="-1"></a>  <span class="at">estimation =</span> <span class="st">&quot;METHOD=1 INTERACTION MAXEVAL=9999 PRINT=10&quot;</span>,</span>
+<span id="cb6-5"><a href="#cb6-5" tabindex="-1"></a>  <span class="at">covariance =</span> <span class="st">&quot;UNCONDITIONAL&quot;</span></span>
+<span id="cb6-6"><a href="#cb6-6" tabindex="-1"></a>)</span>
+<span id="cb6-7"><a href="#cb6-7" tabindex="-1"></a><span class="fu">cat</span>(text)</span>
+<span id="cb6-8"><a href="#cb6-8" tabindex="-1"></a></span>
+<span id="cb6-9"><a href="#cb6-9" tabindex="-1"></a><span class="fu">nm_control_write</span>(model, <span class="at">file =</span> <span class="st">&quot;exported.ctl&quot;</span>, <span class="at">data =</span> <span class="st">&quot;theo.csv&quot;</span>)</span></code></pre></div>
 <p>Round-tripping means that a supported control stream can be imported
 into the structured LibeRation representation, edited or run, and
 exported again while retaining preserved unsupported text and an
@@ -498,13 +567,13 @@ NONMEM version.</p>
 <p><code>nm_report()</code> creates a deterministic PDF through base R
 graphics and a JSON manifest containing numerical summaries and
 provenance.</p>
-<div class="sourceCode" id="cb6"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb6-1"><a href="#cb6-1" tabindex="-1"></a>report <span class="ot">&lt;-</span> <span class="fu">nm_report</span>(</span>
-<span id="cb6-2"><a href="#cb6-2" tabindex="-1"></a>  fit,</span>
-<span id="cb6-3"><a href="#cb6-3" tabindex="-1"></a>  <span class="at">file =</span> <span class="st">&quot;run001-report.pdf&quot;</span>,</span>
-<span id="cb6-4"><a href="#cb6-4" tabindex="-1"></a>  <span class="at">sections =</span> <span class="fu">c</span>(<span class="st">&quot;summary&quot;</span>, <span class="st">&quot;parameters&quot;</span>, <span class="st">&quot;gof&quot;</span>, <span class="st">&quot;eta&quot;</span>, <span class="st">&quot;vpc&quot;</span>),</span>
-<span id="cb6-5"><a href="#cb6-5" tabindex="-1"></a>  <span class="at">vpc =</span> vpc,</span>
-<span id="cb6-6"><a href="#cb6-6" tabindex="-1"></a>  <span class="at">manifest =</span> <span class="cn">TRUE</span></span>
-<span id="cb6-7"><a href="#cb6-7" tabindex="-1"></a>)</span></code></pre></div>
+<div class="sourceCode" id="cb7"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb7-1"><a href="#cb7-1" tabindex="-1"></a>report <span class="ot">&lt;-</span> <span class="fu">nm_report</span>(</span>
+<span id="cb7-2"><a href="#cb7-2" tabindex="-1"></a>  fit,</span>
+<span id="cb7-3"><a href="#cb7-3" tabindex="-1"></a>  <span class="at">file =</span> <span class="st">&quot;run001-report.pdf&quot;</span>,</span>
+<span id="cb7-4"><a href="#cb7-4" tabindex="-1"></a>  <span class="at">sections =</span> <span class="fu">c</span>(<span class="st">&quot;summary&quot;</span>, <span class="st">&quot;parameters&quot;</span>, <span class="st">&quot;gof&quot;</span>, <span class="st">&quot;eta&quot;</span>, <span class="st">&quot;vpc&quot;</span>),</span>
+<span id="cb7-5"><a href="#cb7-5" tabindex="-1"></a>  <span class="at">vpc =</span> vpc,</span>
+<span id="cb7-6"><a href="#cb7-6" tabindex="-1"></a>  <span class="at">manifest =</span> <span class="cn">TRUE</span></span>
+<span id="cb7-7"><a href="#cb7-7" tabindex="-1"></a>)</span></code></pre></div>
 <p>The visual report designer builds a single top-to-bottom workflow
 from narrative, run, comparison, diagnostic, and page-break blocks.
 Narrative blocks may be user-authored (typed or loaded from
@@ -512,21 +581,21 @@ TXT/Markdown/DOCX) or drafted by the browser-local AI from an
 instruction, template, and source material. The renderer itself is
 deterministic and offline: it only consumes the text already stored in
 the design and immutable saved-run evidence.</p>
-<div class="sourceCode" id="cb7"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb7-1"><a href="#cb7-1" tabindex="-1"></a>design <span class="ot">&lt;-</span> <span class="fu">nm_report_design</span>(<span class="fu">list</span>(</span>
-<span id="cb7-2"><a href="#cb7-2" tabindex="-1"></a>  <span class="fu">nm_report_block</span>(<span class="st">&quot;introduction&quot;</span>, <span class="at">text =</span> <span class="st">&quot;Study background&quot;</span>),</span>
-<span id="cb7-3"><a href="#cb7-3" tabindex="-1"></a>  <span class="fu">nm_report_block</span>(</span>
-<span id="cb7-4"><a href="#cb7-4" tabindex="-1"></a>    <span class="st">&quot;run&quot;</span>, <span class="at">run_ids =</span> run_id,</span>
-<span id="cb7-5"><a href="#cb7-5" tabindex="-1"></a>    <span class="at">elements =</span> <span class="fu">c</span>(<span class="st">&quot;summary&quot;</span>, <span class="st">&quot;parameters&quot;</span>, <span class="st">&quot;gof&quot;</span>, <span class="st">&quot;vpc&quot;</span>, <span class="st">&quot;run_info&quot;</span>)</span>
-<span id="cb7-6"><a href="#cb7-6" tabindex="-1"></a>  ),</span>
-<span id="cb7-7"><a href="#cb7-7" tabindex="-1"></a>  <span class="fu">nm_report_block</span>(<span class="st">&quot;discussion&quot;</span>, <span class="at">source =</span> <span class="st">&quot;ai&quot;</span>, <span class="at">text =</span> <span class="st">&quot;Reviewed local draft&quot;</span>),</span>
-<span id="cb7-8"><a href="#cb7-8" tabindex="-1"></a>  <span class="fu">nm_report_block</span>(<span class="st">&quot;conclusion&quot;</span>, <span class="at">text =</span> <span class="st">&quot;Conclusions&quot;</span>)</span>
-<span id="cb7-9"><a href="#cb7-9" tabindex="-1"></a>))</span>
-<span id="cb7-10"><a href="#cb7-10" tabindex="-1"></a></span>
-<span id="cb7-11"><a href="#cb7-11" tabindex="-1"></a><span class="fu">nm_report_design_save</span>(workspace, project<span class="sc">$</span>id, design)</span>
-<span id="cb7-12"><a href="#cb7-12" tabindex="-1"></a>bundle <span class="ot">&lt;-</span> <span class="fu">nm_report_design_render</span>(</span>
-<span id="cb7-13"><a href="#cb7-13" tabindex="-1"></a>  design, workspace, project<span class="sc">$</span>id,</span>
-<span id="cb7-14"><a href="#cb7-14" tabindex="-1"></a>  <span class="at">directory =</span> <span class="st">&quot;reports&quot;</span>, <span class="at">formats =</span> <span class="fu">c</span>(<span class="st">&quot;docx&quot;</span>, <span class="st">&quot;pdf&quot;</span>)</span>
-<span id="cb7-15"><a href="#cb7-15" tabindex="-1"></a>)</span></code></pre></div>
+<div class="sourceCode" id="cb8"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb8-1"><a href="#cb8-1" tabindex="-1"></a>design <span class="ot">&lt;-</span> <span class="fu">nm_report_design</span>(<span class="fu">list</span>(</span>
+<span id="cb8-2"><a href="#cb8-2" tabindex="-1"></a>  <span class="fu">nm_report_block</span>(<span class="st">&quot;introduction&quot;</span>, <span class="at">text =</span> <span class="st">&quot;Study background&quot;</span>),</span>
+<span id="cb8-3"><a href="#cb8-3" tabindex="-1"></a>  <span class="fu">nm_report_block</span>(</span>
+<span id="cb8-4"><a href="#cb8-4" tabindex="-1"></a>    <span class="st">&quot;run&quot;</span>, <span class="at">run_ids =</span> run_id,</span>
+<span id="cb8-5"><a href="#cb8-5" tabindex="-1"></a>    <span class="at">elements =</span> <span class="fu">c</span>(<span class="st">&quot;summary&quot;</span>, <span class="st">&quot;parameters&quot;</span>, <span class="st">&quot;gof&quot;</span>, <span class="st">&quot;vpc&quot;</span>, <span class="st">&quot;run_info&quot;</span>)</span>
+<span id="cb8-6"><a href="#cb8-6" tabindex="-1"></a>  ),</span>
+<span id="cb8-7"><a href="#cb8-7" tabindex="-1"></a>  <span class="fu">nm_report_block</span>(<span class="st">&quot;discussion&quot;</span>, <span class="at">source =</span> <span class="st">&quot;ai&quot;</span>, <span class="at">text =</span> <span class="st">&quot;Reviewed local draft&quot;</span>),</span>
+<span id="cb8-8"><a href="#cb8-8" tabindex="-1"></a>  <span class="fu">nm_report_block</span>(<span class="st">&quot;conclusion&quot;</span>, <span class="at">text =</span> <span class="st">&quot;Conclusions&quot;</span>)</span>
+<span id="cb8-9"><a href="#cb8-9" tabindex="-1"></a>))</span>
+<span id="cb8-10"><a href="#cb8-10" tabindex="-1"></a></span>
+<span id="cb8-11"><a href="#cb8-11" tabindex="-1"></a><span class="fu">nm_report_design_save</span>(workspace, project<span class="sc">$</span>id, design)</span>
+<span id="cb8-12"><a href="#cb8-12" tabindex="-1"></a>bundle <span class="ot">&lt;-</span> <span class="fu">nm_report_design_render</span>(</span>
+<span id="cb8-13"><a href="#cb8-13" tabindex="-1"></a>  design, workspace, project<span class="sc">$</span>id,</span>
+<span id="cb8-14"><a href="#cb8-14" tabindex="-1"></a>  <span class="at">directory =</span> <span class="st">&quot;reports&quot;</span>, <span class="at">formats =</span> <span class="fu">c</span>(<span class="st">&quot;docx&quot;</span>, <span class="st">&quot;pdf&quot;</span>)</span>
+<span id="cb8-15"><a href="#cb8-15" tabindex="-1"></a>)</span></code></pre></div>
 <p>DOCX rendering uses Pandoc. PDF rendering uses the R graphics device.
 Both can be accompanied by a JSON provenance manifest.</p>
 </div>

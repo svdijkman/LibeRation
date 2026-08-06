@@ -802,6 +802,11 @@
     gof = if (is.null(gof)) list() else .liber_gui_rows(gof, 5000L),
     gof_loaded = !is.null(gof),
     run_info = list(
+      `Execution engine` = switch(
+        fit$execution_engine %||% "liber",
+        liber = "LibeR", nonmem = "NONMEM via PsN", nlmixr2 = "nlmixr2",
+        as.character(fit$execution_engine)
+      ),
       Method = fit$method, Objective = fit$objective,
       `Convergence code` = fit$convergence,
       `Objective backend` = fit$diagnostics$optimizer$objective_backend %||%

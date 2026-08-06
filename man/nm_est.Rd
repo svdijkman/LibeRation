@@ -24,6 +24,7 @@ nm_est(
   initial_eta = NULL,
   collect_output = TRUE,
   allow_fd_gradient = FALSE,
+  audit_artifacts = FALSE,
   ...
 )
 }
@@ -81,6 +82,10 @@ evaluated and retained with the completed fit.}
 \item{allow_fd_gradient}{Permit an explicit finite-difference replacement
 if an advertised population gradient is non-finite. The default is
 `FALSE`; enabling it records and warns about every fallback.}
+
+\item{audit_artifacts}{Generate an opt-in NONMEM-style audit bundle containing
+a listing, control-stream representation, estimates, covariance/correlation
+matrices when available, subject ETAs, and saved output tables.}
 
 \item{...}{Method-specific controls. For `method = "GQ"`, use `gq_grid`
 (`"auto"`, `"tensor"`, or `"smolyak"`), `gq_order` (tensor nodes per ETA

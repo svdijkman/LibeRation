@@ -1979,6 +1979,9 @@
 #' @param allow_fd_gradient Permit an explicit finite-difference replacement
 #'   if an advertised population gradient is non-finite. The default is
 #'   `FALSE`; enabling it records and warns about every fallback.
+#' @param audit_artifacts Generate an opt-in NONMEM-style audit bundle containing
+#'   a listing, control-stream representation, estimates, covariance/correlation
+#'   matrices when available, subject ETAs, and saved output tables.
 #' @param ... Method-specific controls. For `method = "GQ"`, use `gq_grid`
 #'   (`"auto"`, `"tensor"`, or `"smolyak"`), `gq_order` (tensor nodes per ETA
 #'   dimension, default 5), `gq_level` (Smolyak level, default 3),
@@ -2025,7 +2028,7 @@ nm_est <- function(model, data,
                    covariance_tolerance = 1e-8,
                    covariance_samples = NULL, covariance_seed = NULL,
                    initial_eta = NULL, collect_output = TRUE,
-                   allow_fd_gradient = FALSE, ...) {
+                   allow_fd_gradient = FALSE, audit_artifacts = FALSE, ...) {
   estimation_started <- proc.time()[["elapsed"]]
   method <- match.arg(method)
   optimizer_backend <- match.arg(optimizer_backend)
@@ -2033,6 +2036,10 @@ nm_est <- function(model, data,
   if (length(allow_fd_gradient) != 1L || is.na(allow_fd_gradient)) {
     .nm_stop("`allow_fd_gradient` must be TRUE or FALSE.")
   }
+  if (length(audit_artifacts) != 1L || is.na(audit_artifacts)) {
+    .nm_stop("`audit_artifacts` must be TRUE or FALSE.")
+  }
+  audit_artifacts <- isTRUE(audit_artifacts)
   previous_fd_option <- options(
     LibeRation.allow_fd_gradient = isTRUE(allow_fd_gradient)
   )
@@ -2122,6 +2129,15 @@ nm_est <- function(model, data,
   )
   if (isTRUE(collect_output) && length(fit$model$OUTPUT %||% character())) {
     fit$output <- .nm_fit_selected_outputs(fit)
+  }
+  if (audit_artifacts) {
+    fit <- .nm_attach_audit_artifacts(
+      fit, fit$model, fit$data, "estimate",
+      details = list(
+        method = method, maxit = maxit, eta_maxit = eta_maxit,
+        covariance = covariance, n_cores = n_cores
+      )
+    )
   }
   fit
 }

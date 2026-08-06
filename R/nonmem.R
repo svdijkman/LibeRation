@@ -704,7 +704,8 @@ nm_control_write <- function(x, file = NULL, data = NULL,
     }
   }
   if (nrow(model$SIGMAS)) lines <- c(lines, "$SIGMA", paste0("  ", .nm_control_write_parameter(model$SIGMAS, "SIGMA")))
-  estimation <- estimation %||% metadata$estimation
+  estimation <- if (identical(estimation, FALSE)) FALSE else
+    estimation %||% metadata$estimation
   if (identical(model$LIK_CONFIG$error, "likelihood")) {
     if (is.null(estimation) || !nzchar(trimws(estimation))) {
       estimation <- "METHOD=COND LAPLACE LIKELIHOOD"
@@ -713,7 +714,9 @@ nm_control_write <- function(x, file = NULL, data = NULL,
       estimation <- paste(estimation, "LIKELIHOOD")
     }
   }
-  if ((!is.null(estimation) && nzchar(trimws(estimation))) || isTRUE(metadata$estimation_present)) {
+  if (!identical(estimation, FALSE) &&
+      ((!is.null(estimation) && nzchar(trimws(estimation))) ||
+       isTRUE(metadata$estimation_present))) {
     lines <- c(lines, trimws(paste("$ESTIMATION", estimation %||% "")))
   }
   covariance <- covariance %||% metadata$covariance

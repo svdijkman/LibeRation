@@ -17,7 +17,8 @@ nm_simulate(
   sample_mixture = FALSE,
   censor = FALSE,
   seed = NULL,
-  n_cores = 1L
+  n_cores = 1L,
+  audit_artifacts = FALSE
 )
 }
 \arguments{
@@ -49,6 +50,10 @@ reported DV by the applicable quantification limit.}
 
 \item{n_cores}{Number of parallel simulation workers. Replicates are
 distributed across persistent PSOCK workers on Windows, Linux, and macOS.}
+
+\item{audit_artifacts}{Generate an opt-in NONMEM-style audit bundle containing
+a listing, control-stream representation, and simulation table. The bundle
+is materialized when the result is saved as a workspace run.}
 }
 \value{
 Input records augmented with `IPRED`, compartment amounts, and—when

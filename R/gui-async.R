@@ -294,16 +294,28 @@
   switch(
     operation,
     simulate = do.call(
-      nm_simulate,
-      c(list(model = arguments$model, data = arguments$data), arguments$args)
+      .nm_engine_run,
+      list(
+        engine = arguments$engine %||% "liber", operation = "simulate",
+        model = arguments$model, data = arguments$data,
+        arguments = arguments$args
+      )
     ),
     estimate = do.call(
-      nm_est,
-      c(list(model = arguments$model, data = arguments$data), arguments$args)
+      .nm_engine_run,
+      list(
+        engine = arguments$engine %||% "liber", operation = "estimate",
+        model = arguments$model, data = arguments$data,
+        arguments = arguments$args
+      )
     ),
     estimate_sequence = do.call(
-      nm_est_sequence,
-      c(list(model = arguments$model, data = arguments$data), arguments$args)
+      .nm_engine_run,
+      list(
+        engine = arguments$engine %||% "liber", operation = "estimate",
+        model = arguments$model, data = arguments$data,
+        arguments = arguments$args
+      )
     ),
     diagnostics = .liber_gui_background_diagnostics(
       arguments$fit, arguments$options

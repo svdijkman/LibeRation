@@ -16,6 +16,9 @@
 #' @param seed Optional reproducible RNG seed.
 #' @param n_cores Number of parallel simulation workers. Replicates are
 #'   distributed across persistent PSOCK workers on Windows, Linux, and macOS.
+#' @param audit_artifacts Generate an opt-in NONMEM-style audit bundle containing
+#'   a listing, control-stream representation, and simulation table. The bundle
+#'   is materialized when the result is saved as a workspace run.
 #' @return Input records augmented with `IPRED`, compartment amounts, and—when
 #'   requested—simulated `DV`, ETAs, mixture membership, and replicate number.
 #' @examples
@@ -37,7 +40,8 @@
 nm_simulate <- function(model, data, theta = NULL, eta = NULL, sigma = NULL,
                         omega = NULL, nsim = 1L, random_effects = FALSE,
                         residual = FALSE, sample_mixture = FALSE,
-                        censor = FALSE, seed = NULL, n_cores = 1L) {
+                        censor = FALSE, seed = NULL, n_cores = 1L,
+                        audit_artifacts = FALSE) {
   engine <- if (inherits(model, "NMEngine")) model else nm_compile(model)
   if (isTRUE(residual) && identical(engine$model$LIK_CONFIG$error, "likelihood")) {
     if (is.null(engine$model$OUTCOMES) && is.null(engine$model$KALMAN_CONFIG)) {
@@ -59,6 +63,10 @@ nm_simulate <- function(model, data, theta = NULL, eta = NULL, sigma = NULL,
     .nm_stop("`n_cores` must be a positive integer.")
   }
   n_cores <- min(n_cores, nsim)
+  if (length(audit_artifacts) != 1L || is.na(audit_artifacts)) {
+    .nm_stop("`audit_artifacts` must be TRUE or FALSE.")
+  }
+  audit_artifacts <- isTRUE(audit_artifacts)
   if (!is.null(seed)) {
     seed <- as.integer(seed)
     if (length(seed) != 1L || is.na(seed)) .nm_stop("`seed` must be one integer.")
@@ -87,7 +95,8 @@ nm_simulate <- function(model, data, theta = NULL, eta = NULL, sigma = NULL,
           specification, dataset, theta = theta, eta = eta, sigma = sigma,
           omega = omega, nsim = 1L, random_effects = random_effects,
           residual = residual, sample_mixture = sample_mixture,
-          censor = censor, seed = seeds[[index]], n_cores = 1L
+          censor = censor, seed = seeds[[index]], n_cores = 1L,
+          audit_artifacts = FALSE
         )
         result$SIM <- index
         result
@@ -105,6 +114,12 @@ nm_simulate <- function(model, data, theta = NULL, eta = NULL, sigma = NULL,
     attr(output, "solver") <- solver
     attr(output, "state_names") <- state_names
     attr(output, "parallel_cores") <- n_cores
+    if (audit_artifacts) {
+      output <- .nm_attach_audit_artifacts(
+        output, engine$model, normalized, "simulate",
+        details = list(nsim = nsim, seed = seed, n_cores = n_cores)
+      )
+    }
     return(output)
   }
   simulate_one <- function(index) {
@@ -181,6 +196,12 @@ nm_simulate <- function(model, data, theta = NULL, eta = NULL, sigma = NULL,
   rownames(output) <- NULL
   attr(output, "solver") <- solver
   attr(output, "state_names") <- state_names
+  if (audit_artifacts) {
+    output <- .nm_attach_audit_artifacts(
+      output, engine$model, normalized, "simulate",
+      details = list(nsim = nsim, seed = seed, n_cores = n_cores)
+    )
+  }
   output
 }
 

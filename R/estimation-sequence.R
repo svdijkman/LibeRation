@@ -24,7 +24,7 @@ nm_est_stage <- function(method, ..., label = NULL) {
   if (length(arguments) && is.null(names(arguments))) {
     .nm_stop("Estimation-stage controls must be named.")
   }
-  forbidden <- intersect(names(arguments), c("model", "data", "method"))
+  forbidden <- intersect(names(arguments), c("model", "data", "method", "audit_artifacts"))
   if (length(forbidden)) {
     .nm_stop("Do not specify ", paste(forbidden, collapse = ", "),
              " inside an estimation stage.")
@@ -97,11 +97,18 @@ nm_est_stage <- function(method, ..., label = NULL) {
 #' @param stages Ordered character vector or list of [nm_est_stage()] objects.
 #' @param on_error Stop with an `nm_est_sequence_error`, or return the last
 #'   successful fit with failure metadata.
+#' @param audit_artifacts Generate one audit bundle for the final sequence
+#'   result. Intermediate stages remain represented in the final fit metadata.
 #' @return The final `nm_fit`, augmented with sequential-estimation metadata.
 #' @export
 nm_est_sequence <- function(model, data, stages,
-                            on_error = c("stop", "return")) {
+                            on_error = c("stop", "return"),
+                            audit_artifacts = FALSE) {
   on_error <- match.arg(on_error)
+  if (length(audit_artifacts) != 1L || is.na(audit_artifacts)) {
+    .nm_stop("`audit_artifacts` must be TRUE or FALSE.")
+  }
+  audit_artifacts <- isTRUE(audit_artifacts)
   specifications <- .nm_normalize_estimation_stages(stages)
   current_model <- if (inherits(model, "NMEngine")) model$model else model
   if (!inherits(current_model, "nm_model")) {
@@ -147,6 +154,12 @@ nm_est_sequence <- function(model, data, stages,
         previous$method_sequence <- vapply(specifications, `[[`, character(1), "method")
         previous$sequence_label <- paste(previous$method_sequence, collapse = " -> ")
         previous$sequence_complete <- FALSE
+        if (audit_artifacts) {
+          previous <- .nm_attach_audit_artifacts(
+            previous, previous$model, previous$data, "estimate",
+            details = list(method = previous$sequence_label, sequence_complete = FALSE)
+          )
+        }
         return(previous)
       }
       condition <- structure(
@@ -172,5 +185,11 @@ nm_est_sequence <- function(model, data, stages,
     records, function(stage) as.numeric(stage$timing$total_seconds %||% NA_real_), numeric(1)
   )
   previous$timing$sequence_total_seconds <- as.numeric(proc.time()[["elapsed"]] - started)
+  if (audit_artifacts) {
+    previous <- .nm_attach_audit_artifacts(
+      previous, previous$model, previous$data, "estimate",
+      details = list(method = previous$sequence_label, sequence_complete = TRUE)
+    )
+  }
   previous
 }

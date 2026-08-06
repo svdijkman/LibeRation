@@ -159,6 +159,13 @@ Install LibeRtAD first, then install LibeRation with R 4.1 or newer and a
 C++17 toolchain. Install LibeRties as well to enable persistent local and
 remote job queues.
 
+Estimation and simulation dialogs can execute the same validated model through
+the native LibeR engine, NONMEM via an administrator-configured PsN `execute`,
+or the optional nlmixr2/rxode2 stack. External engines run on the selected
+local or remote worker; clients cannot submit executable paths or shell text.
+`nm_execution_engines()` reports availability in the current environment.
+Unsupported model semantics are rejected explicitly rather than approximated.
+
 ## AI-assisted development
 
 GPT-5.6 was used as an AI engineering collaborator to help implement and review

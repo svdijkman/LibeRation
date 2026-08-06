@@ -1,5 +1,20 @@
-# LibeRation 0.10.2
+# LibeRation 0.10.3
 
+- Adds allow-listed `LibeR`, `NONMEM`, and `nlmixr2` execution choices to the
+  estimation and simulation dialogs. NONMEM jobs are translated to a control
+  stream and run through administrator-configured PsN; nlmixr2 jobs use a
+  restricted semantic translation of supported solved-ADVAN and `$DES` models.
+- Normalizes supported external-engine estimates, ETAs, tables, timings, and
+  covariance output into ordinary LibeRation runs. When audit artifacts are
+  requested, original NONMEM outputs are preserved while nlmixr2 equivalents
+  are generated with explicit provenance.
+- Adds disabled-by-default audit-artifact controls to estimation and simulation
+  dialogs. Selected runs generate checksum-verified NONMEM-style listings,
+  control streams, estimate/ETA/covariance files where applicable, and output
+  tables; unchecked runs retain the existing lightweight result path.
+- Materializes optional audit bundles once under each saved run, records their
+  provenance in the workspace manifest, verifies them on demand with
+  `nm_project_audit_artifacts()`, and removes them with their owning run.
 - Extends the remote-server dialog with an SSH readiness assistant. On Windows
   it can install the Microsoft OpenSSH Client through the optional-feature
   mechanism, enable `ssh-agent`, discover or generate protected Ed25519 keys,

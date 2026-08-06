@@ -207,6 +207,7 @@
     has_comparison = rep(FALSE, nrow(snapshots)),
     has_scm = rep(FALSE, nrow(snapshots)),
     has_covariance = rep(FALSE, nrow(snapshots)),
+    has_audit_artifacts = rep(FALSE, nrow(snapshots)),
     queue_id = character(nrow(snapshots)),
     queue_job_id = character(nrow(snapshots))
   )
@@ -353,6 +354,9 @@ nm_project_create <- function(workspace, name, id = NULL, description = NULL) {
   if (!dir.create(file.path(directory, "diagnostics"), showWarnings = FALSE)) {
     .nm_stop("Unable to create project diagnostics directory: ", id, ".")
   }
+  if (!dir.create(file.path(directory, "audit-artifacts"), showWarnings = FALSE)) {
+    .nm_stop("Unable to create project audit-artifact directory: ", id, ".")
+  }
   now <- format(Sys.time(), "%Y-%m-%dT%H:%M:%OS3Z", tz = "UTC")
   manifest <- list(
     schema = "liberation.project", version = 2L,
@@ -371,7 +375,7 @@ nm_project_create <- function(workspace, name, id = NULL, description = NULL) {
       has_bootstrap = logical(), has_profile = logical(), has_sir = logical(),
       has_ppc = logical(), has_waic = logical(), has_psis_loo = logical(),
       has_comparison = logical(), has_scm = logical(),
-      has_covariance = logical(),
+      has_covariance = logical(), has_audit_artifacts = logical(),
       stringsAsFactors = FALSE
     )
   )
@@ -479,7 +483,8 @@ nm_project_save <- function(workspace, project, model = NULL, data = NULL,
     has_bootstrap = FALSE, has_profile = FALSE, has_sir = FALSE,
     has_ppc = FALSE, has_waic = FALSE, has_psis_loo = FALSE,
     has_comparison = FALSE, has_scm = FALSE,
-    has_covariance = FALSE, queue_id = "", queue_job_id = "",
+    has_covariance = FALSE, has_audit_artifacts = FALSE,
+    queue_id = "", queue_job_id = "",
     stringsAsFactors = FALSE
   ))
   manifest$updated <- now
@@ -520,6 +525,9 @@ nm_project_save_run <- function(workspace, project, version, result, label = NUL
   if (!kind %in% c("estimation", "simulation")) {
     .nm_stop("A model run must contain an estimation or simulation result.")
   }
+  audit_bundle <- attr(result, "audit_artifacts", exact = TRUE)
+  if (!is.null(audit_bundle)) .nm_audit_bundle_validate(audit_bundle)
+  attr(result, "audit_artifacts") <- NULL
   source <- nm_project_load(workspace, project, version)
   model <- model %||% source$model
   data <- data %||% source$data
@@ -537,6 +545,18 @@ nm_project_save_run <- function(workspace, project, version, result, label = NUL
                sprintf("%08x", sample.int(.Machine$integer.max, 1L)))
   id <- .nm_workspace_component(id, "run id")
   now <- format(Sys.time(), "%Y-%m-%dT%H:%M:%OS3Z", tz = "UTC")
+  audit_manifest <- if (is.null(audit_bundle)) NULL else {
+    .nm_project_materialize_audit(workspace, project, id, audit_bundle)
+  }
+  audit_path <- file.path(
+    .nm_project_path(workspace, project), "audit-artifacts", id
+  )
+  keep_audit <- FALSE
+  on.exit({
+    if (!keep_audit && !is.null(audit_manifest) && dir.exists(audit_path)) {
+      unlink(audit_path, recursive = TRUE, force = TRUE)
+    }
+  }, add = TRUE)
   run <- list(
     version = 2L, id = id, project = manifest$id, label = label, created = now,
     entry_type = "run", parent_id = version, run_number = number,
@@ -545,7 +565,8 @@ nm_project_save_run <- function(workspace, project, version, result, label = NUL
       R = R.version.string, platform = R.version$platform,
       LibeRation = as.character(utils::packageVersion("LibeRation")),
       queue_id = as.character(queue_id %||% ""),
-      queue_job_id = as.character(queue_job_id %||% "")
+      queue_job_id = as.character(queue_job_id %||% ""),
+      audit_artifacts = audit_manifest
     )
   )
   directory <- .nm_project_path(workspace, project)
@@ -567,12 +588,14 @@ nm_project_save_run <- function(workspace, project, version, result, label = NUL
     has_covariance = inherits(result, "nm_fit") &&
       !is.null(result$covariance) &&
       !identical(result$covariance$status %||% "completed", "failed"),
+    has_audit_artifacts = !is.null(audit_manifest),
     queue_id = as.character(queue_id %||% ""),
     queue_job_id = as.character(queue_job_id %||% ""),
     stringsAsFactors = FALSE
   ))
   manifest$updated <- now
   .nm_workspace_atomic_save(manifest, file.path(directory, "manifest.rds"))
+  keep_audit <- TRUE
   invisible(id)
 }
 
@@ -716,6 +739,8 @@ nm_project_delete_snapshot <- function(workspace, project, snapshot) {
     }
     diagnostic <- file.path(directory, "diagnostics", paste0(target, ".rds"))
     if (file.exists(diagnostic)) unlink(diagnostic, force = TRUE)
+    artifacts <- file.path(directory, "audit-artifacts", target)
+    if (dir.exists(artifacts)) unlink(artifacts, recursive = TRUE, force = TRUE)
   }
   manifest$snapshots <- manifest$snapshots[!manifest$snapshots$id %in% targets, , drop = FALSE]
   manifest$updated <- format(Sys.time(), "%Y-%m-%dT%H:%M:%OS3Z", tz = "UTC")

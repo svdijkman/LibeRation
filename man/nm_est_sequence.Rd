@@ -4,7 +4,13 @@
 \alias{nm_est_sequence}
 \title{Run multiple estimation methods sequentially}
 \usage{
-nm_est_sequence(model, data, stages, on_error = c("stop", "return"))
+nm_est_sequence(
+  model,
+  data,
+  stages,
+  on_error = c("stop", "return"),
+  audit_artifacts = FALSE
+)
 }
 \arguments{
 \item{model}{An [nm_model()] or compiled [NMEngine()].}
@@ -15,6 +21,9 @@ nm_est_sequence(model, data, stages, on_error = c("stop", "return"))
 
 \item{on_error}{Stop with an `nm_est_sequence_error`, or return the last
 successful fit with failure metadata.}
+
+\item{audit_artifacts}{Generate one audit bundle for the final sequence
+result. Intermediate stages remain represented in the final fit metadata.}
 }
 \value{
 The final `nm_fit`, augmented with sequential-estimation metadata.

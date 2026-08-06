@@ -1120,7 +1120,8 @@ liber_gui <- function(model = NULL, data = NULL, queue = NULL,
         job_count = nrow(jobs_payload),
         ssh_tunnel_allowed = ssh_tunnel_allowed,
         connection_test = state$remote_test,
-        ssh_setup = state$ssh_setup
+        ssh_setup = state$ssh_setup,
+        execution_engines = .liber_gui_rows(nm_execution_engines())
       )
       run_output <- NULL
       if (isTRUE(state$data_payload)) {
@@ -1935,11 +1936,13 @@ liber_gui <- function(model = NULL, data = NULL, queue = NULL,
           } else {
             .liber_simulation_dataset(state$data, state$model, event)
           }
+          engine <- .nm_execution_engine(event$engine %||% "liber")
           arguments <- list(
             nsim = max(1L, as.integer(event$replicates %||% 1L)),
             random_effects = TRUE, residual = TRUE,
             seed = as.integer(event$seed %||% sample.int(.Machine$integer.max, 1L)),
-            n_cores = max(1L, as.integer(event$nCores %||% 1L))
+            n_cores = max(1L, as.integer(event$nCores %||% 1L)),
+            audit_artifacts = isTRUE(event$auditArtifacts)
           )
           if (isTRUE(event$useFit) && inherits(state$fit, "nm_fit")) {
             arguments$theta <- state$fit$theta
@@ -1952,7 +1955,10 @@ liber_gui <- function(model = NULL, data = NULL, queue = NULL,
             parent_version <- ensure_parent_version()
             start_background(
               "simulate",
-              list(model = state$model, data = simulation_data, args = arguments),
+              list(
+                engine = engine, model = state$model,
+                data = simulation_data, args = arguments
+              ),
               label = "Simulation",
               metadata = list(
                 success = "Simulation completed",
@@ -1969,12 +1975,14 @@ liber_gui <- function(model = NULL, data = NULL, queue = NULL,
             parent_version <- ensure_parent_version()
             job <- LibeRties::ls_job(
               "simulate", state$model, simulation_data, arguments = arguments,
-              label = as.character(event$label %||% "Simulation")
+              label = as.character(event$label %||% "Simulation"),
+              engine = engine
             )
             id <- submit_with_intent(q, job, list(
               project = state$project, model = state$model, data = simulation_data,
               label = as.character(event$label %||% "Simulation"),
-              version = parent_version, type = "simulate", method = "simulation",
+              version = parent_version, type = "simulate",
+              method = paste(toupper(engine), "simulation"),
               queue_id = state$queue_id
             ))
             refresh_jobs(start = TRUE)
@@ -1987,6 +1995,7 @@ liber_gui <- function(model = NULL, data = NULL, queue = NULL,
           if (is.null(state$model) || is.null(state$data)) {
             .nm_stop("Load both a model and dataset before estimation.")
           }
+          engine <- .nm_execution_engine(event$engine %||% "liber")
           stages <- .liber_estimation_stages(event)
           sequential <- length(stages) > 1L
           methods <- vapply(stages, `[[`, character(1), "method")
@@ -1995,18 +2004,26 @@ liber_gui <- function(model = NULL, data = NULL, queue = NULL,
           } else {
             c(list(method = stages[[1L]]$method), stages[[1L]]$arguments)
           }
+          arguments$audit_artifacts <- isTRUE(event$auditArtifacts)
           q <- active_queue()
           run_label <- trimws(as.character(event$label %||% ""))
           method_label <- paste(methods, collapse = " -> ")
+          display_method_label <- paste(
+            switch(engine, liber = "LibeR", nonmem = "NONMEM", nlmixr2 = "nlmixr2"),
+            method_label
+          )
           if (!nzchar(run_label)) run_label <- paste(method_label, "estimation")
           if (is.null(q)) {
             parent_version <- ensure_parent_version()
             start_background(
               if (sequential) "estimate_sequence" else "estimate",
-              list(model = state$model, data = state$data, args = arguments),
-              label = paste(method_label, "estimation"),
+              list(
+                engine = engine, model = state$model,
+                data = state$data, args = arguments
+              ),
+              label = paste(display_method_label, "estimation"),
               metadata = list(
-                success = paste(method_label, "estimation completed"),
+                success = paste(display_method_label, "estimation completed"),
                 label = run_label, project = state$project,
                 parent_version = parent_version,
                 model = state$model, data = state$data
@@ -2021,12 +2038,12 @@ liber_gui <- function(model = NULL, data = NULL, queue = NULL,
             job <- LibeRties::ls_job(
               if (sequential) "estimate_sequence" else "estimate",
               state$model, state$data, arguments = arguments,
-              label = run_label
+              label = run_label, engine = engine
             )
             id <- submit_with_intent(q, job, list(
               project = state$project, model = state$model, data = state$data,
               label = run_label, version = parent_version,
-              type = "estimate", method = method_label,
+              type = "estimate", method = display_method_label,
               queue_id = state$queue_id
             ))
             refresh_jobs(start = TRUE)

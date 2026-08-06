@@ -158,6 +158,35 @@ instead.
 See the LibeRties vignettes for service deployment, authentication, resource
 limits, cancellation, logs, and reverse-proxy guidance.
 
+The simulation and estimation popups also provide an **Engine** selector.
+`LibeR` is the native default; `NONMEM` invokes an administrator-configured PsN
+`execute`, and `nlmixr2` uses the optional nlmixr2/rxode2 packages installed on
+the selected worker. The model and event data remain the same typed LibeRation
+objects. External adapters reject unsupported semantics rather than silently
+changing the model. The nlmixr2 adapter currently accepts common solved ADVAN
+models, direct `$PRED`, and ordinary `$DES` ODE models with additive,
+proportional, combined, or log-normal residual error.
+
+```{r external-engines, eval=FALSE}
+nm_execution_engines()
+
+fit_nonmem <- nm_external_run(
+  model, data, engine = "nonmem", operation = "estimate",
+  method = "FOCEI", maxit = 500, covariance = TRUE
+)
+
+fit_nlmixr <- nm_external_run(
+  model, data, engine = "nlmixr2", operation = "estimate",
+  method = "SAEM", n_iter = 500, burn = 150
+)
+```
+
+Clients choose only the allow-listed engine identifier. Executable locations,
+module commands, and shell text are worker configuration and cannot be placed
+in a remote job. Selecting **Create audit artifacts** preserves original
+NONMEM outputs or creates compatible LibeR/nlmixr2 files with provenance and
+checksums; leaving it clear avoids their storage and transfer overhead.
+
 ## Import a NONMEM control stream
 
 The importer translates the supported semantic subset and preserves
