@@ -2,9 +2,9 @@ test_that("SSH tunnel settings are validated and translated without a shell", {
   identity <- tempfile("liber-ssh-key-")
   writeLines("test fixture", identity)
   config <- list(
-    host = "myriad.rc.ucl.ac.uk", user = "ucabcde", port = 22L,
+    host = "login.cluster.example.org", user = "researcher", port = 22L,
     remote_host = "127.0.0.1", remote_port = 8000L, local_port = 49199L,
-    proxy_host = "ssh-gateway.ucl.ac.uk", proxy_user = "ucabcde",
+    proxy_host = "gateway.example.org", proxy_user = "researcher",
     proxy_port = 22L, identity_file = identity,
     accept_new_host_key = TRUE, auto_start = TRUE
   )
@@ -17,8 +17,8 @@ test_that("SSH tunnel settings are validated and translated without a shell", {
   expect_true("-F" %in% command$args)
   expect_identical(tail(command$args, 1L), "liber-managed-target")
   ssh_config <- readLines(command$ssh_config_file, warn = FALSE)
-  expect_true(any(grepl("HostName ssh-gateway.ucl.ac.uk", ssh_config, fixed = TRUE)))
-  expect_true(any(grepl("User ucabcde", ssh_config, fixed = TRUE)))
+  expect_true(any(grepl("HostName gateway.example.org", ssh_config, fixed = TRUE)))
+  expect_true(any(grepl("User researcher", ssh_config, fixed = TRUE)))
   expect_true(any(grepl(
     normalizePath(identity, winslash = "/"), ssh_config, fixed = TRUE
   )))
@@ -28,7 +28,7 @@ test_that("SSH tunnel settings are validated and translated without a shell", {
   agent_command <- LibeRation:::.liber_ssh_tunnel_command(
     utils::modifyList(config, list(identity_file = "")), ssh = "ssh"
   )
-  expect_true("ucabcde@ssh-gateway.ucl.ac.uk" %in% agent_command$args)
+  expect_true("researcher@gateway.example.org" %in% agent_command$args)
   expect_true("-J" %in% agent_command$args)
   expect_identical(agent_command$ssh_config_file, "")
 
@@ -49,24 +49,24 @@ test_that("SSH tunnel settings are validated and translated without a shell", {
 test_that("SSH remote definitions survive client-settings upgrades", {
   workspace <- nm_workspace(tempfile("liber-ssh-settings-"))
   remote <- list(
-    name = "Myriad", connection_mode = "ssh_tunnel", token = "secret",
+    name = "Research cluster", connection_mode = "ssh_tunnel", token = "secret",
     timeout = 30, user = "researcher", url = "http://127.0.0.1:49199",
     ssh = list(
-      host = "myriad.rc.ucl.ac.uk", user = "ucabcde", port = 22L,
+      host = "login.cluster.example.org", user = "researcher", port = 22L,
       remote_host = "127.0.0.1", remote_port = 8000L, local_port = 0L,
       proxy_host = "", proxy_user = "", proxy_port = 22L,
       identity_file = "", accept_new_host_key = TRUE, auto_start = TRUE
     )
   )
   LibeRation:::.liber_client_settings_write(
-    workspace, selected_queue = "myriad", remotes = list(myriad = remote)
+    workspace, selected_queue = "cluster", remotes = list(cluster = remote)
   )
   restored <- LibeRation:::.liber_client_settings_read(workspace)
   expect_equal(restored$version, 8L)
-  expect_equal(restored$selected_queue, "myriad")
-  expect_equal(restored$remotes$myriad$connection_mode, "ssh_tunnel")
-  expect_equal(restored$remotes$myriad$ssh$host, "myriad.rc.ucl.ac.uk")
-  expect_equal(restored$remotes$myriad$ssh$local_port, 0L)
+  expect_equal(restored$selected_queue, "cluster")
+  expect_equal(restored$remotes$cluster$connection_mode, "ssh_tunnel")
+  expect_equal(restored$remotes$cluster$ssh$host, "login.cluster.example.org")
+  expect_equal(restored$remotes$cluster$ssh$local_port, 0L)
 })
 
 test_that("SSH readiness discovers local keys without reading private material", {
@@ -121,6 +121,12 @@ test_that("the remote-server dialog exposes the managed SSH wizard", {
   expect_match(source, "Generate protected key", fixed = TRUE)
   expect_match(source, "Install on destination", fixed = TRUE)
   expect_match(source, "Test destination through gateway", fixed = TRUE)
+  expect_match(source, "login.cluster.example.org", fixed = TRUE)
+  expect_match(source, "gateway.example.org", fixed = TRUE)
+  institutional_destination <- paste(c("myriad", "rc", "ucl", "ac", "uk"), collapse = ".")
+  institutional_gateway <- paste(c("ssh-gateway", "ucl", "ac", "uk"), collapse = ".")
+  expect_false(grepl(institutional_destination, source, fixed = TRUE))
+  expect_false(grepl(institutional_gateway, source, fixed = TRUE))
 
   app <- liber_gui(workspace = tempfile("liber-ssh-gui-"), queue = FALSE,
                    launch.browser = NULL)
@@ -133,4 +139,5 @@ test_that("the remote-server dialog exposes the managed SSH wizard", {
   expect_match(body_text, "ssh_generate_key", fixed = TRUE)
   expect_match(body_text, "ssh_install_public_key", fixed = TRUE)
   expect_match(body_text, "ssh_test_hop", fixed = TRUE)
+  expect_false(grepl(institutional_gateway, body_text, fixed = TRUE))
 })

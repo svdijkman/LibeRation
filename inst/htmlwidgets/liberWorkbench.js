@@ -1579,9 +1579,9 @@
     var jobs = list(props.jobs), selected = React.useState(null), poll = React.useState(5), remoteModal = React.useState(false);
     var remoteName = React.useState("Remote server"), remoteUrl = React.useState("https://"), remoteToken = React.useState(""), remoteEditId = React.useState(null);
     var remoteMode = React.useState("direct"), remoteTesting = React.useState(false);
-    var sshHost = React.useState("myriad.rc.ucl.ac.uk"), sshUser = React.useState(""), sshPort = React.useState(22);
+    var sshHost = React.useState(""), sshUser = React.useState(""), sshPort = React.useState(22);
     var sshRemoteHost = React.useState("127.0.0.1"), sshRemotePort = React.useState(8000), sshLocalPort = React.useState(0);
-    var sshUseJump = React.useState(false), sshJumpHost = React.useState("ssh-gateway.ucl.ac.uk"), sshJumpUser = React.useState(""), sshJumpPort = React.useState(22);
+    var sshUseJump = React.useState(false), sshJumpHost = React.useState(""), sshJumpUser = React.useState(""), sshJumpPort = React.useState(22);
     var sshIdentityFile = React.useState(""), sshAcceptNew = React.useState(true), sshAutoStart = React.useState(true);
     var queues = list(props.server.queues), selectedQueue = queues.filter(function (queue) { return queue.id === props.server.queue_id; })[0] || {};
     var connectionTest = props.server.connection_test || {};
@@ -1608,9 +1608,9 @@
     function openRemote(queue) {
       queue=queue||{};var ssh=queue.ssh||{};
       remoteEditId[1](queue.id||null);remoteName[1](value(queue.name,"Remote server"));remoteUrl[1](value(queue.url,"https://"));remoteToken[1]("");
-      remoteMode[1](value(queue.connection_mode,"direct"));sshHost[1](value(ssh.host,"myriad.rc.ucl.ac.uk"));sshUser[1](value(ssh.user,""));sshPort[1](Number(value(ssh.port,22)));
+      remoteMode[1](value(queue.connection_mode,"direct"));sshHost[1](value(ssh.host,""));sshUser[1](value(ssh.user,""));sshPort[1](Number(value(ssh.port,22)));
       sshRemoteHost[1](value(ssh.remote_host,"127.0.0.1"));sshRemotePort[1](Number(value(ssh.remote_port,8000)));sshLocalPort[1](Number(value(ssh.local_port,0)));
-      sshUseJump[1](!!ssh.proxy_host);sshJumpHost[1](value(ssh.proxy_host,"ssh-gateway.ucl.ac.uk"));sshJumpUser[1](value(ssh.proxy_user,""));sshJumpPort[1](Number(value(ssh.proxy_port,22)));
+      sshUseJump[1](!!ssh.proxy_host);sshJumpHost[1](value(ssh.proxy_host,""));sshJumpUser[1](value(ssh.proxy_user,""));sshJumpPort[1](Number(value(ssh.proxy_port,22)));
       var initialIdentity=value(ssh.identity_file,value(sshSetup.recommended_key,""));
       sshIdentityFile[1](initialIdentity);sshAcceptNew[1](ssh.accept_new_host_key!==false);sshAutoStart[1](ssh.auto_start!==false);
       remoteTesting[1](false);emit(props,"queue_test_reset",{sshIdentityFile:initialIdentity});remoteModal[1](true);
@@ -1674,8 +1674,8 @@
             e("div",{className:"lw-info-banner"},"Passwords, passphrases and MFA responses are entered only in OpenSSH terminals. LibeRation stores a selected key path, never private-key contents."),
             e("div",{className:"lw-modal-section"},e("h4",null,"1. SSH destination"),
               e("div",{className:"lw-form-grid lw-form-grid-two"},
-                e(Field,{label:"SSH host"},e("input",{value:sshHost[0],placeholder:"myriad.rc.ucl.ac.uk",onChange:function(event){sshHost[1](event.target.value);}})),
-                e(Field,{label:"SSH user"},e("input",{value:sshUser[0],placeholder:"UCL user name",onChange:function(event){sshUser[1](event.target.value);}})),
+                e(Field,{label:"SSH host"},e("input",{value:sshHost[0],placeholder:"login.cluster.example.org",onChange:function(event){sshHost[1](event.target.value);}})),
+                e(Field,{label:"SSH user"},e("input",{value:sshUser[0],placeholder:"SSH user name",onChange:function(event){sshUser[1](event.target.value);}})),
                 e(Field,{label:"SSH port"},e("input",{type:"number",min:1,max:65535,value:sshPort[0],onChange:function(event){sshPort[1](Number(event.target.value));}})),
                 e(Field,{label:"Identity file (optional)"},e("input",{value:sshIdentityFile[0],placeholder:"Use ssh-agent or enter a local key path",onChange:function(event){sshIdentityFile[1](event.target.value);}}))),
               selectedSshKey.public_key?e("div",{className:"lw-ssh-public-key"},e("div",{className:"lw-ssh-section-heading"},e("div",null,e("strong",null,"Public key"),e("small",null,value(selectedSshKey.fingerprint,"Matching .pub file found"))),e(Button,{className:"lw-button-link",onClick:copyPublicKey},"Copy")),e("textarea",{readOnly:true,rows:2,value:selectedSshKey.public_key}),e("div",{className:"lw-inline-actions"},sshUseJump[0]?e(Button,{className:"lw-button-quiet",onClick:function(){sshAction("ssh_install_public_key",{hop:"gateway"});}},"Install on gateway…"):null,e(Button,{className:"lw-button-quiet",onClick:function(){sshAction("ssh_install_public_key",{hop:"destination"});}},"Install on destination…"))):null),
@@ -1688,11 +1688,10 @@
             e("div",{className:"lw-modal-section"},e("h4",null,"3. Optional jump host"),
               e("label",{className:"lw-check"},e("input",{type:"checkbox",checked:sshUseJump[0],onChange:function(event){sshUseJump[1](event.target.checked);}})," Connect through an SSH gateway"),
               sshUseJump[0]?e("div",{className:"lw-form-grid"},
-                e(Field,{label:"Jump host"},e("input",{value:sshJumpHost[0],onChange:function(event){sshJumpHost[1](event.target.value);}})),
+                e(Field,{label:"Jump host"},e("input",{value:sshJumpHost[0],placeholder:"gateway.example.org",onChange:function(event){sshJumpHost[1](event.target.value);}})),
                 e(Field,{label:"Jump user"},e("input",{value:sshJumpUser[0],placeholder:"Defaults to SSH user",onChange:function(event){sshJumpUser[1](event.target.value);}})),
                 e(Field,{label:"Jump port"},e("input",{type:"number",min:1,max:65535,value:sshJumpPort[0],onChange:function(event){sshJumpPort[1](Number(event.target.value));}}))):null,
-              e("div",{className:"lw-inline-actions"},sshUseJump[0]?e(Button,{className:"lw-button-quiet",onClick:function(){sshAction("ssh_test_hop",{hop:"gateway"});}},"Test gateway"):null,e(Button,{className:"lw-button-quiet",onClick:function(){sshAction("ssh_test_hop",{hop:"destination"});}},sshUseJump[0]?"Test destination through gateway":"Test destination")),
-              sshUseJump[0]&&String(sshJumpHost[0]).toLowerCase()==="ssh-gateway.ucl.ac.uk"?e("p",{className:"lw-help-text"},"UCL's gateway pool has separate home directories. After installing a key, synchronize ~/.ssh across both gateway machines as required by UCL Research Computing guidance."):null),
+              e("div",{className:"lw-inline-actions"},sshUseJump[0]?e(Button,{className:"lw-button-quiet",onClick:function(){sshAction("ssh_test_hop",{hop:"gateway"});}},"Test gateway"):null,e(Button,{className:"lw-button-quiet",onClick:function(){sshAction("ssh_test_hop",{hop:"destination"});}},sshUseJump[0]?"Test destination through gateway":"Test destination"))),
             e("div",{className:"lw-modal-section lw-modal-section-tinted"},e("h4",null,"4. Safety and lifecycle"),
               e("label",{className:"lw-check"},e("input",{type:"checkbox",checked:sshAcceptNew[0],onChange:function(event){sshAcceptNew[1](event.target.checked);}})," Accept a new host key, but reject a changed key"),
               e("label",{className:"lw-check"},e("input",{type:"checkbox",checked:sshAutoStart[0],onChange:function(event){sshAutoStart[1](event.target.checked);}})," Reopen this tunnel when the local GUI starts"),

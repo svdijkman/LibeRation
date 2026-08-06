@@ -2599,14 +2599,6 @@ liber_gui <- function(model = NULL, data = NULL, queue = NULL,
           "An OpenSSH terminal was opened to install the public key on the", hop,
           "host. Enter any password, passphrase, or MFA response only in that terminal."
         )
-        if (!inherits(launched, "error") && identical(hop, "gateway") &&
-            identical(tolower(as.character(event$sshJumpHost %||% "")[[1L]]),
-                      "ssh-gateway.ucl.ac.uk")) {
-          message <- paste(
-            message,
-            "UCL uses two gateway machines; follow the displayed UCL synchronization reminder afterward."
-          )
-        }
         update_ssh_setup(identity_file, if (inherits(launched, "error")) "error" else "success", message)
         return(invisible(NULL))
       }

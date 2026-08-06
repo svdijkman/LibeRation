@@ -1,3 +1,13 @@
+# LibeRation 0.10.4
+
+- Removes institution-specific cluster and gateway host names from the
+  SSH-tunnel wizard's initial values, edit fallbacks, placeholders, and server
+  messages. New server definitions now start empty and use neutral
+  `example.org` guidance.
+- Replaces institution-specific SSH test fixtures with generic cluster hosts
+  and adds regression assertions that prevent those addresses returning to
+  the distributed GUI or server controller.
+
 # LibeRation 0.10.3
 
 - Adds allow-listed `LibeR`, `NONMEM`, and `nlmixr2` execution choices to the
