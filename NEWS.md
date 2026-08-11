@@ -1,3 +1,8 @@
+# LibeRation 0.10.8
+
+- Declares the `withr` test dependency explicitly so strict CRAN-style checks
+  remain portable across Windows, Linux, and macOS runners.
+
 # LibeRation 0.10.7
 
 - Reuses an exactly matching NPML/NPAG subject-by-support likelihood grid
