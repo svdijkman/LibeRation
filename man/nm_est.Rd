@@ -25,6 +25,7 @@ nm_est(
   collect_output = TRUE,
   allow_fd_gradient = FALSE,
   audit_artifacts = FALSE,
+  numerical_mode = NULL,
   ...
 )
 }
@@ -87,32 +88,24 @@ if an advertised population gradient is non-finite. The default is
 a listing, control-stream representation, estimates, covariance/correlation
 matrices when available, subject ETAs, and saved output tables.}
 
-\item{...}{Method-specific controls. For `method = "GQ"`, use `gq_grid`
-(`"auto"`, `"tensor"`, or `"smolyak"`), `gq_order` (tensor nodes per ETA
-dimension, default 5), `gq_level` (Smolyak level, default 3),
-`gq_adaptive` (default `TRUE`), `gq_max_points` (retained-grid allocation
-guard, default 100000), and `gq_gradient` (`"score"` or the slower
-`"finite_grid"`). Automatic selection uses tensor quadrature through
-three ETAs and Smolyak quadrature for higher-dimensional models.
-For `method = "HMC"` or `"NUTS"`, controls include `n_warmup` (500),
-`n_sample` (1000 per chain), `n_thin` (1), `n_chains` (4), `seed`,
-optional `step_size`, `target_acceptance` (0.8), `adapt_mass` (`TRUE`),
-`n_leapfrog` (10; HMC), `max_depth` (10; NUTS), and
-`divergence_threshold` (1000). `sampler_backend = "native"` keeps complete
-trajectories in C++; `"r"` retains the slower reference implementation
-for numerical comparison. For `method = "NPML"` or `"NPAG"`, use
-`np_supports` for an optional fixed starting matrix, `np_points` (25),
-`np_max_support` (100), `np_min_weight` (1e-5), `np_weight_maxit` (1000),
-`np_cycles` (3), and, for NPAG, `np_grid_step` (1), `np_grid_decay`
-(0.5), and `np_max_candidates` (500). `np_estimate_population` controls
-alternating THETA/SIGMA updates. Ordinary covariance is not regular for a
-discrete support distribution; use bootstrap uncertainty for NPML/NPAG.
-IMP, SAEM, and BAYES accept `mu_specialization = TRUE` (the default).
+\item{numerical_mode}{Numerical policy. `"nonmem_compatibility"` is the
+conservative default and uses the defining NONMEM method semantics and
+matched control interpretation for methods with a NONMEM counterpart;
+implementation-specific random streams and undocumented internal stopping
+details are not claimed to be bitwise identical. `"liber_optimized"`
+preserves each estimator's defining target and update equations while
+enabling validated LibeR-specific proposals, caching, batching, and solver
+accelerations. Explicit estimator controls take precedence in either mode.
+IMP, GQ, SAEM, and BAYES accept `mu_specialization = TRUE` (the default).
 IMP then re-centres cached conditional-mode starts as MU values change.
 When an affine MU design varies between subjects (for example an estimated
 covariate coefficient), IMP uses the score path as a warm start and
 automatically refines it against the exact finite common-random-number
 objective.
+GQ reuses the same execution-local conditional-state cache. In optimized
+mode, compiled FOCE/FOCEI/Laplace objectives also preserve `MU + ETA`
+while warm-starting modes as MU values move; compatibility mode is
+unchanged.
 Eligible affine MU models use a generalized least-squares fixed-effect
 M-step in SAEM, with vectorized OMEGA-keyed normal-equation caching and a
 closed-form-only fast path, and a Metropolis-corrected Gaussian MU block
@@ -120,20 +113,156 @@ in BAYES.
 Non-affine, rank-deficient, or otherwise ineligible models automatically
 retain the ordinary estimator path and record the reason in
 `fit$diagnostics$mu_specialization`.}
+
+\item{...}{Method-specific controls. ITS accepts `its_mstep_maxit`,
+`its_mstep_schedule` (`"fixed"` or `"progressive"`), and
+`its_acceleration` (`"none"` or safeguarded `"aitken"`).
+`its_eta_schedule` optionally relaxes early conditional-mode tolerances
+by `its_eta_tolerance_multiplier` before returning to the requested
+tolerance for the final distribution. The
+compatibility policy fixes the established single-step schedule without
+acceleration or tolerance relaxation; the optimized policy progressively
+increases M-step effort and accepts an accelerated point only when its
+auxiliary objective improves.
+IMP accepts `imp_algorithm` (`"mcem"`, the default, or the explicitly
+labelled `"marginal_ml"` finite-common-random-number alternative),
+`n_imp`, `seed`, and `imp_mstep_maxit`. Optimized MCEM additionally
+supports progressive sample/M-step schedules, antithetic or randomized
+quasi-Monte-Carlo (`"rqmc"`) draws, optional ESS-directed per-subject allocation,
+Gaussian, Student-t, or defensive-mixture proposals, guarded proposal-mode
+reuse, and stationarity stopping through the `imp_*` controls.
+`imp_proposal_curvature = "auto"` uses a Fisher/Gauss--Newton proposal
+curvature in optimized mode and the exact conditional Hessian in
+compatibility mode; exact importance weights preserve the MCEM target.
+The optimized path can also keep the weighted M-step and closed-form
+SIGMA/OMEGA updates in its persistent native context. The
+compatibility policy retains fixed sample/M-step counts, random Gaussian
+proposals, exact proposal curvature, fresh conditional modes, and its
+established optimizer trajectory.
+For `method = "GQ"`, use `gq_grid`
+(`"auto"`, `"tensor"`, or `"smolyak"`), `gq_order` (tensor nodes per ETA
+dimension, default 5), `gq_level` (Smolyak level, default 3),
+`gq_adaptive` (default `TRUE`), `gq_max_points` (retained-grid allocation
+guard, default 100000), and `gq_gradient` (`"score"`, `"finite_grid"`, or
+`"auto"`). A score-based search is always finished against the complete
+finite adaptive-grid objective before the estimate is returned. Automatic
+selection uses tensor quadrature through three ETAs and Smolyak quadrature
+for higher-dimensional models.
+For `method = "HMC"` or `"NUTS"`, controls include `n_warmup` (500),
+`n_sample` (1000 per chain), `n_thin` (1), `n_chains` (4), `seed`,
+optional `step_size`, `target_acceptance` (0.8), `adapt_mass` (`TRUE`),
+`n_leapfrog` (10; HMC), `max_depth` (10; NUTS), `nuts_variant`
+(`"auto"`, `"classic_slice"`, or `"multinomial"`), and
+`divergence_threshold` (1000). `hmc_metric` selects `"unit"`,
+`"diagonal"`, `"dense"`, or `"block"` Euclidean geometry; optional
+one-based `hmc_metric_blocks` override the default population/subject
+partition. Warmup uses initial fast, expanding slow metric windows, and
+terminal fast phases controlled by `adapt_initial_buffer` (75),
+`adapt_first_window` (25), and `adapt_terminal_buffer` (50).
+`initialization` selects the model point, bounded random jitter, or the
+robust automatic sequence, with `initialization_radius` and
+`initialization_attempts` controlling the latter. Per-chain energy and
+E-BFMI are retained alongside divergences and tree-depth diagnostics.
+`sampler_backend = "native"` keeps complete
+trajectories in C++; `"r"` retains the slower reference implementation
+for numerical comparison. `geometry = "auto"` uses a whitened,
+MU-aware non-centred ETA parameterization in `liber_optimized` mode when
+every ETA is MU-referenced and the base positive-definite OMEGA layout is
+available. `"centered"` forces the exact established target;
+`"mu_noncentered"` requires eligibility rather than silently falling back.
+The likelihood tape is unchanged and the Cholesky transform, Jacobian, and
+population/random-effect chain rules are differentiated exactly in both
+sampler backends. For `method = "NPML"` or `"NPAG"`, use
+`np_supports` for an optional fixed starting matrix, `np_points` (25),
+`np_max_support` (100), method-specific `np_min_weight` (0 for fixed-support
+NPML and 1e-5 for adaptive-grid NPAG), `np_weight_maxit` (1000),
+`np_cycles` (3), and, for NPAG, `np_grid_step` (1), `np_grid_decay`
+(0.5), and `np_max_candidates` (500). `np_estimate_population` controls
+alternating THETA/SIGMA updates. NPML ignores a nonzero pruning threshold
+with a warning; select NPAG when support adaptation is intended.
+Ordinary covariance is not regular for a
+discrete support distribution; use bootstrap uncertainty for NPML/NPAG.
+For `method = "SAEM"`, stochastic approximation is applied to a retained
+complete-data auxiliary-function state rather than to a single sampled
+conditional objective. `saem_kernel = "auto"` retains random-walk
+Metropolis in compatibility mode and selects a robust Laplace/Student-t
+independence Metropolis kernel (f-SAEM) for eligible ETA
+models in `liber_optimized` mode. `fsaem_refresh` (25) controls how often
+conditional modes and curvature are refreshed; `fsaem_eta_maxit` (50)
+bounds that calculation. `fsaem_distribution` selects `"student_t"`
+(the optimized automatic default) or `"gaussian"`; `fsaem_df` (7)
+controls Student-t tail weight. The optimized kernel also refreshes when the
+population point moves materially (`fsaem_parameter_refresh`, 0.15) or
+independence acceptance is poor (`fsaem_low_acceptance`, 0.1), and mixes
+in an exact OMEGA-scaled random-walk rescue kernel with probability
+`fsaem_rescue_probability` (0.1). Set that probability to zero and both
+adaptive thresholds conservatively to recover the fixed-refresh form.
+`saem_kernel = "random_walk"` is the explicit established-kernel comparator.
+SAEM always reports parameter/objective stationarity over
+`stationarity_window` (20) iterations using `stationarity_tolerance`
+(1e-3). `auto_stop` defaults to `FALSE` in compatibility mode and `TRUE`
+in optimized mode;
+`auto_stop_consecutive` and `auto_stop_min_iterations` make confirmation
+explicit. `saem_support_max` and `saem_support_prune` optionally bound the
+retained optimized Q support; both default to zero so the exact
+Robbins--Monro mixture is retained. Optimized execution can thin expensive
+numerical M-steps with `saem_mstep_interval_burn` and
+`saem_mstep_interval` while continuing every stochastic-approximation
+update, and uses post-burn Polyak parameter averaging by default;
+`saem_parameter_averaging = "none"` disables it and
+`saem_average_start` sets its first iteration. Compatibility mode forces
+both M-step intervals to one and disables averaging. `n_replicates` runs
+independently seeded sequential replicates, separated by
+`replicate_seed_stride`. Replicates are ranked with a common-seed marginal
+importance-sampling score rather than their incompatible stochastic
+auxiliary-function histories; `replicate_score_samples` (200),
+`replicate_score_seed`, and `replicate_score_eta_maxit` control that score.
+Use separate queued jobs for replicate-level parallelism.
+For `method = "BAYES"`, `outer_kernel = "auto"` retains the isotropic
+population random walk in compatibility mode and learns a full proposal
+covariance during burn-in in `liber_optimized` mode. The adaptive controls
+are `adaptive_start` (50), `adaptive_interval` (10), and optional
+`adaptive_target` (0.44 in one dimension, 0.234 otherwise). Explicit
+`outer_kernel = "isotropic"` preserves the former proposal. Eligible
+serial compatibility models run that established isotropic/random-walk
+algorithm in the persistent C++ coordinator while retaining R's RNG and
+proposal order; compatibility MU interweaving, subject parallelism, and
+iteration printing retain the R coordinator. Eligible optimized serial
+models additionally keep adaptation and Laplace/Student-t ETA sweeps in
+C++, including MU, IOV/general random effects, and guarded ODE retaping;
+`options(LibeRation.bayes_native_coordinator = FALSE)` retains the
+reference R coordinator for comparison. `eta_kernel = "auto"` uses the
+inexpensive OMEGA-scaled random walk for one ETA and a Laplace-Gaussian
+ETA proposal for multivariate ETAs; `"student_t"` plus `bayes_eta_df`
+provides a robust heavy-tailed alternative. Optimized BAYES also supports
+`delayed_rejection_scale` (0.25), independent `n_chains`, rank-normalized
+split R-hat, bulk/tail ESS, and mean Monte Carlo SE.
+`bayes_gibbs_omega = TRUE` uses exact inverse-gamma Gibbs updates when a
+free diagonal OMEGA has an explicit conjugate prior and the random-effect
+layout is eligible; all other OMEGA structures retain Metropolis updates.
+Subject-parallel models retain the exact R coordinator with PSOCK workers;
+independent chains can be distributed as separate queue jobs.}
 }
 \description{
 Deterministic conditional methods use exact CppAD gradients for ETA modes.
 LAPLACE uses the exact conditional Hessian; FOCE/FOCEI use the
 interaction-aware Gauss-Newton curvature; FO integrates the first-order
-Gaussian linearization analytically. GQ integrates the exact joint
-objective over ETAs with adaptive tensor or Smolyak sparse
-Gauss--Hermite quadrature.
-Stochastic methods use the same C++ joint objective and are implemented in
-the stochastic estimation module. HMC and NUTS use exact joint CppAD
-gradients with unconstrained parameter transforms, dual-averaged step-size
-adaptation, and a diagonal mass matrix. NPML and NPAG replace the Gaussian
-random-effect distribution with a discrete ETA support distribution; NPAG
-adapts, expands, and prunes that support.
+Gaussian linearization analytically. ITS alternates conditional-mode and
+first-order conditional-variance calculations with approximate single-step
+population updates. GQ approximates the ETA
+marginal integral with finite adaptive tensor or Smolyak sparse
+Gauss--Hermite quadrature. IMP uses importance-sampling Monte-Carlo EM;
+each E-step calculates normalized importance weights and its M-step optimizes
+the corresponding complete-data expectation. SAEM applies the
+Robbins--Monro recurrence to that complete-data auxiliary function.
+HMC and NUTS use exact joint CppAD gradients with unconstrained parameter
+transforms and dual-averaged step-size adaptation. Optimized NUTS uses
+multinomial progressive trajectory sampling, a generalized U-turn check,
+three-stage warmup, robust initialization, and windowed regularized diagonal,
+dense, or block metric adaptation. Energy traces and E-BFMI are retained; the
+classic slice variant is available for comparison. NPML estimates a discrete
+fixed-support maximum-likelihood distribution. NPAG adds explicit support
+expansion and pruning around the same constrained mixture likelihood.
 Serial FO, FOCE, FOCEI, Laplace, and ITS fits expose a persistent C++
 population objective through thin callbacks to R's L-BFGS-B/BFGS optimizer;
 PSOCK fits retain R coordination across their persistent C++ workers.

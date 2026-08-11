@@ -42,6 +42,41 @@ test_that("nlmixr2 translation rejects model families it cannot preserve", {
   )
 })
 
+test_that("nlmixr2 controls preserve supported estimator semantics", {
+  skip_if_not(requireNamespace("nlmixr2est", quietly = TRUE))
+  skip_if_not(requireNamespace("rxode2", quietly = TRUE))
+  common <- list(
+    maxit = 17L, eta_maxit = 23L, significant_digits = 5L,
+    covariance = TRUE, covariance_type = "hessian", n_cores = 1L,
+    seed = 31415L
+  )
+  controls <- lapply(
+    c("FO", "FOCE", "FOCEI", "LAPLACE"),
+    function(method) LibeRation:::.nm_nlmixr_control(method, common)
+  )
+  expect_identical(vapply(controls, `[[`, character(1), "est"),
+                   c("fo", "foce", "focei", "laplace"))
+  expect_s3_class(controls[[1L]]$control, "foControl")
+  expect_true(isTRUE(controls[[1L]]$control$posthoc))
+  expect_identical(controls[[2L]]$control$interaction, 0L)
+  expect_identical(controls[[3L]]$control$interaction, 1L)
+  expect_identical(controls[[4L]]$control$nAGQ, 1L)
+
+  imp <- LibeRation:::.nm_nlmixr_control(
+    "IMP", c(common, list(n_imp = 50L))
+  )
+  expect_identical(imp$est, "imp")
+  expect_identical(imp$control$isample, 50L)
+  expect_identical(imp$control$nIter, 17L)
+
+  saem <- LibeRation:::.nm_nlmixr_control(
+    "SAEM", c(common, list(n_iter = 30L, burn = 10L, mcmc_steps = 2L))
+  )
+  expect_identical(saem$est, "saem")
+  expect_identical(saem$control$mcmc$niter, c(10L, 20L))
+  expect_identical(saem$control$mcmc$nmc, 2L)
+})
+
 test_that("NONMEM output parser normalizes estimates and ETAs", {
   fixture <- estimation_fixture()
   directory <- tempfile("nonmem-parser-")

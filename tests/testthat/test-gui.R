@@ -147,6 +147,11 @@ test_that("legacy workbench layout and workflow controls are present", {
   estimator_source <- paste(deparse(body(LibeRation:::.liber_estimation_arguments)), collapse = "\n")
   expect_match(estimator_source, 'event$gqGrid', fixed = TRUE)
   expect_match(estimator_source, 'event$gqLevel', fixed = TRUE)
+  expect_match(estimator_source, 'event$hmcMetric', fixed = TRUE)
+  nuts_controls <- LibeRation:::.liber_estimation_arguments(list(
+    method = "NUTS", hmcMetric = "dense"
+  ))
+  expect_identical(nuts_controls$hmc_metric, "dense")
 })
 
 test_that("Help AI receives compact saved-run evidence on demand", {
@@ -504,7 +509,7 @@ test_that("the initial queue refresh runs inside a reactive isolate", {
 })
 
 test_that("client queue settings live in the workspace and survive GUI recreation", {
-  skip_if_not_installed("LibeRties")
+  skip_if_not_installed("LibeRties", minimum_version = "0.8.3")
   root <- tempfile("gui-client-settings-")
   workspace <- nm_workspace(root)
   remotes <- list(team = list(
@@ -545,7 +550,7 @@ test_that("client queue settings live in the workspace and survive GUI recreatio
 })
 
 test_that("durable submission intents survive before a remote job id exists", {
-  skip_if_not_installed("LibeRties")
+  skip_if_not_installed("LibeRties", minimum_version = "0.8.3")
   root <- tempfile("gui-submission-intent-")
   dir.create(root)
   workspace <- nm_workspace(root)
@@ -632,7 +637,7 @@ durable_gui_test_queue <- function(ambiguous_submit = FALSE,
 }
 
 test_that("an ambiguous submission response is replayed without duplication", {
-  skip_if_not_installed("LibeRties")
+  skip_if_not_installed("LibeRties", minimum_version = "0.8.3")
   root <- tempfile("gui-ambiguous-submit-")
   dir.create(root)
   queue <- durable_gui_test_queue(ambiguous_submit = TRUE)
@@ -684,7 +689,7 @@ test_that("an ambiguous submission response is replayed without duplication", {
 })
 
 test_that("completed results keep reconciling after a transient download failure", {
-  skip_if_not_installed("LibeRties")
+  skip_if_not_installed("LibeRties", minimum_version = "0.8.3")
   root <- tempfile("gui-result-retry-")
   dir.create(root)
   queue <- durable_gui_test_queue(result_failures = 1L)
@@ -809,7 +814,7 @@ test_that("GUI parameter names support models without random effects", {
 })
 
 test_that("all supported ADVAN templates are valid models", {
-  for (advan in 1:14) {
+  for (advan in 1:18) {
     expect_s3_class(LibeRation:::.liber_model_template(advan), "nm_model")
   }
   ode <- LibeRation:::.liber_model_template(13L, n_state = 4L, problem = "Four-state ODE")
@@ -1013,7 +1018,7 @@ test_that("model comparison includes GOF and only diagnostics common to both run
 })
 
 test_that("local queued jobs are durable and opening a result is idempotent", {
-  skip_if_not_installed("LibeRties")
+  skip_if_not_installed("LibeRties", minimum_version = "0.8.3")
   root <- tempfile("gui-local-queue-")
   queue_root <- tempfile("gui-jobs-")
   dir.create(root)
@@ -1065,7 +1070,7 @@ test_that("local queued jobs are durable and opening a result is idempotent", {
 })
 
 test_that("default liber_gui creates and exposes its persistent local queue", {
-  skip_if_not_installed("LibeRties")
+  skip_if_not_installed("LibeRties", minimum_version = "0.8.3")
   root <- tempfile("gui-default-queue-")
   dir.create(root)
   app <- liber_gui(workspace = root, queue = NULL, launch.browser = NULL)

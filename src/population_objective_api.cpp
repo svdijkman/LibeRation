@@ -45,3 +45,14 @@ Rcpp::List liberation_population_objective_state(
 Rcpp::List liberation_population_objective_telemetry(SEXP pointer) {
   return liberation::population_objective_telemetry_api(pointer);
 }
+
+// Optimise a persistent compiled population objective without returning to R
+// for each value/gradient evaluation.
+// [[Rcpp::export(name = ".liberation_population_objective_native_optimizer")]]
+Rcpp::List liberation_population_objective_native_optimizer(
+    SEXP pointer, const Rcpp::NumericVector& start,
+    const Rcpp::NumericVector& lower, const Rcpp::NumericVector& upper,
+    int maxit = 200, double tolerance = 1e-6, int trace = 0) {
+  return liberation::population_objective_native_optimizer_api(
+    pointer, start, lower, upper, maxit, tolerance, trace);
+}

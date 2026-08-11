@@ -333,6 +333,62 @@ struct ResidualGroupSpec {
   std::string transform = "tanh";
 };
 
+// Input names are fixed for the lifetime of a compiled model.  Parsing
+// THETA_*, ETA_*, SIGMA_*, and A_* on every data row (and, for ODE models, on
+// every right-hand-side evaluation) was measurable for dense designs.  Keep
+// the original names for data/derived-parameter lookup, but resolve indexed
+// bindings once when the engine is constructed.
+struct CompiledInputBinding {
+  std::string name;
+  int theta = -1;
+  int eta = -1;
+  int sigma = -1;
+  int state = -1;
+  int algebraic = -1;
+  int lag = -1;
+  bool zero_error = false;
+};
+
+inline int compiled_indexed_name(const std::string& name, const char* prefix) {
+  const std::string prefix_string(prefix);
+  if (name.rfind(prefix_string, 0) != 0) return -1;
+  try {
+    const int index = std::stoi(name.substr(prefix_string.size()));
+    return index - 1;
+  } catch (...) {
+    return -1;
+  }
+}
+
+inline std::vector<CompiledInputBinding> compile_input_bindings(
+    const std::vector<std::string>& names,
+    const std::vector<std::string>& algebraic_names = {},
+    const std::vector<std::string>& lag_names = {}) {
+  std::vector<CompiledInputBinding> result;
+  result.reserve(names.size());
+  for (const std::string& name : names) {
+    CompiledInputBinding binding;
+    binding.name = name;
+    binding.theta = compiled_indexed_name(name, "THETA_");
+    binding.eta = compiled_indexed_name(name, "ETA_");
+    binding.sigma = compiled_indexed_name(name, "SIGMA_");
+    binding.state = compiled_indexed_name(name, "A_");
+    const auto algebraic = std::find(
+      algebraic_names.begin(), algebraic_names.end(), name);
+    if (algebraic != algebraic_names.end()) {
+      binding.algebraic = static_cast<int>(
+        std::distance(algebraic_names.begin(), algebraic));
+    }
+    const auto lag = std::find(lag_names.begin(), lag_names.end(), name);
+    if (lag != lag_names.end()) {
+      binding.lag = static_cast<int>(std::distance(lag_names.begin(), lag));
+    }
+    binding.zero_error = name.rfind("ERR_", 0) == 0 || name == "F";
+    result.push_back(std::move(binding));
+  }
+  return result;
+}
+
 class ModelEngine {
  public:
   int advan;
@@ -344,6 +400,7 @@ class ModelEngine {
   int n_eta;
   int n_state;
   bool direct_prediction = false;
+  bool liber_optimized = false;
   std::string solver;
   std::string error_type;
   std::string omega_type;
@@ -368,6 +425,11 @@ class ModelEngine {
   std::shared_ptr<const libertad::Program> des;
   std::shared_ptr<const libertad::Program> alg;
   std::shared_ptr<const libertad::Program> error;
+  std::vector<CompiledInputBinding> pred_inputs;
+  std::vector<CompiledInputBinding> post_pred_inputs;
+  std::vector<CompiledInputBinding> des_inputs;
+  std::vector<CompiledInputBinding> alg_inputs;
+  std::vector<CompiledInputBinding> error_inputs;
   std::vector<std::size_t> all_outputs;
   std::vector<std::size_t> post_all_outputs;
   std::vector<std::size_t> likelihood_output;
@@ -410,6 +472,8 @@ class ModelEngine {
   std::vector<std::size_t> derivative_outputs;
   std::vector<std::size_t> algebraic_outputs;
   bool dde_enabled = false;
+  // ADVAN16/17 select the clean-room Radau IIA DDE path by ADVAN number.
+  // ADVAN18 and general DDE models intentionally remain on RK4.
   double dde_step = 0.05;
   int dde_max_steps = 100000;
   double dde_minimum_delay = 0.0;
@@ -442,6 +506,9 @@ class ModelEngine {
         direct_prediction(
           spec.containsElementNamed("pred_mode") &&
           Rcpp::as<std::string>(spec["pred_mode"]) == "pred"),
+        liber_optimized(
+          spec.containsElementNamed("numerical_mode") &&
+          Rcpp::as<std::string>(spec["numerical_mode"]) == "liber_optimized"),
         solver(Rcpp::as<std::string>(spec["solver"])),
         error_type(Rcpp::as<std::string>(spec["error_type"])),
         pred(std::make_shared<const libertad::Program>(Rcpp::as<Rcpp::List>(spec["pred_ir"]))) {
@@ -502,7 +569,6 @@ class ModelEngine {
         dde_lag_delays.push_back(Rcpp::as<std::string>(value["delay"]));
       }
       if (!des || dde_step <= 0.0 || dde_max_steps < 1 ||
-          dde_history.size() != static_cast<std::size_t>(n_state) ||
           dde_lag_inputs.empty() || dde_lag_inputs.size() != dde_lag_states.size() ||
           dde_lag_inputs.size() != dde_lag_delays.size()) {
         throw std::invalid_argument("DDE configuration is inconsistent with the compiled model.");
@@ -589,6 +655,19 @@ class ModelEngine {
           dae_block_rows.push_back(std::move(rows));
           dae_block_columns.push_back(std::move(columns));
         }
+      }
+    }
+    if (dde_enabled) {
+      const std::size_t history_size = static_cast<std::size_t>(n_state) +
+        dae_variables.size();
+      const bool valid_lag_states = std::all_of(
+        dde_lag_states.begin(), dde_lag_states.end(),
+        [history_size](int state) {
+          return state >= 0 && static_cast<std::size_t>(state) < history_size;
+        });
+      if (dde_history.size() != history_size || !valid_lag_states) {
+        throw std::invalid_argument(
+          "DDE history or lag targets are inconsistent with the differential/algebraic state dimension.");
       }
     }
     Rcpp::RObject error_ir = spec.containsElementNamed("error_ir") ?
@@ -961,13 +1040,22 @@ class ModelEngine {
       n_state = static_cast<int>(matrix_graph.names.size());
       state_names = matrix_graph.names;
     }
+    pred_inputs = compile_input_bindings(pred->input_names);
+    if (post_pred) post_pred_inputs = compile_input_bindings(post_pred->input_names);
+    if (des) {
+      des_inputs = compile_input_bindings(
+        des->input_names, dae_variables, dde_lag_inputs);
+    }
+    if (alg) alg_inputs = compile_input_bindings(alg->input_names, dae_variables);
+    if (error) error_inputs = compile_input_bindings(error->input_names);
   }
 
   bool is_ode() const { return static_cast<bool>(des); }
 };
 
 inline bool implicit_ode_advan(int advan) {
-  return advan == 8 || advan == 9 || advan == 13 || advan == 14;
+  return advan == 8 || advan == 9 || advan == 13 || advan == 14 ||
+    advan == 15 || advan == 17;
 }
 
 inline std::string ode_kernel_name(int advan) {
@@ -977,6 +1065,10 @@ inline std::string ode_kernel_name(int advan) {
     case 10: return "advan10-michaelis-menten-rk45";
     case 13: return "advan13-implicit";
     case 14: return "advan14-stiff-nonstiff-implicit";
+    case 15: return "advan15-dae-implicit";
+    case 16: return "advan16-dde-radau-iia5";
+    case 17: return "advan17-ddae-radau-iia5";
+    case 18: return "advan18-dde-method-of-steps";
     default: return "advan6-rk45";
   }
 }
@@ -995,20 +1087,457 @@ int indexed_name(const std::string& name, const char* prefix) {
   }
 }
 
-double data_value(const Rcpp::DataFrame& data, const std::string& name, int row) {
+// An immutable native copy used only by value-only worker threads.  Constructing
+// it resolves and copies R columns on the owning R thread; subsequent access is
+// ordinary C++ memory access and cannot invoke the R API or trigger ALTREP.
+struct OwnedEventTable {
+  std::unordered_map<std::string, std::vector<double>> columns;
+  int rows = 0;
+
+  OwnedEventTable(const Rcpp::DataFrame& source, int start, int length)
+      : rows(length) {
+    if (start < 0 || length < 0 || start > source.nrows() ||
+        length > source.nrows() - start) {
+      throw std::out_of_range("Native event-data copy is outside its source table.");
+    }
+    Rcpp::CharacterVector names = source.names();
+    columns.reserve(static_cast<std::size_t>(names.size()));
+    for (R_xlen_t column_index = 0; column_index < names.size(); ++column_index) {
+      const std::string name = Rcpp::as<std::string>(names[column_index]);
+      Rcpp::RObject column = source[column_index];
+      const SEXPTYPE type = static_cast<SEXPTYPE>(TYPEOF(column));
+      if (type != REALSXP && type != INTSXP && type != LGLSXP) continue;
+      std::vector<double> values(static_cast<std::size_t>(length));
+      if (type == REALSXP) {
+        const double* input = REAL_RO(column);
+        std::copy(input + start, input + start + length, values.begin());
+      } else {
+        const int* input = INTEGER_RO(column);
+        for (int row = 0; row < length; ++row) {
+          const int value = input[start + row];
+          values[static_cast<std::size_t>(row)] =
+            value == NA_INTEGER ? NA_REAL : static_cast<double>(value);
+        }
+      }
+      columns.emplace(name, std::move(values));
+    }
+  }
+
+  bool contains(const std::string& name) const {
+    return columns.find(name) != columns.end();
+  }
+};
+
+// A non-owning row-range view over one canonical R event data frame.  R data
+// frame subsetting duplicates every selected column; this view instead keeps
+// the parent columns alive and translates local subject rows to their original
+// offsets.  Full-population execution is represented by the same type with a
+// zero offset, so numerical code has one data-access path.  The alternative
+// OwnedEventTable constructor is used by guarded native value-only workers.
+class EventDataView {
+ public:
+  class Column {
+   public:
+    class Iterator {
+     public:
+      Iterator(const Column* column, int row) : column_(column), row_(row) {}
+      double operator*() const { return (*column_)[row_]; }
+      Iterator& operator++() { ++row_; return *this; }
+      bool operator!=(const Iterator& other) const { return row_ != other.row_; }
+     private:
+      const Column* column_;
+      int row_;
+    };
+
+    Column(const EventDataView* view, std::string name,
+           double fallback = std::numeric_limits<double>::quiet_NaN(),
+           bool allow_missing = false);
+    double operator[](int row) const;
+    int size() const;
+    Iterator begin() const { return Iterator(this, 0); }
+    Iterator end() const { return Iterator(this, size()); }
+
+   private:
+    std::string name_;
+    SEXP column_ = R_NilValue;
+    const double* real_data_ = nullptr;
+    const int* integer_data_ = nullptr;
+    const double* native_data_ = nullptr;
+    std::shared_ptr<const OwnedEventTable> native_owner_;
+    SEXPTYPE type_ = NILSXP;
+    int start_ = 0;
+    int rows_ = 0;
+    bool subject_view_ = false;
+    bool missing_ = false;
+    double fallback_;
+    bool allow_missing_;
+  };
+
+  EventDataView(const Rcpp::DataFrame& data)
+      : data_(std::make_shared<Rcpp::DataFrame>(data)), start_(0),
+        rows_(data.nrows()), subject_view_(false) {}
+
+  EventDataView(const Rcpp::DataFrame& data, int start, int rows,
+                bool subject_view = true)
+      : data_(std::make_shared<Rcpp::DataFrame>(data)), start_(start),
+        rows_(rows), subject_view_(subject_view) {
+    if (start_ < 0 || rows_ < 0 || start_ > data.nrows() ||
+        rows_ > data.nrows() - start_) {
+      throw std::out_of_range("Event-data row view is outside its parent table.");
+    }
+  }
+
+  explicit EventDataView(std::shared_ptr<const OwnedEventTable> data,
+                         bool subject_view = true)
+      // Do not call DataFrame::create() here: native views are constructed in
+      // optimized subject workers, where any R allocation/PROTECT operation is
+      // forbidden.  The default wrapper remains NIL and is never accessed
+      // while native_ is present.
+      : data_(nullptr), native_(std::move(data)), start_(0),
+        rows_(native_ ? native_->rows : 0), subject_view_(subject_view) {
+    if (!native_ || rows_ < 1) {
+      throw std::invalid_argument("Native event-data view is empty.");
+    }
+  }
+
+  int nrows() const { return rows_; }
+  int start() const { return start_; }
+  bool is_subject_view() const { return subject_view_; }
+  bool containsElementNamed(const char* name) const {
+    return native_ ? native_->contains(name) :
+      data_->containsElementNamed(name);
+  }
+  const Rcpp::DataFrame& parent() const {
+    if (native_) {
+      throw std::logic_error("A native event-data view has no R parent.");
+    }
+    return *data_;
+  }
+
+  int source_row(int row) const {
+    if (row < 0 || row >= rows_) {
+      throw std::out_of_range("Event-data row is outside the active view.");
+    }
+    return start_ + row;
+  }
+
+  Rcpp::RObject column(const std::string& name) const {
+    if (native_) {
+      throw std::logic_error("Native event-data columns are not R objects.");
+    }
+    if (!containsElementNamed(name.c_str())) {
+      throw std::invalid_argument(
+        "PRED input '" + name + "' is not present in the dataset.");
+    }
+    auto cached = columns_.find(name);
+    if (cached != columns_.end()) return cached->second;
+    Rcpp::RObject value = (*data_)[name];
+    columns_.emplace(name, value);
+    return value;
+  }
+  Column values(const std::string& name) const { return Column(this, name); }
+  Column values(const std::string& name, double fallback) const {
+    return Column(this, name, fallback, true);
+  }
+
+ private:
+  std::shared_ptr<Rcpp::DataFrame> data_;
+  std::shared_ptr<const OwnedEventTable> native_;
+  int start_ = 0;
+  int rows_ = 0;
+  bool subject_view_ = false;
+  mutable std::unordered_map<std::string, Rcpp::RObject> columns_;
+};
+
+inline EventDataView::Column::Column(
+    const EventDataView* view, std::string name, double fallback,
+    bool allow_missing)
+    : name_(std::move(name)), start_(view->start()),
+      rows_(view->nrows()), subject_view_(view->is_subject_view()),
+      missing_(!view->containsElementNamed(name_.c_str())),
+      fallback_(fallback), allow_missing_(allow_missing) {
+  if (view->native_) {
+    native_owner_ = view->native_;
+    auto found = native_owner_->columns.find(name_);
+    missing_ = found == native_owner_->columns.end();
+    if (missing_ && !allow_missing_) {
+      throw std::invalid_argument(
+        "PRED input '" + name_ + "' is not present in the native dataset.");
+    }
+    if (!missing_) native_data_ = found->second.data();
+    return;
+  }
+  if (!missing_) column_ = view->column(name_);
+  if (missing_ && !allow_missing_) {
+    throw std::invalid_argument(
+      "PRED input '" + name_ + "' is not present in the dataset.");
+  }
+  if (!missing_) {
+    type_ = static_cast<SEXPTYPE>(TYPEOF(column_));
+    // Resolve ALTREP and cache a read-only address once, on R's main thread.
+    // The retained RObject protects the backing vector for this view's whole
+    // lifetime. Subsequent row access therefore performs no Rcpp wrapper
+    // construction and no R API call.
+    if (type_ == REALSXP) {
+      real_data_ = REAL_RO(column_);
+    } else if (type_ == INTSXP || type_ == LGLSXP) {
+      integer_data_ = INTEGER_RO(column_);
+    }
+  }
+}
+
+inline double EventDataView::Column::operator[](int row) const {
+  if (row < 0 || row >= rows_) {
+    throw std::out_of_range("Event-data row is outside the active column view.");
+  }
+  if (subject_view_ && name_ == ".ID_INDEX") {
+    return 1.0;
+  }
+  if (missing_) return fallback_;
+  const int source = start_ + row;
+  if (native_data_) return native_data_[source];
+  if (type_ == REALSXP) return real_data_[source];
+  if (type_ == INTSXP || type_ == LGLSXP) {
+    const int value = integer_data_[source];
+    return value == NA_INTEGER ? NA_REAL : static_cast<double>(value);
+  }
+  throw std::invalid_argument("Event-data column '" + name_ + "' must be numeric.");
+}
+
+inline int EventDataView::Column::size() const { return rows_; }
+
+// Retains the canonical data frame once and describes every contiguous subject
+// with two integers.  The R-side environment owns this external pointer, while
+// small nm_subject_view descriptors select a subject without copying columns.
+struct NativeSubjectStore {
+  Rcpp::DataFrame data;
+  std::vector<int> starts;
+  std::vector<int> lengths;
+
+  NativeSubjectStore(const Rcpp::DataFrame& source,
+                     const Rcpp::IntegerVector& starts_input,
+                     const Rcpp::IntegerVector& lengths_input)
+      : data(source), starts(Rcpp::as<std::vector<int>>(starts_input)),
+        lengths(Rcpp::as<std::vector<int>>(lengths_input)) {
+    if (starts.empty() || starts.size() != lengths.size()) {
+      throw std::invalid_argument("Native subject ranges are invalid.");
+    }
+    for (std::size_t index = 0; index < starts.size(); ++index) {
+      --starts[index];
+      if (starts[index] < 0 || lengths[index] < 1 ||
+          starts[index] > data.nrows() ||
+          lengths[index] > data.nrows() - starts[index]) {
+        throw std::out_of_range("A native subject range is outside the event table.");
+      }
+      if (index && starts[index] != starts[index - 1] + lengths[index - 1]) {
+        throw std::invalid_argument("Native subject ranges must be contiguous.");
+      }
+    }
+  }
+
+  EventDataView view(int subject) const {
+    if (subject < 0 || subject >= static_cast<int>(starts.size())) {
+      throw std::out_of_range("Subject view is outside the native data store.");
+    }
+    return EventDataView(data, starts[static_cast<std::size_t>(subject)],
+                         lengths[static_cast<std::size_t>(subject)]);
+  }
+};
+
+double data_value(const EventDataView& data, const std::string& name, int row);
+
+// A compiled set of MU equations.  MU expressions use the same LibeRtAD IR
+// as $PK/$PRED, which keeps model-language semantics in one place while
+// allowing subject-level covariates to be read directly from NativeSubjectStore
+// row views.  Each program output is mapped to its (zero-based) ETA column.
+struct NativeMuProgram {
+  std::shared_ptr<const libertad::Program> program;
+  std::vector<CompiledInputBinding> inputs;
+  std::vector<std::size_t> outputs;
+  std::vector<int> eta;
+
+  NativeMuProgram(const Rcpp::List& ir, const Rcpp::IntegerVector& eta_input)
+      : program(std::make_shared<const libertad::Program>(ir)),
+        inputs(compile_input_bindings(program->input_names)),
+        eta(Rcpp::as<std::vector<int>>(eta_input)) {
+    outputs.resize(program->output_names.size());
+    std::iota(outputs.begin(), outputs.end(), 0U);
+    if (outputs.size() != eta.size() || outputs.empty()) {
+      throw std::invalid_argument(
+        "Compiled MU outputs and ETA destinations must have equal non-zero length.");
+    }
+    for (int& index : eta) {
+      --index;
+      if (index < 0) {
+        throw std::invalid_argument("A compiled MU ETA destination is invalid.");
+      }
+    }
+    for (const CompiledInputBinding& binding : inputs) {
+      if (binding.eta >= 0 || binding.sigma >= 0 || binding.state >= 0 ||
+          binding.zero_error) {
+        throw std::invalid_argument(
+          "MU expressions may depend only on THETAs and subject-level data.");
+      }
+    }
+  }
+};
+
+inline std::vector<double> evaluate_mu_program(
+    const NativeMuProgram& compiled, const EventDataView& data,
+    const Rcpp::NumericVector& theta) {
+  if (!data.nrows()) {
+    throw std::invalid_argument("A MU program cannot evaluate an empty subject view.");
+  }
+  std::vector<double> inputs(compiled.inputs.size(), 0.0);
+  for (std::size_t index = 0; index < compiled.inputs.size(); ++index) {
+    const CompiledInputBinding& binding = compiled.inputs[index];
+    if (binding.theta >= 0) {
+      if (binding.theta >= theta.size()) {
+        throw std::out_of_range("MU THETA index exceeds supplied values.");
+      }
+      inputs[index] = theta[binding.theta];
+    } else {
+      inputs[index] = data_value(data, binding.name, 0);
+    }
+    if (!std::isfinite(inputs[index])) {
+      throw std::domain_error(
+        "MU input '" + binding.name + "' is non-finite for a subject.");
+    }
+  }
+  const std::vector<double> result =
+    compiled.program->eval_outputs(inputs, compiled.outputs);
+  for (double value : result) {
+    if (!std::isfinite(value)) {
+      throw std::domain_error("A compiled MU equation returned a non-finite value.");
+    }
+  }
+  return result;
+}
+
+EventDataView event_data_view(SEXP input) {
+  if (Rf_inherits(input, "data.frame")) {
+    return EventDataView(Rcpp::as<Rcpp::DataFrame>(input));
+  }
+  if (!Rf_inherits(input, "nm_subject_view") || TYPEOF(input) != VECSXP) {
+    throw std::invalid_argument(
+      "Native execution requires a data frame or nm_subject_view.");
+  }
+  Rcpp::List descriptor(input);
+  if (!descriptor.containsElementNamed("pointer") ||
+      !descriptor.containsElementNamed("subject")) {
+    throw std::invalid_argument("An nm_subject_view descriptor is incomplete.");
+  }
+  Rcpp::XPtr<NativeSubjectStore> store(descriptor["pointer"]);
+  return store->view(Rcpp::as<int>(descriptor["subject"]) - 1);
+}
+
+double data_value(const EventDataView& data, const std::string& name, int row) {
+  if (data.is_subject_view() && name == ".ID_INDEX") {
+    data.source_row(row);
+    return 1.0;
+  }
   if (!data.containsElementNamed(name.c_str())) {
     throw std::invalid_argument("PRED input '" + name + "' is not present in the dataset.");
   }
-  Rcpp::RObject object = data[name];
-  if (TYPEOF(object) == REALSXP) return Rcpp::NumericVector(object)[row];
-  if (TYPEOF(object) == INTSXP || TYPEOF(object) == LGLSXP) {
-    int value = Rcpp::IntegerVector(object)[row];
-    return value == NA_INTEGER ? NA_REAL : static_cast<double>(value);
-  }
-  throw std::invalid_argument("PRED input '" + name + "' must be numeric.");
+  return data.values(name)[row];
 }
 
-int eta_column(const ModelEngine& engine, const Rcpp::DataFrame& data,
+void require_materialized_addl(const EventDataView& data) {
+  if (!data.containsElementNamed("ADDL")) return;
+  for (int row = 0; row < data.nrows(); ++row) {
+    const double addl = data_value(data, "ADDL", row);
+    if (!std::isfinite(addl) || addl != 0.0) {
+      throw std::invalid_argument(
+        "Native execution requires ADDL/II doses to be materialized by "
+        "nm_dataset(); a non-zero or invalid ADDL value reached C++.");
+    }
+  }
+}
+
+inline void fnv_mix(std::uint64_t& hash, const void* source, std::size_t size,
+                    std::uint64_t prime) {
+  const unsigned char* bytes = static_cast<const unsigned char*>(source);
+  for (std::size_t index = 0; index < size; ++index) {
+    hash ^= static_cast<std::uint64_t>(bytes[index]);
+    hash *= prime;
+  }
+}
+
+inline void fnv_mix_string(std::uint64_t& first, std::uint64_t& second,
+                           const std::string& value) {
+  fnv_mix(first, value.data(), value.size(), UINT64_C(1099511628211));
+  fnv_mix(second, value.data(), value.size(), UINT64_C(14029467366897019727));
+  const unsigned char boundary = 0xffU;
+  fnv_mix(first, &boundary, 1U, UINT64_C(1099511628211));
+  fnv_mix(second, &boundary, 1U, UINT64_C(14029467366897019727));
+}
+
+std::string event_data_signature(
+    const EventDataView& data,
+    const std::unordered_map<std::string, bool>& ignored,
+    bool include_fo_layout) {
+  std::uint64_t first = UINT64_C(1469598103934665603);
+  std::uint64_t second = UINT64_C(7809847782465536322);
+  Rcpp::CharacterVector names = data.parent().names();
+  for (R_xlen_t column_index = 0; column_index < names.size(); ++column_index) {
+    const std::string name = Rcpp::as<std::string>(names[column_index]);
+    if (ignored.find(name) != ignored.end()) continue;
+    fnv_mix_string(first, second, name);
+    Rcpp::RObject column = data.parent()[column_index];
+    const int type = TYPEOF(column);
+    fnv_mix(first, &type, sizeof(type), UINT64_C(1099511628211));
+    fnv_mix(second, &type, sizeof(type), UINT64_C(14029467366897019727));
+    for (int row = 0; row < data.nrows(); ++row) {
+      const int source = data.source_row(row);
+      if (data.is_subject_view() && name == ".STRUCT_ID_INDEX") {
+        const int current = Rcpp::IntegerVector(column)[source];
+        const unsigned char boundary = row == 0 || current !=
+          Rcpp::IntegerVector(column)[data.source_row(row - 1)];
+        fnv_mix(first, &boundary, sizeof(boundary), UINT64_C(1099511628211));
+        fnv_mix(second, &boundary, sizeof(boundary), UINT64_C(14029467366897019727));
+        continue;
+      }
+      if (type == REALSXP) {
+        const double value = Rcpp::NumericVector(column)[source];
+        fnv_mix(first, &value, sizeof(value), UINT64_C(1099511628211));
+        fnv_mix(second, &value, sizeof(value), UINT64_C(14029467366897019727));
+      } else if (type == INTSXP || type == LGLSXP) {
+        const int value = Rcpp::IntegerVector(column)[source];
+        fnv_mix(first, &value, sizeof(value), UINT64_C(1099511628211));
+        fnv_mix(second, &value, sizeof(value), UINT64_C(14029467366897019727));
+      } else if (type == STRSXP) {
+        SEXP value = STRING_ELT(column, source);
+        fnv_mix_string(first, second,
+          value == NA_STRING ? std::string("<NA>") : std::string(CHAR(value)));
+      } else {
+        throw std::invalid_argument(
+          "Subject structural signatures require atomic event-data columns.");
+      }
+    }
+  }
+  if (include_fo_layout) {
+    fnv_mix_string(first, second, "<FO_LAYOUT>");
+    const bool has_dvid = data.containsElementNamed("DVID");
+    for (int row = 0; row < data.nrows(); ++row) {
+      const unsigned char observed =
+        data_value(data, "EVID", row) == 0.0 &&
+        data_value(data, "MDV", row) == 0.0 &&
+        std::isfinite(data_value(data, "DV", row));
+      const int dvid = has_dvid ?
+        std::max(1, static_cast<int>(data_value(data, "DVID", row))) : 1;
+      fnv_mix(first, &observed, sizeof(observed), UINT64_C(1099511628211));
+      fnv_mix(second, &observed, sizeof(observed), UINT64_C(14029467366897019727));
+      fnv_mix(first, &dvid, sizeof(dvid), UINT64_C(1099511628211));
+      fnv_mix(second, &dvid, sizeof(dvid), UINT64_C(14029467366897019727));
+    }
+  }
+  std::ostringstream output;
+  output << std::hex << std::setfill('0') << std::setw(16) << first
+         << std::setw(16) << second;
+  return output.str();
+}
+
+int eta_column(const ModelEngine& engine, const EventDataView& data,
                int row, int eta_index, int eta_columns) {
   if (eta_index < 0 || eta_index >= engine.n_eta) {
     throw std::out_of_range("ETA index exceeds the model ETA definitions.");
@@ -1038,7 +1567,7 @@ int eta_column(const ModelEngine& engine, const Rcpp::DataFrame& data,
 }
 
 int required_eta_columns(const ModelEngine& engine,
-                         const Rcpp::DataFrame& data) {
+                         const EventDataView& data) {
   if (engine.re_enabled) {
     int maximum = 0;
     for (int eta = 1; eta <= engine.n_eta; ++eta) {
@@ -1046,8 +1575,10 @@ int required_eta_columns(const ModelEngine& engine,
       if (!data.containsElementNamed(name.c_str())) {
         throw std::invalid_argument("Compiled random-effect ETA mapping is missing.");
       }
-      Rcpp::IntegerVector values(data[name]);
-      for (int value : values) maximum = std::max(maximum, value);
+      for (int row = 0; row < data.nrows(); ++row) {
+        maximum = std::max(maximum,
+          static_cast<int>(data_value(data, name, row)));
+      }
     }
     return maximum;
   }
@@ -1055,39 +1586,42 @@ int required_eta_columns(const ModelEngine& engine,
   if (!data.containsElementNamed(".OCC_INDEX")) {
     throw std::invalid_argument("IOV execution requires compiled .OCC_INDEX data.");
   }
-  Rcpp::IntegerVector occasion(data[".OCC_INDEX"]);
   int count = 0;
-  for (int value : occasion) count = std::max(count, value);
+  for (int row = 0; row < data.nrows(); ++row) {
+    count = std::max(count,
+      static_cast<int>(data_value(data, ".OCC_INDEX", row)));
+  }
   return engine.n_eta - engine.iov + count * engine.iov;
 }
 
 Parameters evaluate_parameters(const ModelEngine& engine,
-                               const Rcpp::DataFrame& data,
+                               const EventDataView& data,
                                int row, int subject,
                                const Rcpp::NumericVector& theta,
                                const Rcpp::NumericMatrix& eta,
                                const Rcpp::NumericVector& sigma) {
   std::vector<double> inputs(engine.pred->input_names.size(), 0.0);
   for (std::size_t i = 0; i < engine.pred->input_names.size(); ++i) {
-    const std::string& name = engine.pred->input_names[i];
-    int index = indexed_name(name, "THETA_");
+    const CompiledInputBinding& binding = engine.pred_inputs[i];
+    const std::string& name = binding.name;
+    int index = binding.theta;
     if (index >= 0) {
       if (index >= theta.size()) throw std::out_of_range("THETA index exceeds supplied values.");
       inputs[i] = theta[index];
       continue;
     }
-    index = indexed_name(name, "ETA_");
+    index = binding.eta;
     if (index >= 0) {
       inputs[i] = eta(subject, eta_column(engine, data, row, index, eta.ncol()));
       continue;
     }
-    index = indexed_name(name, "SIGMA_");
+    index = binding.sigma;
     if (index >= 0) {
       if (index >= sigma.size()) throw std::out_of_range("SIGMA index exceeds supplied values.");
       inputs[i] = sigma[index];
       continue;
     }
-    if (starts_with(name, "ERR_")) {
+    if (binding.zero_error && name != "F") {
       inputs[i] = 0.0;
       continue;
     }
@@ -1115,7 +1649,7 @@ Parameters evaluate_parameters(const ModelEngine& engine,
 }
 
 double evaluate_post_prediction(
-    const ModelEngine& engine, const Rcpp::DataFrame& data,
+    const ModelEngine& engine, const EventDataView& data,
     int row, int subject, double time, const Vector& state,
     const Rcpp::NumericVector& theta, const Rcpp::NumericMatrix& eta,
     const Rcpp::NumericVector& sigma, double advan_prediction,
@@ -1123,25 +1657,26 @@ double evaluate_post_prediction(
   if (!engine.post_pred) return advan_prediction;
   std::vector<double> inputs(engine.post_pred->input_names.size(), 0.0);
   for (std::size_t i = 0; i < engine.post_pred->input_names.size(); ++i) {
-    const std::string& name = engine.post_pred->input_names[i];
-    int index = indexed_name(name, "THETA_");
+    const CompiledInputBinding& binding = engine.post_pred_inputs[i];
+    const std::string& name = binding.name;
+    int index = binding.theta;
     if (index >= 0) {
       if (index >= theta.size()) throw std::out_of_range("THETA index exceeds values.");
       inputs[i] = theta[index];
       continue;
     }
-    index = indexed_name(name, "ETA_");
+    index = binding.eta;
     if (index >= 0) {
       inputs[i] = eta(subject, eta_column(engine, data, row, index, eta.ncol()));
       continue;
     }
-    index = indexed_name(name, "SIGMA_");
+    index = binding.sigma;
     if (index >= 0) {
       if (index >= sigma.size()) throw std::out_of_range("SIGMA index exceeds values.");
       inputs[i] = sigma[index];
       continue;
     }
-    index = indexed_name(name, "A_");
+    index = binding.state;
     if (index >= 0) {
       if (index >= state.size()) throw std::out_of_range("$PRED A() index exceeds state dimension.");
       inputs[i] = state[index];
@@ -1179,7 +1714,7 @@ double evaluate_post_prediction(
 }
 
 Vector evaluate_algebraic_residuals(
-    const ModelEngine& engine, const Rcpp::DataFrame& data,
+    const ModelEngine& engine, const EventDataView& data,
     int row, int subject, double time, const Vector& state,
     const Parameters& parameters, const Rcpp::NumericVector& theta,
     const Rcpp::NumericMatrix& eta, const Rcpp::NumericVector& sigma,
@@ -1187,31 +1722,31 @@ Vector evaluate_algebraic_residuals(
   if (!engine.alg) throw std::logic_error("DAE algebraic residual program is missing.");
   std::vector<double> inputs(engine.alg->input_names.size(), 0.0);
   for (std::size_t i = 0; i < engine.alg->input_names.size(); ++i) {
-    const std::string& name = engine.alg->input_names[i];
-    int index = indexed_name(name, "A_");
+    const CompiledInputBinding& binding = engine.alg_inputs[i];
+    const std::string& name = binding.name;
+    int index = binding.state;
     if (index >= 0) {
       if (index >= state.size()) throw std::out_of_range("A() index exceeds the DAE state dimension.");
       inputs[i] = state[index];
       continue;
     }
     if (name == "T") { inputs[i] = time; continue; }
-    auto variable = std::find(engine.dae_variables.begin(), engine.dae_variables.end(), name);
-    if (variable != engine.dae_variables.end()) {
-      inputs[i] = algebraic[std::distance(engine.dae_variables.begin(), variable)];
+    if (binding.algebraic >= 0) {
+      inputs[i] = algebraic[binding.algebraic];
       continue;
     }
     auto parameter = parameters.find(name);
     if (parameter != parameters.end()) { inputs[i] = parameter->second; continue; }
-    index = indexed_name(name, "THETA_");
+    index = binding.theta;
     if (index >= 0) { inputs[i] = theta[index]; continue; }
-    index = indexed_name(name, "ETA_");
+    index = binding.eta;
     if (index >= 0) {
       inputs[i] = eta(subject, eta_column(engine, data, row, index, eta.ncol()));
       continue;
     }
-    index = indexed_name(name, "SIGMA_");
+    index = binding.sigma;
     if (index >= 0) { inputs[i] = sigma[index]; continue; }
-    if (starts_with(name, "ERR_") || name == "F") continue;
+    if (binding.zero_error) continue;
     inputs[i] = data_value(data, name, row);
   }
   const std::vector<double> output = engine.alg->eval_outputs(inputs, engine.algebraic_outputs);
@@ -1221,7 +1756,7 @@ Vector evaluate_algebraic_residuals(
 }
 
 Vector solve_algebraic(
-    const ModelEngine& engine, const Rcpp::DataFrame& data,
+    const ModelEngine& engine, const EventDataView& data,
     int row, int subject, double time, const Vector& state,
     const Parameters& parameters, const Rcpp::NumericVector& theta,
     const Rcpp::NumericMatrix& eta, const Rcpp::NumericVector& sigma) {

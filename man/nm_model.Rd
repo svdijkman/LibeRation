@@ -36,6 +36,7 @@ nm_model(
   PRED_SOURCE = NULL,
   EXPERIMENTAL = NULL,
   OUTCOMES = NULL,
+  NUMERICAL_MODE = c("nonmem_compatibility", "liber_optimized"),
   SOLVER = c("auto", "advan", "matrix", "ode", "dde", "dae", "direct"),
   ERROR_TYPE = c("auto", "none", "additive", "proportional", "combined", "exponential",
     "power", "likelihood"),
@@ -72,9 +73,10 @@ compiled block may use `DV`, `F`/`PRED`/`IPRED`, model assignments,
 parameters, numeric input columns, and the Markov helpers `PREV_DV`,
 `PREV_TIME`, `DT`, and `FIRST`.}
 
-\item{DES}{ODE derivative code for ADVAN6/8/9/13/14. ADVAN10 supplies its
-standard Michaelis--Menten equation automatically from `VM` and `KM`
-assignments in `PRED`.}
+\item{DES}{Differential-system code for ADVAN6/8/9/13--18. ADVAN10 supplies
+its standard Michaelis--Menten equation automatically from `VM` and `KM`
+assignments in `PRED`. ADVAN15 is the DAE route, ADVAN16/18 are DDE
+routes, and ADVAN17 combines DDE history with algebraic constraints.}
 
 \item{ALG}{Algebraic residual equations for an experimental index-1 DAE.}
 
@@ -86,8 +88,9 @@ assignments in `PRED`.}
 
 \item{ODE_CONTROL}{Named list with `rtol`, `atol`, `max_steps`, and optional
 `initial_step`. ADVAN6 and ADVAN10 use adaptive Dormand-Prince 5(4).
-ADVAN8/9/13/14 use an A-stable adaptive implicit trapezoidal method;
-ADVAN9 additionally accepts equilibrium constraints through `ALG`.}
+ADVAN8/9/13--15 use an A-stable adaptive implicit trapezoidal method;
+ADVAN9/15 accept equilibrium constraints through `ALG`. ADVAN16--18 use
+the differentiable method-of-steps engine when `DDE_CONFIG` is present.}
 
 \item{IOV}{Number of trailing inter-occasion ETAs.}
 
@@ -140,6 +143,11 @@ compatibility.}
 [nm_outcome()] or [nm_outcomes()]. When `ERROR` is omitted, LibeRation
 generates an editable normalized likelihood block. The declaration is
 also used for stochastic outcome simulation and family diagnostics.}
+
+\item{NUMERICAL_MODE}{Default numerical policy for this model.
+`"nonmem_compatibility"` retains the conservative validated path;
+`"liber_optimized"` enables LibeR-specific solver accelerations. A run
+can override this through [nm_est()] or [nm_simulate()].}
 
 \item{SOLVER}{`auto`, `advan`, `matrix`, `ode`, `dde`, `dae`, or the
 automatically selected `direct` route for `PRED_MODE = "pred"`.}

@@ -180,6 +180,20 @@ test_that("conditional methods use exact ETA modes and curvature", {
   }
 })
 
+test_that("final conditional-mode convergence is an estimator acceptance gate", {
+  converged <- list(
+    list(par = 0, convergence = 0L),
+    list(par = 0.1, convergence = 0L)
+  )
+  expect_no_error(.nm_assert_final_conditional_modes(converged, "FOCEI"))
+  failed <- converged
+  failed[[2L]]$convergence <- 52L
+  expect_error(
+    .nm_assert_final_conditional_modes(failed, "LAPLACE"),
+    "subject 2.*not been accepted"
+  )
+})
+
 test_that("Laplace curvature tapes are anchored at conditional modes", {
   model <- LibeRation:::.liber_model_template(2L, trans = 2L)
   data <- LibeRation:::.liber_builtin_dataset(
@@ -245,12 +259,22 @@ test_that("IOV estimation uses one stable expanded ETA layout for every subject"
     EVID = c(1, 0, 1, 0, 1, 0), AMT = c(100, 0, 100, 0, 100, 0),
     DV = c(NA, 4.5, NA, 4.4, NA, 4.6), OCC = c(1, 1, 2, 2, 1, 1)
   )
+  context <- LibeRation:::.nm_estimation_context(model, data, method = "FOCEI")
+  for (evaluator in context$subjects) {
+    native <- LibeRation:::.nm_effect_covariance_evaluator(
+      model, evaluator, model$OMEGAS$Value
+    )
+    reference <- LibeRation:::.nm_effect_covariance_evaluator_reference(
+      model, evaluator, model$OMEGAS$Value
+    )
+    expect_equal(native, reference, tolerance = 0)
+  }
   fit <- nm_est(model, data, method = "FOCEI", maxit = 2, eta_maxit = 40)
   expect_equal(dim(fit$eta), c(2, 3))
   expect_true(is.finite(fit$objective))
 })
 
-test_that("ITS and IMP use the exact conditional objective", {
+test_that("ITS and IMP use their defining expectation steps", {
   fixture <- estimation_fixture()
   its <- nm_est(
     fixture$model, fixture$data, method = "ITS",
@@ -263,8 +287,69 @@ test_that("ITS and IMP use the exact conditional objective", {
   expect_true(is.finite(its$objective))
   expect_true(is.finite(imp$objective))
   expect_equal(imp$diagnostics$n_imp, 20)
-  expect_equal(imp$diagnostics$imp_gradient, "score")
-  expect_true(is.logical(imp$diagnostics$finite_crn_fallback))
+  expect_identical(imp$diagnostics$algorithm_resolved, "mcem")
+  expect_identical(imp$diagnostics$imp_gradient, "complete-data-expectation")
+  expect_true(imp$diagnostics$independent_e_steps)
+  expect_false(imp$diagnostics$common_random_numbers)
+  expect_true(all(is.finite(imp$diagnostics$effective_sample_size)))
+})
+
+test_that("fixed complete-data expectations retain exact CppAD gradients", {
+  fixture <- estimation_fixture(FALSE)
+  context <- LibeRation:::.nm_estimation_context(fixture$model, fixture$data)
+  map <- LibeRation:::.nm_outer_map(context$model)
+  eta <- rep(list(matrix(c(-0.15, 0.05, 0.2), ncol = context$n_eta)),
+             context$n_subjects)
+  weights <- rep(list(c(0.2, 0.5, 0.3)), context$n_subjects)
+  expectation <- LibeRation:::.nm_complete_data_expectation(
+    context, map, eta, weights
+  )
+  point <- map$start + seq_along(map$start) * 1e-4
+  parameters <- map$decode(point)
+  analytical <- expectation$gradient(parameters)
+  step <- 1e-6
+  numerical <- vapply(seq_along(point), function(index) {
+    plus <- minus <- point
+    plus[[index]] <- plus[[index]] + step
+    minus[[index]] <- minus[[index]] - step
+    (expectation$objective(map$decode(plus)) -
+       expectation$objective(map$decode(minus))) / (2 * step)
+  }, numeric(1))
+  expect_equal(analytical, numerical, tolerance = 3e-4)
+})
+
+test_that("ITS sigma points reproduce conditional means and covariances", {
+  fixture <- estimation_fixture(FALSE)
+  context <- LibeRation:::.nm_estimation_context(fixture$model, fixture$data)
+  parameters <- list(
+    theta = fixture$model$THETAS$Value,
+    sigma = fixture$model$SIGMAS$Value,
+    omega = fixture$model$OMEGAS$Value
+  )
+  state <- LibeRation:::.nm_its_distribution(
+    context, parameters, matrix(0, context$n_subjects, context$n_eta),
+    eta_maxit = 60L, tolerance = 1e-7
+  )
+  for (subject in seq_len(context$n_subjects)) {
+    grid <- state$eta[[subject]]
+    probability <- state$weights[[subject]]
+    observed_mean <- colSums(grid * probability)
+    centered <- sweep(grid, 2L, observed_mean, `-`)
+    observed_covariance <- crossprod(centered * sqrt(probability))
+    expect_equal(
+      unname(observed_mean), state$modes[[subject]]$par, tolerance = 1e-10
+    )
+    expect_equal(
+      observed_covariance, state$covariance[[subject]], tolerance = 1e-10
+    )
+  }
+  sufficient <- LibeRation:::.nm_its_omega_sufficient(
+    context, state$modes, state$covariance
+  )
+  expected <- mean(vapply(seq_len(context$n_subjects), function(subject) {
+    state$modes[[subject]]$par[[1L]]^2 + state$covariance[[subject]][1L, 1L]
+  }, numeric(1)))
+  expect_equal(sufficient[[1L]], expected, tolerance = 1e-12)
 })
 
 test_that("GQ integrates the exact joint objective deterministically", {
@@ -448,9 +533,34 @@ test_that("SAEM and BAYES return reproducible stochastic diagnostics", {
   expect_true(all(saem$diagnostics$step_scale_trace > 0))
   expect_equal(nrow(bayes$chain), 10)
   expect_true(all(is.finite(bayes$posterior$mean)))
+  expect_length(
+    bayes$posterior$population$ess,
+    length(bayes$theta) + length(bayes$sigma) + length(bayes$omega)
+  )
+  expect_true(all(
+    is.finite(bayes$posterior$population$ess) |
+      is.na(bayes$posterior$population$ess)
+  ))
+  expect_true(all(is.na(bayes$posterior$population$rhat)))
   expect_true(is.finite(bayes$objective))
   expect_true(bayes$diagnostics$eta_acceptance >= 0 &&
                 bayes$diagnostics$eta_acceptance <= 1)
+  expect_identical(
+    bayes$diagnostics$eta_kernel,
+    "batched conditional-subject C++ Metropolis"
+  )
+  expect_gt(saem$diagnostics$eta_sampler$current_cache_hits, 0L)
+  expect_equal(
+    saem$diagnostics$eta_sampler$proposal_root_factorizations, 1L
+  )
+  expect_gt(bayes$diagnostics$eta_sampler$current_cache_hits, 0L)
+  expect_lt(
+    bayes$diagnostics$eta_sampler$current_evaluations,
+    bayes$diagnostics$eta_sampler$candidate_evaluations
+  )
+  expect_equal(
+    bayes$diagnostics$eta_sampler$proposal_root_factorizations, 1L
+  )
 })
 
 test_that("SAEM scales steep M-steps before L-BFGS-B boundary searches", {
@@ -475,6 +585,10 @@ test_that("native population optimizer and structural tape pool report telemetry
     eta_maxit = 50, optimizer_backend = "native"
   )
   expect_equal(fit$diagnostics$optimizer$backend, "native-bfgs")
+  expect_equal(
+    fit$diagnostics$optimizer$coordinator,
+    "direct-cpp-population-objective"
+  )
   expect_true(is.data.frame(fit$diagnostics$optimizer$trace))
   expect_gte(fit$diagnostics$optimizer$objective_evaluations, 1L)
   expect_equal(fit$diagnostics$tapes$unique_structures, 1L)
@@ -624,6 +738,7 @@ test_that("adaptive ODE objective tapes retape after material domain movement", 
   expect_true(is.finite(value))
   expect_equal(after$retapes, before$retapes + 1L)
   expect_equal(after$records, before$records + 1L)
+  expect_identical(evaluator$data_materializations, 0L)
 })
 
 test_that("fixed-effect priors contribute to deterministic and Bayesian fits", {
@@ -666,7 +781,11 @@ test_that("population gradients include conditional-mode and curvature derivativ
       reference_curvature <- LibeRation:::.nm_subject_curvature_logdet(
         context, context$subjects[[1L]], map$decode(at), mode, approximation
       )
+      r_reference_curvature <- LibeRation:::.nm_subject_curvature_logdet_reference(
+        context, context$subjects[[1L]], map$decode(at), mode, approximation
+      )
       expect_equal(taped_curvature$value, reference_curvature, tolerance = 2e-11)
+      expect_equal(reference_curvature, r_reference_curvature, tolerance = 2e-10)
       expect_true(all(is.finite(taped_curvature$gradient)))
     }
     exact <- LibeRation:::.nm_nested_outer_gradient(
@@ -703,6 +822,26 @@ test_that("native prior gradients and full-OMEGA transforms are exact", {
     (fn(high) - fn(low)) / 2e-6
   }, numeric(1))
   expect_equal(analytic, numerical, tolerance = 2e-6)
+
+  compiled <- LibeRation:::.nm_prior_evaluator(fixture$model)
+  expect_equal(
+    compiled$log_density(parameters),
+    LibeRation:::.nm_log_prior(fixture$model, parameters), tolerance = 1e-14
+  )
+  expect_equal(
+    compiled$nll(parameters),
+    LibeRation:::.nm_prior_nll(fixture$model, parameters), tolerance = 1e-14
+  )
+  half_normal_model <- fixture$model
+  half_normal_model$LIK_CONFIG$priors <- nm_prior(
+    "SIGMA1", "half_normal", mean = 0, sd = 0.5
+  )
+  half_normal <- LibeRation:::.nm_prior_evaluator(half_normal_model)
+  expect_equal(
+    half_normal$log_density(parameters),
+    LibeRation:::.nm_log_prior(half_normal_model, parameters),
+    tolerance = 1e-14
+  )
 
   omega <- data.frame(
     OMEGA = 1:3, ROW = c(1, 2, 2), COL = c(1, 1, 2),
@@ -782,4 +921,72 @@ test_that("estimation methods can run as one ordered sequence", {
   expect_equal(fit$stages[[2L]]$stage$initial$theta, fit$stages[[1L]]$theta)
   expect_true(fit$stages[[2L]]$stage$initial$eta_warm_start)
   expect_true(is.finite(fit$timing$sequence_total_seconds))
+})
+
+test_that("estimation contexts retain one shared dataset and lightweight subject views", {
+  fixture <- estimation_fixture()
+  normalized <- LibeRation:::.nm_engine_data(fixture$model, fixture$data)
+  context <- LibeRation:::.nm_estimation_context_build(
+    fixture$model, normalized, method = "FOCEI"
+  )
+
+  expect_identical(context$subject_data_layout, "native-row-view")
+  expect_s3_class(context$subject_store, "nm_subject_store")
+  expect_true(all(vapply(context$subjects, function(evaluator) {
+    is.null(evaluator$data) && identical(evaluator$data_store, context$subject_store)
+  }, logical(1))))
+  expect_true(all(vapply(context$subjects, function(evaluator) {
+    inherits(evaluator$data_input(), "nm_subject_view")
+  }, logical(1))))
+  expect_true(all(vapply(
+    context$subjects, function(evaluator) evaluator$data_materializations == 0L,
+    logical(1)
+  )))
+  expect_equal(
+    vapply(context$subjects, function(evaluator) {
+      evaluator$observation_count()
+    }, integer(1)),
+    rep.int(3L, context$n_subjects)
+  )
+  for (subject in seq_len(context$n_subjects)) {
+    expect_equal(
+      context$subjects[[subject]]$data_frame(),
+      LibeRation:::.nm_subject_data(normalized, subject)
+    )
+  }
+  expect_true(all(vapply(
+    context$subjects, function(evaluator) is.numeric(evaluator$objective_dynamic),
+    logical(1)
+  )))
+})
+
+test_that("shared subject views and copied subject frames are numerically equivalent", {
+  fixture <- estimation_fixture(fix = FALSE)
+  old <- options(LibeRation.fo_context_cache = FALSE)
+  on.exit(options(old), add = TRUE)
+
+  options(LibeRation.subject_data_views = TRUE)
+  viewed <- nm_est(
+    fixture$model, fixture$data, method = "FOCEI", maxit = 4L,
+    eta_maxit = 20L, tolerance = 1e-7
+  )
+  options(LibeRation.subject_data_views = FALSE)
+  copied <- nm_est(
+    fixture$model, fixture$data, method = "FOCEI", maxit = 4L,
+    eta_maxit = 20L, tolerance = 1e-7
+  )
+
+  expect_equal(viewed$objective, copied$objective, tolerance = 1e-10)
+  expect_equal(viewed$theta, copied$theta, tolerance = 1e-10)
+  expect_equal(viewed$omega, copied$omega, tolerance = 1e-10)
+  expect_equal(viewed$sigma, copied$sigma, tolerance = 1e-10)
+  expect_equal(viewed$eta, copied$eta, tolerance = 1e-9)
+  expect_identical(viewed$diagnostics$data_layout$storage, "native-row-view")
+  expect_identical(copied$diagnostics$data_layout$storage, "copied")
+  expect_identical(viewed$diagnostics$data_layout$persistent_subject_frames, 0L)
+  expect_identical(viewed$diagnostics$data_layout$subject_frame_materializations, 0L)
+  expect_identical(
+    copied$diagnostics$data_layout$persistent_subject_frames,
+    copied$diagnostics$data_layout$subjects
+  )
 })

@@ -414,13 +414,26 @@ nm_execution_engines <- function() {
   writeLines(control, file.path(directory, "model.ctl"), useBytes = TRUE)
   file.copy(file.path(directory, "model.ctl"), file.path(directory, "model.mod"))
   started <- proc.time()[["elapsed"]]
+  execute_arguments <- c(
+    "model.mod", "-directory=psn-run", "-clean=0",
+    if (is.null(model$DDE_CONFIG)) "-nm_output=ext,cov,cor,phi",
+    "-no-prepend_options_to_lst",
+    "-display_iterations"
+  )
+  if (!is.null(model$DDE_CONFIG)) {
+    execute_arguments <- c(
+      execute_arguments,
+      # PsN's preliminary NM-TRAN check precedes NONMEM's ddexpand pass and
+      # consequently treats AD_x_y variables as undefined. The real nmfe run
+      # performs the required expansion when -dde is supplied. PsN 4.2 drops
+      # the final -dde token when its comma-valued -nm_output override is also
+      # present, so DDE runs retain PsN's equivalent default output set.
+      "-no-check_nmtran", "-nmfe_options=-prdefault -xmloff -dde"
+    )
+  }
   process_arguments <- .nm_nonmem_process_arguments(
     command,
-    c(
-      "model.mod", "-directory=psn-run", "-clean=0",
-      "-nm_output=ext,cov,cor,phi", "-no-prepend_options_to_lst",
-      "-display_iterations"
-    ),
+    execute_arguments,
     directory
   )
   timeout <- as.numeric(arguments$timeout_seconds %||% Inf)
@@ -510,7 +523,7 @@ nm_execution_engines <- function() {
 }
 
 .nm_nlmixr_toolchain_guard <- function() {
-  variables <- c("PATH", "BINPREF", "rxBINPREF")
+  variables <- c("PATH", "Path", "BINPREF", "rxBINPREF", "COMPILER_PATH")
   previous <- Sys.getenv(variables, unset = NA_character_)
   restore <- function() {
     for (name in variables) {
@@ -523,8 +536,25 @@ nm_execution_engines <- function() {
     invisible(NULL)
   }
   if (.Platform$OS.type != "windows") return(restore)
-  compiler <- unname(Sys.which("gcc"))
-  make <- unname(Sys.which("make"))
+  rtools_variables <- grep(
+    "^RTOOLS[0-9]+_HOME$", names(Sys.getenv()), value = TRUE
+  )
+  rtools_roots <- unique(c(
+    unname(Sys.getenv(rtools_variables, unset = "")),
+    file.path("C:/", paste0("rtools", c(46L, 45L, 44L, 43L, 42L, 40L)))
+  ))
+  rtools_roots <- rtools_roots[nzchar(rtools_roots) & dir.exists(rtools_roots)]
+  compiler_candidates <- unlist(lapply(rtools_roots, function(root) file.path(
+    root, c(
+      "x86_64-w64-mingw32.static.posix/bin/gcc.exe",
+      "ucrt64/bin/gcc.exe", "mingw64/bin/gcc.exe"
+    )
+  )), use.names = FALSE)
+  make_candidates <- file.path(rtools_roots, "usr/bin/make.exe")
+  compiler <- compiler_candidates[file.exists(compiler_candidates)][1L]
+  make <- make_candidates[file.exists(make_candidates)][1L]
+  if (!length(compiler) || is.na(compiler)) compiler <- unname(Sys.which("gcc"))
+  if (!length(make) || is.na(make)) make <- unname(Sys.which("make"))
   if (!nzchar(compiler) || !nzchar(make)) return(restore)
   compiler <- normalizePath(compiler, winslash = "/", mustWork = TRUE)
   make <- normalizePath(make, winslash = "/", mustWork = TRUE)
@@ -541,15 +571,41 @@ nm_execution_engines <- function() {
   # Remove only such conflicting helper directories for this execution.
   conflicts <- vapply(normalized, function(path) {
     !identical(tolower(path), tolower(compiler_directory)) &&
-      any(file.exists(file.path(path, c("cc1.exe", "ld.exe"))))
+      any(file.exists(file.path(path, c("cc1.exe", "as.exe", "ld.exe"))))
   }, logical(1))
-  paths <- unique(c(compiler_directory, make_directory, paths[!conflicts]))
+  conflict_roots <- unique(dirname(dirname(
+    normalized[conflicts & grepl("[/\\\\]bin$", normalized, ignore.case = TRUE)]
+  )))
+  under_conflicting_toolchain <- if (!length(conflict_roots)) {
+    rep(FALSE, length(normalized))
+  } else vapply(normalized, function(path) {
+    normalized_path <- paste0(tolower(path), "/")
+    any(vapply(conflict_roots, function(root) {
+      startsWith(normalized_path, paste0(tolower(root), "/"))
+    }, logical(1)))
+  }, logical(1))
+  paths <- unique(c(
+    compiler_directory, make_directory,
+    paths[!conflicts & !under_conflicting_toolchain]
+  ))
   prefix <- paste0(compiler_directory, "/")
-  Sys.setenv(
-    PATH = paste(paths, collapse = .Platform$path.sep),
-    BINPREF = prefix,
-    rxBINPREF = prefix
+  cc1 <- tryCatch(
+    system2(compiler, "-print-prog-name=cc1", stdout = TRUE, stderr = FALSE),
+    error = function(...) character()
   )
+  compiler_path <- if (length(cc1) && file.exists(cc1[[1L]])) {
+    dirname(cc1[[1L]])
+  } else compiler_directory
+  clean_path <- paste(paths, collapse = .Platform$path.sep)
+  environment <- list(
+    PATH = clean_path, BINPREF = prefix, rxBINPREF = prefix,
+    COMPILER_PATH = compiler_path
+  )
+  # Windows environment names are case-insensitive at the OS boundary, but R
+  # can retain both spellings and nested build tools do not consistently pick
+  # the same one. Keep both synchronized.
+  if (.Platform$OS.type == "windows") environment$Path <- clean_path
+  do.call(Sys.setenv, environment)
   restore
 }
 
@@ -687,40 +743,88 @@ nm_execution_engines <- function() {
     tolower(arguments$covariance_type %||% "sandwich"),
     sandwich = "r,s", hessian = "r", opg = "s", "r,s"
   )
+  seed <- as.integer(
+    arguments$method_seed %||% arguments$seed %||% 20260713L
+  )
+  focei_arguments <- list(
+    maxOuterIterations = max(1L, as.integer(arguments$maxit %||% 200L)),
+    maxInnerIterations = max(1L, as.integer(arguments$eta_maxit %||% 100L)),
+    sigdig = max(1L, as.integer(arguments$significant_digits %||% 3L)),
+    print = max(0L, as.integer(arguments$print_every %||% 0L)),
+    covMethod = cov_method,
+    rxControl = rxode2::rxControl(
+      cores = max(1L, as.integer(arguments$n_cores %||% 1L))
+    )
+  )
   if (method == "SAEM") {
     return(list(
       est = "saem",
-        control = nlmixr2est::saemControl(
-        seed = as.integer(arguments$method_seed %||% 20260713L),
+      control = nlmixr2est::saemControl(
+        seed = seed,
         nBurn = max(0L, as.integer(arguments$burn %||% 60L)),
         nEm = max(1L, as.integer(arguments$n_iter %||% 200L) -
-                    max(0L, as.integer(arguments$burn %||% 60L))),
+                     max(0L, as.integer(arguments$burn %||% 60L))),
+        nmc = max(1L, as.integer(arguments$mcmc_steps %||% 3L)),
         print = max(0L, as.integer(arguments$print_every %||% 0L)),
-        covMethod = cov_method
+        covMethod = cov_method,
+        rxControl = focei_arguments$rxControl
       )
     ))
   }
-  if (method %in% c("FOCE", "FOCEI")) {
+  if (method == "FO") {
+    return(list(
+      est = "fo",
+      control = do.call(nlmixr2est::foControl, c(focei_arguments, list(
+        posthoc = TRUE
+      )))
+    ))
+  }
+  if (method == "FOCE") {
+    return(list(
+      est = "foce",
+      control = do.call(nlmixr2est::foceControl, focei_arguments)
+    ))
+  }
+  if (method == "FOCEI") {
     return(list(
       est = "focei",
-      control = nlmixr2est::foceiControl(
-        maxOuterIterations = max(1L, as.integer(arguments$maxit %||% 200L)),
-        maxInnerIterations = max(1L, as.integer(arguments$eta_maxit %||% 100L)),
-        print = max(0L, as.integer(arguments$print_every %||% 0L)),
-        covMethod = cov_method
+      control = do.call(nlmixr2est::foceiControl, c(
+        focei_arguments, list(interaction = TRUE)
+      ))
+    ))
+  }
+  if (method == "LAPLACE" && exists(
+    "laplaceControl", asNamespace("nlmixr2est"), inherits = FALSE
+  )) {
+    constructor <- get(
+      "laplaceControl", asNamespace("nlmixr2est"), inherits = FALSE
+    )
+    return(list(
+      est = "laplace",
+      control = do.call(constructor, c(focei_arguments, list(nAGQ = 1L)))
+    ))
+  }
+  if (method == "IMP" && exists(
+    "impControl", asNamespace("nlmixr2est"), inherits = FALSE
+  )) {
+    constructor <- get(
+      "impControl", asNamespace("nlmixr2est"), inherits = FALSE
+    )
+    return(list(
+      est = "imp",
+      control = constructor(
+        sigdig = focei_arguments$sigdig,
+        isample = max(25L, as.integer(arguments$n_imp %||% 300L)),
+        nIter = max(1L, as.integer(arguments$maxit %||% 100L)),
+        impSeed = seed,
+        covMethod = cov_method,
+        rxControl = focei_arguments$rxControl
       )
     ))
   }
-  if (method == "LAPLACE" && exists("laplaceControl", asNamespace("nlmixr2est"),
-                                     inherits = FALSE)) {
-    constructor <- get("laplaceControl", asNamespace("nlmixr2est"), inherits = FALSE)
-    return(list(est = "laplace", control = constructor(
-      maxOuterIterations = max(1L, as.integer(arguments$maxit %||% 200L)),
-      print = max(0L, as.integer(arguments$print_every %||% 0L)),
-      covMethod = cov_method
-    )))
-  }
-  .nm_stop("nlmixr2 execution currently supports FOCE/FOCEI, SAEM, and available LAPLACE builds.")
+  .nm_stop(
+    "nlmixr2 execution currently supports FO, FOCE, FOCEI, LAPLACE, IMP, and SAEM."
+  )
 }
 
 .nm_nlmixr_fit <- function(fit, model, data, method, elapsed) {
@@ -797,6 +901,10 @@ nm_execution_engines <- function() {
 }
 
 .nm_nlmixr_run <- function(model, data, operation, arguments) {
+  # rxode2 discovers parts of the compilation toolchain while loading. Clean
+  # legacy NONMEM compiler paths before loading any nlmixr2 namespace.
+  restore_toolchain <- .nm_nlmixr_toolchain_guard()
+  on.exit(restore_toolchain(), add = TRUE)
   if (!requireNamespace("nlmixr2", quietly = TRUE) ||
       !requireNamespace("nlmixr2est", quietly = TRUE) ||
       !requireNamespace("rxode2", quietly = TRUE)) {
@@ -805,8 +913,6 @@ nm_execution_engines <- function() {
       "and `rxode2` packages."
     )
   }
-  restore_toolchain <- .nm_nlmixr_toolchain_guard()
-  on.exit(restore_toolchain(), add = TRUE)
   data <- nm_dataset(data)
   ui <- .nm_nlmixr_ui(model)
   source <- attr(ui, "liberation_source", exact = TRUE)

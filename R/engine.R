@@ -76,6 +76,55 @@
   output
 }
 
+.nm_effect_covariance_evaluator_reference <- function(
+    model, evaluator, values = model$OMEGAS$Value) {
+  base <- .nm_omega_matrix(model, values)
+  if (!is.null(model$RE_CONFIG)) {
+    total_names <- paste0(".RE_TOTAL_", seq_along(model$RE_CONFIG$blocks))
+    totals <- evaluator$project(total_names, first_only = TRUE)
+    dimensions <- sum(vapply(seq_along(model$RE_CONFIG$blocks), function(index) {
+      as.integer(totals[[total_names[[index]]]][[1L]]) *
+        length(model$RE_CONFIG$blocks[[index]]$etas)
+    }, integer(1)))
+    output <- matrix(0, dimensions, dimensions)
+    offset <- 0L
+    for (block_index in seq_along(model$RE_CONFIG$blocks)) {
+      block <- model$RE_CONFIG$blocks[[block_index]]
+      total <- as.integer(totals[[total_names[[block_index]]]][[1L]])
+      block_covariance <- base[block$etas, block$etas, drop = FALSE]
+      for (unit in seq_len(total)) {
+        index <- offset + (unit - 1L) * length(block$etas) + seq_along(block$etas)
+        output[index, index] <- block_covariance
+      }
+      offset <- offset + total * length(block$etas)
+    }
+    return(output)
+  }
+  iov <- model$LIK_CONFIG$iov
+  if (iov == 0L) return(base)
+  between <- model$n_eta - iov
+  occasions <- as.integer((evaluator$n_eta - between) / iov)
+  output <- matrix(0, between + occasions * iov, between + occasions * iov)
+  if (between) {
+    output[seq_len(between), seq_len(between)] <-
+      base[seq_len(between), seq_len(between)]
+  }
+  for (current in seq_len(occasions)) {
+    index <- between + (current - 1L) * iov + seq_len(iov)
+    source <- between + seq_len(iov)
+    output[index, index] <- base[source, source]
+  }
+  output
+}
+
+.nm_effect_covariance_evaluator <- function(
+    model, evaluator, values = model$OMEGAS$Value) {
+  .liberation_subject_effect_covariance(
+    evaluator$engine$pointer, evaluator$data_input(), as.numeric(values),
+    as.integer(evaluator$n_eta)
+  )
+}
+
 .nm_model_spec <- function(model) {
   list(
     version = model$version,
@@ -114,10 +163,32 @@
     alg_ir = model$alg_ir %||% NULL,
     n_state = model$n_state,
     ode_control = model$ODE_CONTROL,
+    numerical_mode = .nm_numerical_mode(
+      model$NUMERICAL_MODE %||% "nonmem_compatibility"
+    ),
     specialized_advan = isTRUE(getOption("LibeRation.specialized_advan", TRUE)),
     state_names = as.character(model$GRAPH$compartments$name %||% character())
     ,matrix_graph = .nm_matrix_graph_spec(model$GRAPH)
   )
+}
+
+.nm_engine_simulation_result <- function(data, raw) {
+  result <- as.data.frame(data)
+  result$IPRED <- raw$ipred
+  for (j in seq_len(ncol(raw$amounts))) {
+    result[[paste0("A", j)]] <- raw$amounts[, j]
+  }
+  if (!is.null(raw$generated) && ncol(raw$generated)) {
+    generated_names <- as.character(
+      raw$output_names %||% colnames(raw$generated)
+    )
+    for (j in seq_len(ncol(raw$generated))) {
+      result[[generated_names[[j]]]] <- raw$generated[, j]
+    }
+  }
+  attr(result, "solver") <- raw$solver
+  attr(result, "state_names") <- raw$state_names
+  result
 }
 
 #' Compiled LibeRation numerical engine
@@ -162,20 +233,37 @@ NMEngine <- R6::R6Class(
       raw <- .liberation_engine_simulate(
         self$pointer, data, as.numeric(theta), eta, as.numeric(sigma)
       )
-      result <- as.data.frame(data)
-      result$IPRED <- raw$ipred
-      for (j in seq_len(ncol(raw$amounts))) {
-        result[[paste0("A", j)]] <- raw$amounts[, j]
+      .nm_engine_simulation_result(data, raw)
+    },
+
+    #' @description
+    #' Run several deterministic event-table predictions in one C++ call.
+    #' @param data NONMEM-style event data shared by all replicates.
+    #' @param theta Population fixed effects.
+    #' @param eta A list of subject-by-effect random-effect matrices.
+    #' @param sigma Residual parameters.
+    #' @returns A list of event data frames with the same augmented columns as
+    #'   the single-replicate simulation method.
+    simulate_batch = function(data, theta = self$model$THETAS$Value,
+                              eta, sigma = self$model$SIGMAS$Value) {
+      data <- .nm_engine_data(self$model, data)
+      n_subjects <- length(unique(data$.ID_INDEX))
+      n_eta <- .nm_eta_columns(self$model, data)
+      if (!is.list(eta) || !length(eta)) {
+        .nm_stop("`eta` must be a non-empty list of subject-by-effect matrices.")
       }
-      if (!is.null(raw$generated) && ncol(raw$generated)) {
-        generated_names <- as.character(raw$output_names %||% colnames(raw$generated))
-        for (j in seq_len(ncol(raw$generated))) {
-          result[[generated_names[[j]]]] <- raw$generated[, j]
+      eta <- lapply(eta, function(value) {
+        value <- as.matrix(value)
+        if (!identical(dim(value), c(n_subjects, n_eta))) {
+          .nm_stop("Every `eta` matrix must have dimensions ", n_subjects,
+                   " x ", n_eta, ".")
         }
-      }
-      attr(result, "solver") <- raw$solver
-      attr(result, "state_names") <- raw$state_names
-      result
+        value
+      })
+      raw <- .liberation_engine_simulate_batch(
+        self$pointer, data, as.numeric(theta), eta, as.numeric(sigma)
+      )
+      lapply(raw, function(value) .nm_engine_simulation_result(data, value))
     },
 
     #' @description
@@ -237,9 +325,11 @@ NMEngine <- R6::R6Class(
     #' @returns An internal `nm_prediction_tape` object.
     prediction_tape = function(data, theta = self$model$THETAS$Value,
                                eta = NULL, sigma = self$model$SIGMAS$Value) {
-      data <- .nm_engine_data(self$model, data)
-      n_subjects <- length(unique(data$.ID_INDEX))
-      n_eta <- .nm_eta_columns(self$model, data)
+      native_view <- inherits(data, "nm_subject_view")
+      if (!native_view) data <- .nm_engine_data(self$model, data)
+      n_subjects <- if (native_view) 1L else length(unique(data$.ID_INDEX))
+      n_eta <- if (native_view && !is.null(eta)) ncol(as.matrix(eta)) else
+        if (native_view) self$model$n_eta else .nm_eta_columns(self$model, data)
       if (is.null(eta)) eta <- matrix(0, n_subjects, n_eta)
       eta <- as.matrix(eta)
       if (!identical(dim(eta), c(n_subjects, n_eta))) {
@@ -253,7 +343,9 @@ NMEngine <- R6::R6Class(
       point <- c(theta, as.vector(t(eta)), sigma)
       structure(
         list(pointer = pointer, point = point, domain = attr(pointer, "domain"),
-             data = data, n_subjects = n_subjects, n_eta = n_eta,
+             data = if (native_view) NULL else data,
+             data_view_subject = if (native_view) data$subject else NULL,
+             n_subjects = n_subjects, n_eta = n_eta,
              dynamic_columns = attr(pointer, "dynamic_columns"),
              dynamic_parameters = attr(pointer, "dynamic_parameters"),
              propagation_kernel = attr(pointer, "propagation_kernel"),
@@ -301,9 +393,11 @@ NMEngine <- R6::R6Class(
                                eta = NULL, sigma = self$model$SIGMAS$Value,
                                omega = self$model$OMEGAS$Value,
                                interaction = TRUE) {
-      data <- .nm_engine_data(self$model, data)
-      n_subjects <- length(unique(data$.ID_INDEX))
-      n_eta <- .nm_eta_columns(self$model, data)
+      native_view <- inherits(data, "nm_subject_view")
+      if (!native_view) data <- .nm_engine_data(self$model, data)
+      n_subjects <- if (native_view) 1L else length(unique(data$.ID_INDEX))
+      n_eta <- if (native_view && !is.null(eta)) ncol(as.matrix(eta)) else
+        if (native_view) self$model$n_eta else .nm_eta_columns(self$model, data)
       if (is.null(eta)) eta <- matrix(0, n_subjects, n_eta)
       eta <- as.matrix(eta)
       if (!identical(dim(eta), c(n_subjects, n_eta))) {
@@ -318,7 +412,9 @@ NMEngine <- R6::R6Class(
       point <- c(theta, as.vector(t(eta)), sigma, omega)
       structure(
         list(pointer = pointer, point = point, domain = attr(pointer, "domain"),
-             data = data, n_subjects = n_subjects, n_eta = n_eta),
+             data = if (native_view) NULL else data,
+             data_view_subject = if (native_view) data$subject else NULL,
+             n_subjects = n_subjects, n_eta = n_eta),
         class = "nm_objective_tape"
       )
     },

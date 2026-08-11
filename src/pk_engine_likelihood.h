@@ -1,4 +1,9 @@
 struct ObjectiveTape {
+  struct EtaOptimizerState {
+    std::vector<double> dynamic_values;
+    Matrix inverse_hessian;
+  };
+
   CppAD::ADFun<double> fun;
   std::vector<std::string> domain_names;
   std::vector<std::string> dynamic_columns;
@@ -6,7 +11,15 @@ struct ObjectiveTape {
   std::vector<int> structural_dvid;
   std::vector<double> dynamic_values;
   int n_rows = 0;
+  bool fo_low_rank = false;
+  bool fo_low_rank_fallback = false;
+  std::string fo_low_rank_reason;
+  double fo_low_rank_relative_difference = 0.0;
   libertad::SparseHessianCache hessian_cache;
+  std::unordered_map<std::size_t, std::vector<EtaOptimizerState>>
+    eta_optimizer_states;
+  std::size_t eta_optimizer_state_hits = 0U;
+  std::size_t eta_optimizer_state_updates = 0U;
 };
 
 class TapePathChange : public std::runtime_error {
@@ -62,7 +75,7 @@ bool data_backed_model_input(const std::string& name) {
 }
 
 std::vector<std::string> prediction_dynamic_columns(
-    const ModelEngine& engine, const Rcpp::DataFrame& data) {
+    const ModelEngine& engine, const EventDataView& data) {
   std::vector<std::string> columns;
   std::unordered_map<std::string, bool> seen;
   auto append = [&](const std::vector<std::string>& inputs) {
@@ -86,7 +99,7 @@ std::vector<std::string> prediction_dynamic_columns(
 }
 
 std::vector<double> prediction_dynamic_values(
-    const std::vector<std::string>& columns, const Rcpp::DataFrame& data,
+    const std::vector<std::string>& columns, const EventDataView& data,
     int expected_rows = -1) {
   if (expected_rows >= 0 && data.nrows() != expected_rows) {
     throw std::invalid_argument("Dynamic prediction data has a different row count.");
@@ -109,10 +122,10 @@ std::vector<double> prediction_dynamic_values(
   return values;
 }
 
-std::vector<int> fo_observed_rows(const Rcpp::DataFrame& data) {
-  Rcpp::NumericVector dv = data["DV"];
-  Rcpp::NumericVector evid = data["EVID"];
-  Rcpp::NumericVector mdv = data["MDV"];
+std::vector<int> fo_observed_rows(const EventDataView& data) {
+  auto dv = data.values("DV");
+  auto evid = data.values("EVID");
+  auto mdv = data.values("MDV");
   std::vector<int> observed;
   for (int row = 0; row < data.nrows(); ++row) {
     if (evid[row] == 0.0 && mdv[row] == 0.0 && std::isfinite(dv[row])) {
@@ -122,10 +135,10 @@ std::vector<int> fo_observed_rows(const Rcpp::DataFrame& data) {
   return observed;
 }
 
-std::vector<int> fo_dvid_values(const Rcpp::DataFrame& data) {
+std::vector<int> fo_dvid_values(const EventDataView& data) {
   std::vector<int> result(static_cast<std::size_t>(data.nrows()), 1);
   if (!data.containsElementNamed("DVID")) return result;
-  Rcpp::NumericVector dvid = data["DVID"];
+  auto dvid = data.values("DVID");
   for (int row = 0; row < data.nrows(); ++row) {
     result[static_cast<std::size_t>(row)] =
       std::max(1, static_cast<int>(dvid[row]));
@@ -134,7 +147,7 @@ std::vector<int> fo_dvid_values(const Rcpp::DataFrame& data) {
 }
 
 std::vector<double> fo_dynamic_values(const ObjectiveTape& tape,
-                                      const Rcpp::DataFrame& data) {
+                                      const EventDataView& data) {
   if (tape.n_rows != data.nrows()) {
     throw std::invalid_argument("A shared FO tape received a different number of rows.");
   }
@@ -146,7 +159,7 @@ std::vector<double> fo_dynamic_values(const ObjectiveTape& tape,
   }
   std::vector<double> values = prediction_dynamic_values(
     tape.dynamic_columns, data, tape.n_rows);
-  Rcpp::NumericVector dv = data["DV"];
+  auto dv = data.values("DV");
   values.reserve(values.size() + tape.dynamic_observed_rows.size());
   for (int row : tape.dynamic_observed_rows) {
     const double value = dv[row];
@@ -158,13 +171,84 @@ std::vector<double> fo_dynamic_values(const ObjectiveTape& tape,
   return values;
 }
 
-void set_fo_dynamic(ObjectiveTape& tape, const Rcpp::DataFrame& data) {
+template <class Tape>
+void set_tape_dynamic_values(Tape& tape, const std::vector<double>& values,
+                             const std::string& context);
+
+void set_fo_dynamic(ObjectiveTape& tape, const EventDataView& data) {
   const std::vector<double> values = fo_dynamic_values(tape, data);
+  set_tape_dynamic_values(tape, values, "Shared FO tape");
+}
+
+template <class Tape>
+void set_tape_dynamic_values(Tape& tape, const std::vector<double>& values,
+                             const std::string& context) {
   if (values.size() != tape.fun.size_dyn_ind()) {
-    throw std::logic_error("Shared FO dynamic data do not match the recorded tape.");
+    throw std::invalid_argument(
+      context + " dynamic-data length does not match the recorded tape.");
   }
+  // new_dynamic() invalidates CppAD's current Taylor state.  Dedicated
+  // subject tapes commonly receive the same covariates/observations for many
+  // consecutive objective evaluations, so replaying an identical dynamic
+  // vector only adds work and prevents later Forward/Reverse reuse.
+  if (tape.dynamic_values == values) return;
   if (!values.empty()) tape.fun.new_dynamic(values);
   tape.dynamic_values = values;
+}
+
+std::vector<double> shared_objective_dynamic_values(
+    const ObjectiveTape& tape, const EventDataView& data) {
+  if (tape.n_rows != data.nrows()) {
+    throw std::invalid_argument(
+      "A shared conditional-objective tape received a different number of rows.");
+  }
+  if (fo_observed_rows(data) != tape.dynamic_observed_rows) {
+    throw std::invalid_argument(
+      "A shared conditional-objective tape received a different observation pattern.");
+  }
+  if (fo_dvid_values(data) != tape.structural_dvid) {
+    throw std::invalid_argument(
+      "A shared conditional-objective tape received a different DVID pattern.");
+  }
+  std::vector<double> values = prediction_dynamic_values(
+    tape.dynamic_columns, data, tape.n_rows);
+  auto dv = data.values("DV");
+  values.reserve(values.size() + tape.dynamic_observed_rows.size());
+  for (int row : tape.dynamic_observed_rows) {
+    const double value = dv[row];
+    if (!std::isfinite(value)) {
+      throw std::domain_error(
+        "A shared conditional-objective tape received a non-finite observation.");
+    }
+    values.push_back(value);
+  }
+  return values;
+}
+
+void set_shared_objective_dynamic(ObjectiveTape& tape,
+                                  const EventDataView& data) {
+  if (tape.dynamic_values.empty() && tape.dynamic_columns.empty() &&
+      tape.dynamic_observed_rows.empty()) return;
+  const std::vector<double> values = shared_objective_dynamic_values(tape, data);
+  set_tape_dynamic_values(
+    tape, values, "Shared conditional-objective tape");
+}
+
+inline std::vector<double> objective_dynamic_values(
+    const ObjectiveTape& tape, SEXP input) {
+  if (tape.fun.size_dyn_ind() == 0U && tape.dynamic_columns.empty() &&
+      tape.dynamic_observed_rows.empty()) {
+    return std::vector<double>();
+  }
+  if (Rf_isNumeric(input) && !Rf_inherits(input, "data.frame")) {
+    return Rcpp::as<std::vector<double>>(input);
+  }
+  return shared_objective_dynamic_values(tape, event_data_view(input));
+}
+
+inline void set_objective_dynamic_input(ObjectiveTape& tape, SEXP input) {
+  set_tape_dynamic_values(
+    tape, objective_dynamic_values(tape, input), "Objective tape");
 }
 
 std::vector<double> flatten_parameters(const Rcpp::NumericVector& theta,
@@ -194,7 +278,7 @@ std::vector<std::string> parameter_names(int n_theta, int n_subjects,
 }
 
 std::unique_ptr<PredictionTape> record_prediction_tape(
-    const ModelEngine& engine, const Rcpp::DataFrame& data,
+    const ModelEngine& engine, const EventDataView& data,
     const Rcpp::NumericVector& theta, const Rcpp::NumericMatrix& eta,
     const Rcpp::NumericVector& sigma) {
   const int minimum_eta_columns = required_eta_columns(engine, data);
@@ -325,7 +409,7 @@ MatrixT<Scalar> omega_matrix_t(const ModelEngine& engine,
 
 template <class Scalar>
 MatrixT<Scalar> expanded_omega_t(const ModelEngine& engine,
-                                 const Rcpp::DataFrame& data,
+                                 const EventDataView& data,
                                  const MatrixT<Scalar>& base,
                                  int expanded_dimension) {
   if (engine.re_enabled) {
@@ -409,7 +493,7 @@ Scalar omega_subject_prior_t(const MatrixT<Scalar>& covariance,
 
 template <class Scalar>
 std::vector<Scalar> evaluate_error_outputs_t(
-    const ModelEngine& engine, const Rcpp::DataFrame& data, int row, int subject,
+    const ModelEngine& engine, const EventDataView& data, int row, int subject,
     const std::vector<Scalar>& theta, const std::vector<Scalar>& eta,
     int eta_columns, const std::vector<Scalar>& sigma, int mixture_number,
     const Scalar& prediction, bool first, double previous_dv,
@@ -426,8 +510,9 @@ std::vector<Scalar> evaluate_error_outputs_t(
     mixture_number);
   std::vector<Scalar> inputs(engine.error->input_names.size(), Scalar(0.0));
   for (std::size_t index = 0; index < engine.error->input_names.size(); ++index) {
-    const std::string& name = engine.error->input_names[index];
-    int parameter_index = indexed_name(name, "THETA_");
+    const CompiledInputBinding& binding = engine.error_inputs[index];
+    const std::string& name = binding.name;
+    int parameter_index = binding.theta;
     if (parameter_index >= 0) {
       if (parameter_index >= static_cast<int>(theta.size())) {
         throw std::out_of_range("THETA index exceeds values in user likelihood.");
@@ -435,7 +520,7 @@ std::vector<Scalar> evaluate_error_outputs_t(
       inputs[index] = theta[static_cast<std::size_t>(parameter_index)];
       continue;
     }
-    parameter_index = indexed_name(name, "ETA_");
+    parameter_index = binding.eta;
     if (parameter_index >= 0) {
       const int column = eta_column(
         engine, data, row, parameter_index, eta_columns);
@@ -447,7 +532,7 @@ std::vector<Scalar> evaluate_error_outputs_t(
       inputs[index] = eta[position];
       continue;
     }
-    parameter_index = indexed_name(name, "SIGMA_");
+    parameter_index = binding.sigma;
     if (parameter_index >= 0) {
       if (parameter_index >= static_cast<int>(sigma.size())) {
         throw std::out_of_range("SIGMA index exceeds values in user likelihood.");
@@ -515,7 +600,7 @@ std::vector<Scalar> evaluate_error_outputs_t(
 
 template <class Scalar>
 Scalar user_likelihood_nll_t(
-    const ModelEngine& engine, const Rcpp::DataFrame& data, int row, int subject,
+    const ModelEngine& engine, const EventDataView& data, int row, int subject,
     const std::vector<Scalar>& theta, const std::vector<Scalar>& eta,
     int eta_columns, const std::vector<Scalar>& sigma, int mixture_number,
     const Scalar& prediction, bool first, double previous_dv,
@@ -591,7 +676,7 @@ struct HmmRowComponents {
 
 template <class Scalar>
 HmmRowComponents<Scalar> hmm_row_components_t(
-    const ModelEngine& engine, const Rcpp::DataFrame& data, int row, int subject,
+    const ModelEngine& engine, const EventDataView& data, int row, int subject,
     const std::vector<Scalar>& theta, const std::vector<Scalar>& eta,
     int eta_columns, const std::vector<Scalar>& sigma, int mixture_number,
     const Scalar& prediction, bool first, double previous_dv,
@@ -683,7 +768,7 @@ HmmRowComponents<Scalar> hmm_row_components_t(
 
 template <class Scalar>
 Scalar hmm_row_nll_t(
-    const ModelEngine& engine, const Rcpp::DataFrame& data, int row, int subject,
+    const ModelEngine& engine, const EventDataView& data, int row, int subject,
     const std::vector<Scalar>& theta, const std::vector<Scalar>& eta,
     int eta_columns, const std::vector<Scalar>& sigma, int mixture_number,
     const Scalar& prediction, bool first, double previous_dv,
@@ -786,14 +871,14 @@ Scalar residual_group_correlation_t(
 
 template <class Scalar>
 std::vector<Scalar> residual_grouped_subject_nll_t(
-    const ModelEngine& engine, const Rcpp::DataFrame& data,
+    const ModelEngine& engine, const EventDataView& data,
     const std::vector<Scalar>& prediction, const std::vector<Scalar>& theta,
     const std::vector<Scalar>& sigma,
     const std::vector<Scalar>* variance_prediction = nullptr) {
-  Rcpp::NumericVector dv = data["DV"];
-  Rcpp::IntegerVector evid = data["EVID"];
-  Rcpp::IntegerVector mdv = data["MDV"];
-  Rcpp::IntegerVector subjects = data[".ID_INDEX"];
+  auto dv = data.values("DV");
+  auto evid = data.values("EVID");
+  auto mdv = data.values("MDV");
+  auto subjects = data.values(".ID_INDEX");
   const bool has_dvid = data.containsElementNamed("DVID");
   int n_subjects = 0;
   for (int value : subjects) n_subjects = std::max(n_subjects, value);
@@ -972,7 +1057,7 @@ struct ParticleFilterState {
 
 template <class Scalar>
 NonlinearStateOutputs<Scalar> nonlinear_state_raw_outputs_t(
-    const ModelEngine& engine, const Rcpp::DataFrame& data, int row, int subject,
+    const ModelEngine& engine, const EventDataView& data, int row, int subject,
     const std::vector<Scalar>& theta, const std::vector<Scalar>& eta,
     int eta_columns, const std::vector<Scalar>& sigma, int mixture_number,
     const Scalar& prediction, bool first, double previous_dv,
@@ -1016,7 +1101,7 @@ NonlinearStateOutputs<Scalar> nonlinear_state_raw_outputs_t(
 
 template <class Scalar>
 NonlinearStateOutputs<Scalar> nonlinear_state_outputs_t(
-    const ModelEngine& engine, const Rcpp::DataFrame& data, int row, int subject,
+    const ModelEngine& engine, const EventDataView& data, int row, int subject,
     const std::vector<Scalar>& theta, const std::vector<Scalar>& eta,
     int eta_columns, const std::vector<Scalar>& sigma, int mixture_number,
     const Scalar& prediction, bool first, double previous_dv,
@@ -1107,7 +1192,7 @@ void normalize_switching_weights(std::vector<Scalar>& value,
 
 template <class Scalar>
 SwitchingStateOutputs<Scalar> switching_state_raw_outputs_t(
-    const ModelEngine& engine, const Rcpp::DataFrame& data, int row, int subject,
+    const ModelEngine& engine, const EventDataView& data, int row, int subject,
     const std::vector<Scalar>& theta, const std::vector<Scalar>& eta,
     int eta_columns, const std::vector<Scalar>& sigma, int mixture_number,
     const Scalar& prediction, bool first, double previous_dv,
@@ -1173,7 +1258,7 @@ int sample_switching_regime(const std::vector<Scalar>& probability,
 
 template <class Scalar>
 Scalar particle_row_nll_t(
-    const ModelEngine& engine, const Rcpp::DataFrame& data, int row, int subject,
+    const ModelEngine& engine, const EventDataView& data, int row, int subject,
     const std::vector<Scalar>& theta, const std::vector<Scalar>& eta,
     int eta_columns, const std::vector<Scalar>& sigma, int mixture_number,
     const Scalar& prediction, bool first, double previous_dv,
@@ -1470,7 +1555,7 @@ Scalar particle_row_nll_t(
 
 template <class Scalar>
 Scalar nonlinear_kalman_row_nll_t(
-    const ModelEngine& engine, const Rcpp::DataFrame& data, int row, int subject,
+    const ModelEngine& engine, const EventDataView& data, int row, int subject,
     const std::vector<Scalar>& theta, const std::vector<Scalar>& eta,
     int eta_columns, const std::vector<Scalar>& sigma, int mixture_number,
     const Scalar& prediction, bool first, double previous_dv,
@@ -1658,7 +1743,7 @@ Scalar nonlinear_kalman_row_nll_t(
 
 template <class Scalar>
 Scalar kalman_row_nll_t(
-    const ModelEngine& engine, const Rcpp::DataFrame& data, int row, int subject,
+    const ModelEngine& engine, const EventDataView& data, int row, int subject,
     const std::vector<Scalar>& theta, const std::vector<Scalar>& eta,
     int eta_columns, const std::vector<Scalar>& sigma, int mixture_number,
     const Scalar& prediction, bool first, double previous_dv,
@@ -1776,7 +1861,7 @@ Scalar ar1_rho_t(const ModelEngine& engine,
 
 template <class Scalar>
 std::vector<Scalar> residual_subject_nll_t(
-    const ModelEngine& engine, const Rcpp::DataFrame& data,
+    const ModelEngine& engine, const EventDataView& data,
     const std::vector<Scalar>& prediction, const std::vector<Scalar>& theta,
     const std::vector<Scalar>& eta, const std::vector<Scalar>& sigma,
     const std::vector<int>& mixture_assignment = std::vector<int>(),
@@ -1789,10 +1874,10 @@ std::vector<Scalar> residual_subject_nll_t(
     return residual_grouped_subject_nll_t(
       engine, data, prediction, theta, sigma, variance_prediction);
   }
-  Rcpp::NumericVector dv = data["DV"];
-  Rcpp::IntegerVector evid = data["EVID"];
-  Rcpp::IntegerVector mdv = data["MDV"];
-  Rcpp::IntegerVector subjects = data[".ID_INDEX"];
+  auto dv = data.values("DV");
+  auto evid = data.values("EVID");
+  auto mdv = data.values("MDV");
+  auto subjects = data.values(".ID_INDEX");
   int n_subjects = 0;
   for (int value : subjects) n_subjects = std::max(n_subjects, value);
   std::vector<Scalar> result(static_cast<std::size_t>(n_subjects), Scalar(0.0));
@@ -1936,13 +2021,13 @@ std::vector<Scalar> residual_subject_nll_t(
 
 template <class Scalar>
 Scalar population_joint_nll_t(const ModelEngine& engine,
-                              const Rcpp::DataFrame& data,
+                              const EventDataView& data,
                               const std::vector<Scalar>& theta,
                               const std::vector<Scalar>& eta,
                               const std::vector<Scalar>& sigma,
                               const std::vector<Scalar>& omega,
                               bool interaction = true) {
-  Rcpp::IntegerVector subjects = data[".ID_INDEX"];
+  auto subjects = data.values(".ID_INDEX");
   int n_subjects = 0;
   for (int value : subjects) n_subjects = std::max(n_subjects, value);
   Scalar total = Scalar(0.0);
@@ -2160,10 +2245,200 @@ Scalar positive_definite_logdet_t(
   return logdet;
 }
 
+// Evaluate R + G OMEGA G' without forming or factoring the observation-sized
+// marginal covariance.  With independent residual errors R is diagonal and
+// the determinant lemma/Woodbury identity reduce the factorisation to the
+// random-effect dimension:
+//
+//   U = G chol(OMEGA), M = I + U' R^-1 U
+//   log|R + U U'| = log|R| + log|M|
+//   e'(R + U U')^-1 e = e'R^-1e - b'M^-1b.
+//
+// The calculation is algebraically identical to the dense FO likelihood but
+// has a different floating-point evaluation order.  Selection is guarded by
+// covariance conditioning and an explicit comparison with the dense result at
+// tape creation, so it is safe to use under either numerical policy.
+template <class Scalar>
+Scalar fo_low_rank_gaussian_nll_t(
+    const VectorT<Scalar>& variance, const MatrixT<Scalar>& jacobian,
+    const MatrixT<Scalar>& omega, const VectorT<Scalar>& residual,
+    const std::string& context) {
+  const Eigen::Index observations = residual.size();
+  const Eigen::Index effects = omega.rows();
+  if (variance.size() != observations || jacobian.rows() != observations ||
+      jacobian.cols() != effects || omega.cols() != effects) {
+    throw std::invalid_argument(context + " dimensions are inconsistent.");
+  }
+  if (!observations) return Scalar(0.0);
+
+  MatrixT<Scalar> omega_lower = MatrixT<Scalar>::Zero(effects, effects);
+  for (Eigen::Index row = 0; row < effects; ++row) {
+    for (Eigen::Index column = 0; column <= row; ++column) {
+      Scalar value = omega(row, column);
+      for (Eigen::Index inner = 0; inner < column; ++inner) {
+        value -= omega_lower(row, inner) * omega_lower(column, inner);
+      }
+      if (row == column) {
+        if (!(scalar_value(value) > 1e-14)) {
+          throw std::domain_error(
+            context + " random-effect covariance is not positive definite "
+            "at the recording point.");
+        }
+        omega_lower(row, column) = CppAD::sqrt(value);
+      } else {
+        omega_lower(row, column) = value / omega_lower(column, column);
+      }
+    }
+  }
+
+  const MatrixT<Scalar> low_rank = jacobian * omega_lower;
+  MatrixT<Scalar> information = MatrixT<Scalar>::Identity(effects, effects);
+  VectorT<Scalar> right = VectorT<Scalar>::Zero(effects);
+  Scalar residual_logdet = Scalar(0.0);
+  Scalar base_quadratic = Scalar(0.0);
+  for (Eigen::Index observation = 0; observation < observations; ++observation) {
+    if (!(scalar_value(variance[observation]) > 1e-14)) {
+      throw std::domain_error(
+        context + " residual variance is not positive at the recording point.");
+    }
+    const Scalar inverse_variance = Scalar(1.0) / variance[observation];
+    residual_logdet += CppAD::log(variance[observation]);
+    base_quadratic += residual[observation] * residual[observation] *
+      inverse_variance;
+    for (Eigen::Index row = 0; row < effects; ++row) {
+      right[row] += low_rank(observation, row) * residual[observation] *
+        inverse_variance;
+      for (Eigen::Index column = 0; column <= row; ++column) {
+        information(row, column) += low_rank(observation, row) *
+          low_rank(observation, column) * inverse_variance;
+      }
+    }
+  }
+  for (Eigen::Index row = 0; row < effects; ++row) {
+    for (Eigen::Index column = 0; column < row; ++column) {
+      information(column, row) = information(row, column);
+    }
+  }
+
+  MatrixT<Scalar> lower = MatrixT<Scalar>::Zero(effects, effects);
+  Scalar information_logdet = Scalar(0.0);
+  for (Eigen::Index row = 0; row < effects; ++row) {
+    for (Eigen::Index column = 0; column <= row; ++column) {
+      Scalar value = information(row, column);
+      for (Eigen::Index inner = 0; inner < column; ++inner) {
+        value -= lower(row, inner) * lower(column, inner);
+      }
+      if (row == column) {
+        if (!(scalar_value(value) > 1e-14)) {
+          throw std::domain_error(
+            context + " low-rank information matrix is not positive definite "
+            "at the recording point.");
+        }
+        lower(row, column) = CppAD::sqrt(value);
+        information_logdet += Scalar(2.0) * CppAD::log(lower(row, column));
+      } else {
+        lower(row, column) = value / lower(column, column);
+      }
+    }
+  }
+  VectorT<Scalar> forward(effects);
+  for (Eigen::Index row = 0; row < effects; ++row) {
+    Scalar value = right[row];
+    for (Eigen::Index column = 0; column < row; ++column) {
+      value -= lower(row, column) * forward[column];
+    }
+    forward[row] = value / lower(row, row);
+  }
+  Scalar correction = Scalar(0.0);
+  for (Eigen::Index row = 0; row < effects; ++row) {
+    correction += forward[row] * forward[row];
+  }
+  return residual_logdet + information_logdet + base_quadratic - correction;
+}
+
+template <class Scalar>
+bool fo_low_rank_conditioned(
+    const VectorT<Scalar>& variance, const MatrixT<Scalar>& jacobian,
+    const MatrixT<Scalar>& omega, double tolerance, std::string& reason) {
+  const Eigen::Index observations = variance.size();
+  const Eigen::Index effects = omega.rows();
+  if (omega.cols() != effects || jacobian.rows() != observations ||
+      jacobian.cols() != effects) {
+    reason = "inconsistent low-rank dimensions";
+    return false;
+  }
+  Matrix omega_value(effects, effects);
+  Matrix jacobian_value(observations, effects);
+  Vector variance_value(observations);
+  for (Eigen::Index row = 0; row < observations; ++row) {
+    variance_value[row] = scalar_value(variance[row]);
+    if (!(variance_value[row] > 1e-14) ||
+        !std::isfinite(variance_value[row])) {
+      reason = "non-positive or non-finite residual variance";
+      return false;
+    }
+    for (Eigen::Index column = 0; column < effects; ++column) {
+      jacobian_value(row, column) = scalar_value(jacobian(row, column));
+      if (!std::isfinite(jacobian_value(row, column))) {
+        reason = "non-finite ETA Jacobian";
+        return false;
+      }
+    }
+  }
+  for (Eigen::Index row = 0; row < effects; ++row) {
+    for (Eigen::Index column = 0; column < effects; ++column) {
+      omega_value(row, column) = scalar_value(omega(row, column));
+      if (!std::isfinite(omega_value(row, column))) {
+        reason = "non-finite random-effect covariance";
+        return false;
+      }
+    }
+  }
+  const auto omega_eigen = libertad::detail::self_adjoint_eigen(
+    omega_value, false);
+  if (omega_eigen.info != Eigen::Success || !omega_eigen.values.size()) {
+    reason = "random-effect covariance eigendecomposition failed";
+    return false;
+  }
+  const double omega_max = omega_eigen.values.maxCoeff();
+  const double omega_min = omega_eigen.values.minCoeff();
+  if (!(omega_max > 0.0) || !(omega_min > std::max(1e-14, tolerance * omega_max))) {
+    reason = "random-effect covariance is singular or ill-conditioned";
+    return false;
+  }
+  Eigen::LLT<Matrix> omega_llt(omega_value);
+  if (omega_llt.info() != Eigen::Success) {
+    reason = "random-effect covariance Cholesky factorisation failed";
+    return false;
+  }
+  const Matrix low_rank = jacobian_value * Matrix(omega_llt.matrixL());
+  Matrix information = Matrix::Identity(effects, effects);
+  for (Eigen::Index row = 0; row < observations; ++row) {
+    information.noalias() += low_rank.row(row).transpose() *
+      low_rank.row(row) / variance_value[row];
+  }
+  const auto information_eigen = libertad::detail::self_adjoint_eigen(
+    information, false);
+  if (information_eigen.info != Eigen::Success ||
+      !information_eigen.values.size()) {
+    reason = "low-rank information eigendecomposition failed";
+    return false;
+  }
+  const double information_max = information_eigen.values.maxCoeff();
+  const double information_min = information_eigen.values.minCoeff();
+  if (!(information_min > std::max(1e-14, tolerance * information_max))) {
+    reason = "low-rank information matrix is ill-conditioned";
+    return false;
+  }
+  return true;
+}
+
 std::unique_ptr<ObjectiveTape> record_fo_tape(
     const ModelEngine& engine, PredictionTape& prediction_tape,
-    const Rcpp::DataFrame& data, const Rcpp::NumericVector& theta,
-    const Rcpp::NumericVector& sigma, const Rcpp::NumericVector& omega) {
+    const EventDataView& data, const Rcpp::NumericVector& theta,
+    const Rcpp::NumericVector& sigma, const Rcpp::NumericVector& omega,
+    bool low_rank = false, double low_rank_tolerance = 1e-9,
+    double low_rank_condition_tolerance = 1e-12) {
   const int n_theta = theta.size();
   const int n_sigma = sigma.size();
   const int n_omega = omega.size();
@@ -2172,9 +2447,8 @@ std::unique_ptr<ObjectiveTape> record_fo_tape(
   if (n_eta < 0 || n_omega != static_cast<int>(engine.omega_rows.size())) {
     throw std::invalid_argument("FO tape parameter dimensions are inconsistent with the model.");
   }
-  Rcpp::NumericVector dv = data["DV"];
-  Rcpp::NumericVector dvid = data.containsElementNamed("DVID") ?
-    Rcpp::NumericVector(data["DVID"]) : Rcpp::NumericVector(data.nrows(), 1.0);
+  auto dv = data.values("DV");
+  auto dvid = data.values("DVID", 1.0);
   const std::vector<int> observed = fo_observed_rows(data);
   std::vector<double> dynamic_values = prediction_tape.dynamic_values;
   dynamic_values.reserve(dynamic_values.size() + observed.size());
@@ -2268,43 +2542,98 @@ std::unique_ptr<ObjectiveTape> record_fo_tape(
     throw std::invalid_argument("FO random-effect covariance has the wrong dimension.");
   }
 
-  MatrixT<CppAD::AD<double>> residual_covariance(n_observed, n_observed);
-  for (Eigen::Index row = 0; row < n_observed; ++row) {
-    for (Eigen::Index column = 0; column < n_observed; ++column) {
-      CppAD::AD<double> correlation = row == column ?
-        CppAD::AD<double>(1.0) : CppAD::AD<double>(0.0);
-      if (engine.sigma_correlation == "ar1" && dvid[observed[row]] == dvid[observed[column]]) {
-        const CppAD::AD<double> rho = ar1_rho_t(engine, theta_ad, sigma_ad);
-        const Eigen::Index first = std::min(row, column);
-        const Eigen::Index last = std::max(row, column);
-        int lag = 0;
-        for (Eigen::Index position = first + 1; position <= last; ++position) {
-          if (dvid[observed[position]] == dvid[observed[row]]) ++lag;
+  if (!(low_rank_tolerance >= 0.0) || !std::isfinite(low_rank_tolerance) ||
+      !(low_rank_condition_tolerance > 0.0) ||
+      !std::isfinite(low_rank_condition_tolerance)) {
+    throw std::invalid_argument("FO low-rank tolerances are invalid.");
+  }
+  auto dense_nll = [&]() {
+    MatrixT<CppAD::AD<double>> residual_covariance(n_observed, n_observed);
+    for (Eigen::Index row = 0; row < n_observed; ++row) {
+      for (Eigen::Index column = 0; column < n_observed; ++column) {
+        CppAD::AD<double> correlation = row == column ?
+          CppAD::AD<double>(1.0) : CppAD::AD<double>(0.0);
+        if (engine.sigma_correlation == "ar1" &&
+            dvid[observed[row]] == dvid[observed[column]]) {
+          const CppAD::AD<double> rho = ar1_rho_t(engine, theta_ad, sigma_ad);
+          const Eigen::Index first = std::min(row, column);
+          const Eigen::Index last = std::max(row, column);
+          int lag = 0;
+          for (Eigen::Index position = first + 1; position <= last; ++position) {
+            if (dvid[observed[position]] == dvid[observed[row]]) ++lag;
+          }
+          correlation = CppAD::pow(rho, lag);
         }
-        correlation = CppAD::pow(rho, lag);
-      }
-      if (!engine.residual_groups.empty() && row != column &&
-          row_optional(data, "TIME", observed[row], 0.0) ==
-            row_optional(data, "TIME", observed[column], 0.0)) {
-        const int group_index = residual_group_for_dvid(engine, dvid[observed[row]]);
-        if (group_index >= 0 && residual_group_for_dvid(engine, dvid[observed[column]]) == group_index) {
-          const ResidualGroupSpec& group =
-            engine.residual_groups[static_cast<std::size_t>(group_index)];
-          correlation = residual_group_correlation_t(
-            group, residual_group_endpoint(group, dvid[observed[row]]),
-            residual_group_endpoint(group, dvid[observed[column]]),
-            theta_ad, sigma_ad);
+        if (!engine.residual_groups.empty() && row != column &&
+            row_optional(data, "TIME", observed[row], 0.0) ==
+              row_optional(data, "TIME", observed[column], 0.0)) {
+          const int group_index = residual_group_for_dvid(
+            engine, dvid[observed[row]]);
+          if (group_index >= 0 && residual_group_for_dvid(
+                engine, dvid[observed[column]]) == group_index) {
+            const ResidualGroupSpec& group =
+              engine.residual_groups[static_cast<std::size_t>(group_index)];
+            correlation = residual_group_correlation_t(
+              group, residual_group_endpoint(group, dvid[observed[row]]),
+              residual_group_endpoint(group, dvid[observed[column]]),
+              theta_ad, sigma_ad);
+          }
         }
+        residual_covariance(row, column) = correlation *
+          CppAD::sqrt(variance[row] * variance[column]);
       }
-      residual_covariance(row, column) = correlation *
-        CppAD::sqrt(variance[row] * variance[column]);
+    }
+    MatrixT<CppAD::AD<double>> marginal = residual_covariance +
+      jacobian * effect_omega * jacobian.transpose();
+    return positive_definite_gaussian_nll_t(
+      marginal, residual, "FO marginal covariance");
+  };
+
+  std::vector<CppAD::AD<double>> dependent(1);
+  const bool candidate = low_rank && n_eta > 0 && n_eta < n_observed &&
+    engine.sigma_correlation == "independent" &&
+    engine.residual_groups.empty();
+  bool use_low_rank = false;
+  bool low_rank_fallback = false;
+  std::string low_rank_reason;
+  double low_rank_relative_difference = 0.0;
+  if (candidate && fo_low_rank_conditioned(
+        variance, jacobian, effect_omega, low_rank_condition_tolerance,
+        low_rank_reason)) {
+    try {
+      const CppAD::AD<double> low_rank_nll = fo_low_rank_gaussian_nll_t(
+        variance, jacobian, effect_omega, residual,
+        "FO marginal covariance");
+      const CppAD::AD<double> dense = dense_nll();
+      const double low_rank_value = scalar_value(low_rank_nll);
+      const double dense_value = scalar_value(dense);
+      low_rank_relative_difference = std::abs(low_rank_value - dense_value) /
+        std::max(1.0, std::abs(dense_value));
+      if (std::isfinite(low_rank_relative_difference) &&
+          low_rank_relative_difference <= low_rank_tolerance) {
+        dependent[0] = low_rank_nll;
+        use_low_rank = true;
+        low_rank_reason = "conditioned and dense-equivalent";
+      } else {
+        dependent[0] = dense;
+        low_rank_fallback = true;
+        low_rank_reason = "dense-equivalence tolerance exceeded";
+      }
+    } catch (const std::exception& error) {
+      dependent[0] = dense_nll();
+      low_rank_fallback = true;
+      low_rank_reason = std::string("low-rank construction failed: ") +
+        error.what();
+    }
+  } else {
+    dependent[0] = dense_nll();
+    low_rank_fallback = candidate;
+    if (!candidate && low_rank) {
+      low_rank_reason = "model structure requires dense covariance";
+    } else if (!low_rank) {
+      low_rank_reason = "low-rank route disabled";
     }
   }
-  MatrixT<CppAD::AD<double>> marginal = residual_covariance +
-    jacobian * effect_omega * jacobian.transpose();
-  std::vector<CppAD::AD<double>> dependent(1);
-  dependent[0] = positive_definite_gaussian_nll_t(
-    marginal, residual, "FO marginal covariance");
   auto tape = std::make_unique<ObjectiveTape>();
   tape->fun.Dependent(independent, dependent);
   tape->fun.optimize();
@@ -2322,11 +2651,15 @@ std::unique_ptr<ObjectiveTape> record_fo_tape(
   tape->structural_dvid = fo_dvid_values(data);
   tape->dynamic_values = dynamic_values;
   tape->n_rows = data.nrows();
+  tape->fo_low_rank = use_low_rank;
+  tape->fo_low_rank_fallback = low_rank_fallback;
+  tape->fo_low_rank_reason = low_rank_reason;
+  tape->fo_low_rank_relative_difference = low_rank_relative_difference;
   return tape;
 }
 std::unique_ptr<ObjectiveTape> record_curvature_tape(
     const ModelEngine& engine, PredictionTape& prediction_tape,
-    ObjectiveTape& objective_tape, const Rcpp::DataFrame& data,
+    ObjectiveTape& objective_tape, const EventDataView& data,
     const Rcpp::NumericVector& theta, const Rcpp::NumericVector& eta,
     const Rcpp::NumericVector& sigma, const Rcpp::NumericVector& omega,
     const std::string& approximation) {
@@ -2405,11 +2738,10 @@ std::unique_ptr<ObjectiveTape> record_curvature_tape(
     std::vector<CppAD::AD<double>> sigma_ad(
       independent.begin() + n_theta + n_eta,
       independent.begin() + n_theta + n_eta + n_sigma);
-    Rcpp::NumericVector dv = data["DV"];
-    Rcpp::NumericVector evid = data["EVID"];
-    Rcpp::NumericVector mdv = data["MDV"];
-    Rcpp::NumericVector dvid = data.containsElementNamed("DVID") ?
-      Rcpp::NumericVector(data["DVID"]) : Rcpp::NumericVector(data.nrows(), 1.0);
+    auto dv = data.values("DV");
+    auto evid = data.values("EVID");
+    auto mdv = data.values("MDV");
+    auto dvid = data.values("DVID", 1.0);
     curvature.setZero();
     for (int row = 0; row < data.nrows(); ++row) {
       if (evid[row] != 0.0 || mdv[row] != 0.0 || !std::isfinite(dv[row])) continue;
@@ -2453,7 +2785,7 @@ std::unique_ptr<ObjectiveTape> record_curvature_tape(
   return tape;
 }
 std::unique_ptr<ObjectiveTape> record_objective_tape(
-    const ModelEngine& engine, const Rcpp::DataFrame& data,
+    const ModelEngine& engine, const EventDataView& data,
     const Rcpp::NumericVector& theta, const Rcpp::NumericMatrix& eta,
     const Rcpp::NumericVector& sigma, const Rcpp::NumericVector& omega,
     bool interaction) {
@@ -2480,6 +2812,123 @@ std::unique_ptr<ObjectiveTape> record_objective_tape(
   for (int i = 0; i < omega.size(); ++i) {
     tape->domain_names.push_back("OMEGA_" + std::to_string(i + 1));
   }
+  return tape;
+}
+
+// Record one analytical Gaussian conditional objective with observations and
+// model covariates as CppAD dynamic parameters.  Subjects with the same event
+// and observation design can therefore share the operation sequence while
+// retaining their own data.  Eligibility is deliberately narrow: complex
+// likelihood, mixture, IOV, and hierarchical random-effect paths continue to
+// use the general per-subject recorder above.
+std::unique_ptr<ObjectiveTape> record_shared_fo_objective_tape(
+    const ModelEngine& engine, PredictionTape& prediction_tape,
+    const EventDataView& data, const Rcpp::NumericVector& theta,
+    const Rcpp::NumericMatrix& eta, const Rcpp::NumericVector& sigma,
+    const Rcpp::NumericVector& omega) {
+  if (engine.error_type == "likelihood" || !engine.residual_groups.empty() ||
+      engine.sigma_correlation != "independent" ||
+      engine.blq_method != "none" || !engine.mixture_probabilities.empty() ||
+      engine.iov != 0 || engine.re_enabled || eta.nrow() != 1 ||
+      eta.ncol() != engine.n_eta) {
+    throw std::invalid_argument(
+      "This model is not eligible for a structurally shared FO conditional tape.");
+  }
+  if (prediction_tape.domain_names.size() !=
+      static_cast<std::size_t>(theta.size() + eta.size() + sigma.size())) {
+    throw std::invalid_argument(
+      "Shared FO prediction and conditional-objective dimensions differ.");
+  }
+
+  std::vector<double> point = flatten_parameters(theta, eta, sigma);
+  for (double value : omega) point.push_back(value);
+  std::vector<CppAD::AD<double>> independent(point.begin(), point.end());
+  const std::vector<int> observed = fo_observed_rows(data);
+  std::vector<double> dynamic_values = prediction_dynamic_values(
+    prediction_tape.dynamic_columns, data, data.nrows());
+  auto dv = data.values("DV");
+  dynamic_values.reserve(dynamic_values.size() + observed.size());
+  for (int row : observed) dynamic_values.push_back(dv[row]);
+  std::vector<CppAD::AD<double>> dynamic(
+    dynamic_values.begin(), dynamic_values.end());
+  if (dynamic.empty()) CppAD::Independent(independent);
+  else CppAD::Independent(independent, dynamic);
+
+  std::size_t cursor = 0U;
+  std::vector<CppAD::AD<double>> theta_ad(
+    static_cast<std::size_t>(theta.size()));
+  for (auto& value : theta_ad) value = independent[cursor++];
+  std::vector<CppAD::AD<double>> eta_ad(
+    static_cast<std::size_t>(eta.size()));
+  for (auto& value : eta_ad) value = independent[cursor++];
+  std::vector<CppAD::AD<double>> sigma_ad(
+    static_cast<std::size_t>(sigma.size()));
+  for (auto& value : sigma_ad) value = independent[cursor++];
+  std::vector<CppAD::AD<double>> omega_ad(
+    static_cast<std::size_t>(omega.size()));
+  for (auto& value : omega_ad) value = independent[cursor++];
+
+  auto prediction_ad = prediction_tape.fun.base2ad();
+  const std::size_t prediction_dynamic =
+    prediction_tape.dynamic_values.size();
+  if (prediction_dynamic) {
+    std::vector<CppAD::AD<double>> values(
+      dynamic.begin(), dynamic.begin() +
+        static_cast<std::ptrdiff_t>(prediction_dynamic));
+    prediction_ad.new_dynamic(values);
+  }
+  std::vector<CppAD::AD<double>> prediction_point;
+  prediction_point.reserve(
+    static_cast<std::size_t>(theta.size() + eta.size() + sigma.size()));
+  prediction_point.insert(
+    prediction_point.end(), theta_ad.begin(), theta_ad.end());
+  prediction_point.insert(
+    prediction_point.end(), eta_ad.begin(), eta_ad.end());
+  prediction_point.insert(
+    prediction_point.end(), sigma_ad.begin(), sigma_ad.end());
+  std::ostringstream messages;
+  const std::vector<CppAD::AD<double>> prediction =
+    prediction_ad.Forward(0, prediction_point, messages);
+
+  const std::vector<int> dvid = fo_dvid_values(data);
+  CppAD::AD<double> objective = CppAD::AD<double>(0.0);
+  std::size_t observation = prediction_dynamic;
+  for (int row : observed) {
+    const CppAD::AD<double> outcome = dynamic[observation++];
+    const CppAD::AD<double> fitted = prediction[static_cast<std::size_t>(row)];
+    const CppAD::AD<double> variance = residual_variance_t(
+      engine, fitted, sigma_ad, dvid[static_cast<std::size_t>(row)]);
+    CppAD::AD<double> residual = outcome - fitted;
+    if (engine.error_type == "exponential") {
+      residual = CppAD::log(outcome) -
+        CppAD::log(scalar_floor_t(fitted, 1e-300));
+    }
+    objective += CppAD::log(variance) + residual * residual / variance;
+  }
+  if (engine.n_eta > 0) {
+    const MatrixT<CppAD::AD<double>> covariance =
+      omega_matrix_t(engine, omega_ad);
+    VectorT<CppAD::AD<double>> effect(engine.n_eta);
+    for (int index = 0; index < engine.n_eta; ++index) {
+      effect[index] = eta_ad[static_cast<std::size_t>(index)];
+    }
+    objective += omega_subject_prior_t(covariance, effect);
+  }
+
+  std::vector<CppAD::AD<double>> dependent(1U, objective);
+  auto tape = std::make_unique<ObjectiveTape>();
+  tape->fun.Dependent(independent, dependent);
+  tape->fun.optimize();
+  tape->domain_names = parameter_names(
+    theta.size(), eta.nrow(), eta.ncol(), sigma.size());
+  for (int index = 0; index < omega.size(); ++index) {
+    tape->domain_names.push_back("OMEGA_" + std::to_string(index + 1));
+  }
+  tape->dynamic_columns = prediction_tape.dynamic_columns;
+  tape->dynamic_observed_rows = observed;
+  tape->structural_dvid = dvid;
+  tape->dynamic_values = dynamic_values;
+  tape->n_rows = data.nrows();
   return tape;
 }
 // End of likelihood implementation.

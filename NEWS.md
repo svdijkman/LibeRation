@@ -1,3 +1,328 @@
+# LibeRation 0.10.7
+
+- Reuses an exactly matching NPML/NPAG subject-by-support likelihood grid
+  across weight refinement, guarded pruning, cycle boundaries, and final
+  result construction. Weight-update order and estimator stopping semantics
+  are unchanged; diagnostics report physical grid evaluations and exact-state
+  cache hits.
+- Hardens estimator identity and reporting: failed final conditional modes now
+  prevent acceptance of deterministic nested fits; Bayesian posterior scores
+  are distinguished from likelihood-comparable objectives; SAEM replicates are
+  selected by a common-seed marginal importance score and carry an explicit
+  canonical/accelerated/f-SAEM/support-pruned variant label.
+- Preserves NPML's fixed support by default, guards every NPAG/optional support
+  pruning step against a decrease in the optimized mixture likelihood, and
+  records pruning decisions in estimator diagnostics.
+- Adds a cross-policy estimator-fidelity matrix spanning correlated ETAs,
+  covariates, combined error, IOV, ADVAN6 ODEs, BLQ likelihood, compiled user
+  likelihoods, and near-boundary parameters. The expanded gate also found and
+  fixed zero-ETA Fisher-proposal handling in IMP.
+- Moves optimized adaptive/fixed Gaussian-quadrature proposal construction,
+  signed tensor/Smolyak reduction, normalized CppAD score search, and exact
+  finite-grid refinement into one persistent native C++ coordinator. The
+  finite-grid objective, priors, log-Cholesky chain rule, curvature repair, and
+  conditional-mode controls are unchanged; `nonmem_compatibility`, explicit R
+  optimizer requests, PSOCK execution, and MU-referenced models retain the
+  established R/L-BFGS-B path with an explicit diagnostic reason.
+- Keeps optimized ITS M-steps and IMP posterior-weight installation inside the
+  persistent weighted-ETA C++ context. IMP no longer returns every proposal
+  probability to R merely to send it back to C++, while the
+  `nonmem_compatibility` path retains its established estimator coordination.
+- Extends the optimized native SAEM weighted M-step to guarded ODE models.
+  ODE support tapes are owned and safely retaped by the native context;
+  MU-specialized SAEM and the NONMEM-compatible path retain their existing
+  conservative coordination.
+- Moves both optimized NPML/NPAG interior-point weight fitting and the
+  compatibility EM weight recurrence into single native calls, preserving the
+  distinct algorithms and public solver identities.
+- Adds reusable guarded `nm_prediction_plan()` objects. Repeated prediction and
+  derivative evaluations update event/covariate values as CppAD dynamic
+  parameters and automatically retape when branch or solver-path guards fire.
+- Reuses deterministic population predictions across optimized residual-only
+  simulation replicates without changing the residual random-number stream.
+- Adds deterministic subject-parallel CppAD evaluation to the optimized
+  weighted-ETA objective used by ITS and IMP. Dynamic inputs are installed
+  on the main thread, unique subject tapes are statically assigned to persistent
+  native workers, and value/gradient contributions are reduced in subject order.
+  ODE tape-path changes are collected from workers, retaped safely on the main
+  thread, and then redispatched. Optimized IMP can now retain its native
+  weighted M-step for multicore, MU-referenced, and ODE models; unsupported
+  prior/covariance configurations continue through the established fallback.
+- Removes a redundant exact conditional-Hessian sweep from Gaussian ITS,
+  corrects defensive IMP mixture densities for odd draw counts, and adds an
+  optimized Fisher/Gauss--Newton IMP proposal curvature whose exact importance
+  weights leave the MCEM target unchanged. Optimized IMP can now retain its
+  weighted M-step, L-BFGS history, residual-variance recovery, and OMEGA moment
+  update in the native context.
+- Reuses the accepted native weighted-Q gradient for SAEM SIGMA updates rather
+  than replaying the complete retained support, and grows stochastic ETA
+  support geometrically instead of copying every subject's full history on
+  every iteration. Closed-form residual updates are disabled when a SIGMA
+  prior makes them non-conjugate.
+- Removes duplicate zero-order CppAD sweeps at accepted conditional-mode
+  points, caches unchanged dynamic subject inputs, and reuses guarded
+  per-subject inverse-curvature state in optimized mode. Fused analytical
+  ADVAN subject execution now uses persistent native workers rather than
+  creating threads for every stochastic evaluation.
+- Adds an optimized reduced-domain weighted population tape that differentiates
+  only THETA/SIGMA/OMEGA while treating retained ETA support and weights as
+  dynamic inputs. Conservative operation-count and support-shape stability
+  guards retain the established subject-tape path for changing-support IMP or
+  SAEM, large objectives, ODE/retaping cases, and all NONMEM-compatible runs.
+- Adds randomized quasi-Monte-Carlo IMP sampling and optional ESS-directed per-subject
+  draw budgets, progressive ITS conditional-mode tolerances, thinned optimized
+  SAEM numerical M-steps, and post-burn Polyak parameter averaging. All are
+  policy-separated; compatibility mode retains fixed random sampling, exact
+  requested ETA tolerances, one M-step per iteration, and the terminal iterate.
+- Corrects native stochastic-context lifetime management so both the retained
+  engine and retained subject descriptors have exactly balanced preserve and
+  release operations.
+- Moves ITS, IMP, and SAEM complete-data expectation work into a persistent
+  weighted-ETA C++ context with subject-order deterministic reduction. ITS
+  obtains first-order conditional covariance in one native sweep; IMP obtains
+  all posterior sample weights in one native call; and SAEM advances its exact
+  Robbins--Monro support, first and second ETA moments, OMEGA sufficient
+  statistics, and complete-data value/gradient without per-subject R
+  callbacks. Simple-residual SAEM SIGMA updates are recovered algebraically
+  from the exact Q gradient, avoiding a repeated simulation over every retained
+  latent support.
+- Adds policy-separated stochastic accelerations. `nonmem_compatibility`
+  retains fixed ITS/IMP effort, random Gaussian importance proposals,
+  fresh modes, random-walk SAEM, and fixed sample/M-step schedules.
+  `liber_optimized`
+  adds safeguarded ITS Aitken acceleration, progressive IMP sample/M-step
+  effort, antithetic defensive-mixture importance draws by default, optional
+  randomized quasi-Monte-Carlo draws,
+  guarded stale-mode
+  reuse with exact reweighting, stationarity stopping, and f-SAEM for eligible
+  one- or multi-ETA models. Optional SAEM support compression remains disabled
+  by default and is explicitly reported when requested.
+- Adds phase-level stochastic timing and backend/fallback telemetry plus
+  seeded native/reference equivalence tests for complete-data gradients,
+  SAEM recurrence and sufficient statistics, ITS covariance, IMP weights, and
+  the complete compatibility SAEM trajectory.
+- Corrects estimator identity and recurrence for every method that received a
+  qualified result in the August algorithm audit. NONMEM-compatible ITS now
+  uses conditional modes, first-order conditional variances, approximate
+  single-step THETA/SIGMA updates, and OMEGA conditional second moments;
+  default IMP is now importance-sampling MCEM rather than a finite-CRN
+  marginal optimizer; and SAEM retains the canonical Robbins--Monro
+  complete-data auxiliary function.
+- Makes optimized GQ finish against its complete finite adaptive-grid
+  objective, explicitly qualifies NPML/NPAG support behaviour, and upgrades
+  optimized NUTS with multinomial progressive sampling, generalized U-turn
+  termination, and windowed regularized diagonal metric adaptation. A
+  terminated doubled subtree is now correctly excluded from the multinomial
+  candidate pool, closing a posterior-scale bias found by the optimized-policy
+  independent-reference gate. The classic-slice NUTS route remains available
+  as a compatibility comparator.
+- HMC and NUTS now support guarded MU-aware non-centred random-effect geometry
+  in `liber_optimized` mode. The native and retained R targets apply the exact
+  OMEGA-Cholesky transformation, Jacobian, and population/ETA chain rules, with
+  explicit centred fallback telemetry for ineligible IOV/general-effect/MU
+  layouts.
+- Adds a guarded fused analytical ADVAN1--4/11/12 value path to persistent
+  SAEM/BAYES contexts. Eligible optimized jobs can evaluate immutable native
+  subject data concurrently without R calls or shared mutable CppAD tapes;
+  construction verifies every subject against its recorded tape and all
+  ineligible, mismatched, ODE, and NONMEM-compatible cases fall back. Serial
+  jobs retain faster CppAD zero-order replay unless the experimental serial
+  fused option is explicitly enabled.
+- Unifies execution-local conditional-state reuse for IMP and GQ and extends
+  MU-preserving mode recentering to adaptive quadrature and optimized compiled
+  FOCE/FOCEI/Laplace objectives. Cache hits, misses, and MU recenters are
+  retained in estimator telemetry.
+- Adds rank-normalized split R-hat, bulk and tail ESS, and mean MCSE to BAYES,
+  HMC, and NUTS posterior summaries while retaining `ess` as a compatibility
+  alias for bulk ESS.
+- Adds SAEM stationarity evidence, full parameter traces, optional conservative
+  automatic stopping, and independently seeded replicate aggregation with
+  between-replicate spread and explicit best-objective selection.
+- Refines optimized BAYES automatic ETA-kernel selection: one-ETA models retain
+  the much cheaper OMEGA-scaled random walk, while multivariate ETA models use
+  curvature-informed Laplace proposals. Explicit kernel selections are
+  unchanged.
+- Runs eligible serial `nonmem_compatibility` BAYES jobs through the persistent
+  native C++ coordinator without changing their isotropic population proposal,
+  OMEGA-scaled random-walk ETA proposal, adaptation schedule, R RNG order, or
+  retained chain. Optimized-only Gibbs, Laplace/Student-t, delayed-rejection,
+  adaptive-covariance, and MU-interweaving changes remain disabled; MU,
+  PSOCK/parallel, and iteration-printing cases retain the R coordinator.
+- Moves the complete eligible `liber_optimized` BAYES coordinator into the
+  persistent C++ stochastic context: parameter transforms, priors/Jacobians,
+  population and ETA proposals, RNG draws, adaptive covariance bookkeeping,
+  OMEGA factor caching, and retained-chain assembly cross no iterative R
+  boundary. The native coordinator now covers affine MU interweaving,
+  subject-specific IOV/general random-effect geometry, and guarded ODE
+  retaping. PSOCK subject-parallel and iteration-log cases retain the exact R
+  coordinator automatically.
+- Adds robust Laplace/Student-t independence proposals to optimized BAYES and
+  f-SAEM, with exact proposal-density corrections, adaptive refresh, and an
+  exact random-walk rescue mixture. Optimized BAYES also gains two-stage
+  delayed rejection and independent multi-chain aggregation with R-hat/ESS.
+- Uses exact conjugate inverse-gamma updates for eligible free diagonal OMEGA
+  variances. The optimization is guarded by model structure and prior family;
+  correlated OMEGA, IOV/general-effect designs, and nonconjugate priors retain
+  the adaptive log-Cholesky Metropolis path.
+- Reuses optimized Laplace conditional-mode machinery for persistent f-SAEM
+  proposals, including scale-aware convergence, bounded restarts, warm starts,
+  curvature only at accepted modes, and bounded positive-definite repair.
+  Adds exact random-walk rescue mixtures and parameter-movement/low-acceptance
+  early refreshes; guarded ODE and PSOCK routes now retain the independent
+  Metropolis proposal-density correction through the general coordinator.
+- Adds opt-in optimized stochastic kernels without changing the NONMEM
+  compatibility policy. Eligible multivariate-ETA SAEM runs can use f-SAEM:
+  a periodically refreshed Laplace-Gaussian independent Metropolis proposal
+  with the exact proposal-density correction; later refreshes warm start from
+  the preceding conditional modes. Optimized BAYES runs learn a full
+  population-parameter proposal covariance during burn-in; adaptation is
+  frozen before retained sampling and reports covariance/acceptance telemetry.
+- Retains subject objective tapes, installed dynamic inputs, and point buffers
+  in one persistent C++ stochastic context across optimized SAEM and BAYES
+  iterations. Transition-level tests compare both random-walk and independent
+  Metropolis decisions against their established R/C++ reference calculations.
+- Compiles BAYES population-prior targets and constants once and updates the
+  log posterior from the exact ETA-sweep objective delta, avoiding repeated
+  name parsing, density dispatch, and unchanged Jacobian evaluation.
+- Retains exact per-subject conditional objective values between SAEM/BAYES
+  ETA sweeps. The batched C++ Metropolis kernel now evaluates only candidate
+  ETAs when the population parameters are unchanged, while preserving the
+  proposal sequence, acceptance decisions, and seeded estimator result.
+- Groups subjects by random-effect design and caches proposal covariance
+  roots. A homogeneous 100-subject model now performs one OMEGA Cholesky
+  factorization per distinct OMEGA state rather than one per subject.
+- Adds an optimized-policy native aggregate for fixed-ETA SAEM value and
+  gradient evaluation, avoiding per-subject value and gradient matrices at
+  every R L-BFGS-B callback. Compatibility mode retains subject-order
+  reduction; both routes expose cache and evaluation telemetry.
+- Reports autocorrelation-adjusted effective sample sizes for the population
+  parameters in a BAYES chain. R-hat remains explicitly unavailable for the
+  current single-chain random-walk method; HMC/NUTS retain multichain R-hat.
+- Pre-binds read-only REAL/INTEGER event-column pointers after resolving
+  ALTREP once, removing Rcpp vector construction from row-level model access.
+- Adds a direct native BFGS-to-`PopulationObjective` coordinator for the
+  optimized numerical path. Value and gradient requests remain in C++ from
+  line search through convergence; the R callback adapter and R L-BFGS-B
+  compatibility path remain available.
+- Moves custom/non-zero Gaussian ETA-prior fitting into the conditional-mode
+  kernel, including the exact quadratic gradient and Hessian replacement.
+- Replaces rowwise ADDL data-frame construction and R ordering with a native
+  expansion layout and stable native event ordering, and batches optimized
+  ETA draws, WAIC reductions, and NPML/NPAG responsibility/gradient reductions.
+- Replaces the persistent list of copied per-subject event frames with one
+  canonical event table, a native C++ store, and contiguous `(start, length)`
+  row views. Prediction, objective, FO, curvature, ODE and retaping kernels now
+  read parent R columns in place; compiled population recovery no longer calls
+  back into R to reconstruct a subject data frame.
+- Moves the remaining subject-data-dependent estimation calculations into
+  C++: expanded IOV/general random-effect OMEGA matrices, observation counts,
+  conditional-curvature determinants, and MU covariate equations now consume
+  native row views directly. MU equations reuse the compiled LibeRtAD
+  expression IR and affine MU design matrices are derived without projecting
+  covariate columns into R. Explicit R reference implementations remain only
+  for numerical validation; ordinary estimation reports zero subject-frame
+  materializations and zero minimal projections.
+- Applies the native-view layout to serial and PSOCK estimation, exposes its
+  use in `fit$diagnostics$data_layout`, and retains
+  `options(LibeRation.subject_data_views = FALSE)` as an equivalence and
+  troubleshooting fallback. Batched objective paths now consistently refresh
+  dynamic observations and covariates from their validated buffers.
+- Extends the matched-control speed harness with fresh-process nlmixr2
+  estimation and simulation lanes. FO, FOCE, FOCEI, Laplace, IMP and SAEM are
+  mapped to their native nlmixr2 controls, unsupported exact ITS/BAYES
+  comparisons remain explicitly blank, and combined NONMEM/LibeRation/nlmixr2
+  CSV, Markdown, PNG and SVG reports are generated.
+- Hardens Windows nlmixr2 execution against incompatible compilers inherited
+  from other pharmacometric toolchains by selecting the R-version-compatible
+  Rtools compiler and synchronizing both Windows PATH environment variants.
+- Aligns estimation benchmark boundaries with NONMEM by reporting core time as
+  post-initialization model fitting plus covariance. Initial model/context/tape
+  construction remains in end-to-end wall time and is retained separately in
+  `fit$timing$initialization_seconds`.
+- Structurally shares eligible analytical Gaussian FO conditional-objective
+  tapes using dynamic observations and covariates in the batched posthoc
+  kernel. A bounded exact-key context cache reuses compatible compiled FO
+  contexts across repeated local runs and rejects changed data, models, or
+  tape-affecting options.
+- Restores persistent R L-BFGS-B as optimized SAEM's automatic M-step
+  coordinator. The explicit native path now separates value-only line-search
+  trials from accepted-point gradients, scales the objective, uses safeguarded
+  interpolation and actual projected displacement, and retains damped L-BFGS
+  memory cautiously between adjacent M-steps only after a strong-Wolfe check.
+
+- Accelerates FO in both numerical policies with an exact
+  determinant-lemma/Woodbury likelihood for independent residual covariance.
+  The main Cholesky factorization is now ETA-dimensional rather than
+  observation-dimensional. Selection requires well-conditioned OMEGA and
+  low-rank information matrices plus explicit agreement with the dense result
+  when the tape is created; any failed guard, AR(1), or residual-group model
+  automatically uses the established dense formulation with telemetry.
+- Records the fused FO population sum as a scalar in both policies, obtaining
+  its population gradient with one reverse sweep. Per-subject values are
+  restored lazily only when final run state is requested. The vector-output
+  route remains available as an equivalence/diagnostic option.
+- Stops reconstructing and resetting immutable dynamic data on every fused FO
+  population evaluation in both numerical policies. Compatibility mode keeps
+  one tape output per subject and the existing subject-order accumulation.
+- Pairs fixed-ETA SAEM values and exact CppAD gradients in one native subject
+  sweep while retaining R's L-BFGS-B driver in compatibility mode. A
+  persistent fixed-ETA context now retains tape references and reusable point
+  buffers across optimizer callbacks. Native OMEGA and eligible SIGMA
+  sufficient-statistic kernels serve both numerical policies, with opt-out
+  controls and fallback telemetry for equivalence and diagnosis.
+
+- Adds an explicit optimized-policy native SAEM M-step for serial analytical models.
+  The fixed-ETA population objective, exact CppAD gradient, scaling, damped
+  limited-memory state and line search remain in C++ instead of making separate R
+  callbacks for every objective and gradient evaluation. Native SIGMA and
+  OMEGA sufficient-statistic kernels further avoid returning full prediction
+  vectors or assembling covariance moments in R. ODE retaping, PSOCK, active
+  MU specialization and `optimizer_backend = "auto"` or `"r"` retain the
+  mature R-coordinated path; native selection is explicit and any native
+  failure falls back with diagnostics.
+
+- Arithmetic-neutral performance improvements now also apply to the default
+  NONMEM-compatible policy: exact linear propagation maps, deterministic
+  simulation output, invariant population predictions, identical OMEGA
+  factorisations, and accepted-history DDE lag values are reused without
+  changing solver trajectories, RNG order, or marginal summation order.
+
+- Expands the opt-in `liber_optimized` policy while keeping
+  `nonmem_compatibility` as the default reference path. Repeated analytical
+  propagation maps, population predictions, OMEGA factorizations, and fixed
+  deterministic simulations are now reused when their complete inputs agree.
+- Moves adaptive IMP/GQ subject integration, NPML/NPAG support-grid tape
+  evaluation and EM weights, AR(1) residual generation, and multi-replicate
+  prediction dispatch into batched native kernels. Serial R orchestration is
+  retained by the compatibility path and parallel worker semantics are
+  unchanged.
+- Resolves THETA/ETA/SIGMA/state, DAE-variable, and DDE-lag program bindings
+  once at model compilation instead of parsing or searching them at every
+  observation and solver stage. This exact lookup optimization benefits both
+  numerical policies without changing solver arithmetic.
+- Adds paired optimized-path regression coverage for seeded simulation,
+  importance values/gradients, nonparametric grids/weights, and all affected
+  estimator families.
+- Completes the NONMEM 7.6 ADVAN catalogue with ADVAN15 equilibrium DAE,
+  ADVAN16 and ADVAN18 delay differential equations, and ADVAN17 combined
+  delay/equilibrium systems. ADVAN17 can delay either dynamic compartments or
+  algebraic equilibrium variables while preserving editable `$DES`/`$AES`
+  model definitions.
+- Adds ADVAN15-18 workbench templates, validation, import/export, propagation
+  provenance, and NONMEM DDE execution flags. DDE control streams bypass PsN's
+  premature pre-ddexpand NM-TRAN check without bypassing NONMEM itself.
+- Direct NONMEM 7.6 prediction comparisons pass for ADVAN1-15 and ADVAN18.
+  ADVAN16/17 are recorded as unavailable when the optional RADAR5NM licence is
+  absent, and pass matched ADVAN18 equivalence checks instead.
+- Adds an independently written, clean-room three-stage Radau IIA order-five
+  DDE solver for ADVAN16/17 only, with coupled Newton stages, adaptive embedded
+  error control, collocation-polynomial history, discontinuity-aware mesh
+  insertion, and CppAD sensitivities. AD tapes replay the bounded Radau mesh
+  with fixed Newton work certified at recording to avoid acceptance-driven
+  retaping. ADVAN18 and general DDEs intentionally retain the existing RK4
+  method-of-steps path. ADVAN17 algebraic solves likewise fix convergence work
+  and pivot order at tape recording, eliminating convergence-jitter retaping.
+
 # LibeRation 0.10.5
 
 - Adds a direct SSH scheduler target beside HTTPS and SSH-tunnelled LibeRties.

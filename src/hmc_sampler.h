@@ -10,6 +10,10 @@ struct HmcParameters {
   std::vector<double> sigma;
   std::vector<double> omega;
   Matrix transform;
+  Matrix eta_factor;
+  std::vector<Matrix> eta_factor_gradient;
+  double eta_log_jacobian = 0.0;
+  Vector eta_log_jacobian_gradient;
   double log_jacobian = 0.0;
   Vector log_jacobian_gradient;
 };
@@ -39,6 +43,7 @@ class HmcTarget {
     n_eta_base_ = Rcpp::as<int>(config["n_eta_base"]);
     n_subjects_ = Rcpp::as<int>(config["n_subjects"]);
     n_eta_ = Rcpp::as<int>(config["n_eta"]);
+    noncentered_ = Rcpp::as<bool>(config["noncentered"]);
     lower_ = Rcpp::as<std::vector<double>>(config["lower"]);
     upper_ = Rcpp::as<std::vector<double>>(config["upper"]);
     initial_ = Rcpp::as<std::vector<double>>(config["initial"]);
@@ -87,6 +92,11 @@ class HmcTarget {
     if (tape_.domain_names.size() != expected_domain) {
       throw std::invalid_argument("Native HMC objective tape has the wrong domain.");
     }
+    if (noncentered_ && n_eta_ != n_eta_base_) {
+      throw std::invalid_argument(
+        "Native non-centred HMC requires the base ETA layout."
+      );
+    }
   }
 
   std::size_t dimension() const { return n_outer_ + n_eta_total_; }
@@ -115,7 +125,15 @@ class HmcTarget {
       return result;
     }
 
-    result.eta = q.tail(static_cast<Eigen::Index>(n_eta_total_));
+    const Vector latent_eta = q.tail(static_cast<Eigen::Index>(n_eta_total_));
+    result.eta = latent_eta;
+    if (noncentered_) {
+      for (int subject = 0; subject < n_subjects_; ++subject) {
+        const Eigen::Index offset = static_cast<Eigen::Index>(subject * n_eta_);
+        result.eta.segment(offset, n_eta_) = parameters.eta_factor *
+          latent_eta.segment(offset, n_eta_);
+      }
+    }
     std::vector<double> point;
     point.reserve(tape_.domain_names.size());
     point.insert(point.end(), parameters.theta.begin(), parameters.theta.end());
@@ -162,17 +180,49 @@ class HmcTarget {
 
     Vector outer_gradient = parameters.transform.transpose() * native_gradient +
       parameters.log_jacobian_gradient;
+    const std::size_t eta_offset = theta_base_.size();
+    if (noncentered_) {
+      for (std::size_t outer = 0; outer < n_outer_; ++outer) {
+        const Matrix& derivative = parameters.eta_factor_gradient[outer];
+        if (derivative.squaredNorm() == 0.0) continue;
+        for (int subject = 0; subject < n_subjects_; ++subject) {
+          const Eigen::Index offset = static_cast<Eigen::Index>(subject * n_eta_);
+          const Vector eta_gradient = -0.5 * Eigen::Map<const Vector>(
+            objective_gradient.data() + eta_offset +
+              static_cast<std::size_t>(offset), n_eta_
+          );
+          outer_gradient[static_cast<Eigen::Index>(outer)] +=
+            eta_gradient.dot(
+              derivative * latent_eta.segment(offset, n_eta_)
+            );
+        }
+      }
+      outer_gradient += parameters.eta_log_jacobian_gradient;
+    }
     outer_gradient = outer_gradient.cwiseProduct(bounded.derivative) +
       bounded.log_jacobian_gradient;
     result.gradient.head(static_cast<Eigen::Index>(n_outer_)) = outer_gradient;
-    const std::size_t eta_offset = theta_base_.size();
-    for (std::size_t index = 0; index < n_eta_total_; ++index) {
-      result.gradient[static_cast<Eigen::Index>(n_outer_ + index)] =
-        -0.5 * objective_gradient[eta_offset + index];
+    if (noncentered_) {
+      for (int subject = 0; subject < n_subjects_; ++subject) {
+        const Eigen::Index offset = static_cast<Eigen::Index>(subject * n_eta_);
+        const Vector eta_gradient = -0.5 * Eigen::Map<const Vector>(
+          objective_gradient.data() + eta_offset +
+            static_cast<std::size_t>(offset), n_eta_
+        );
+        result.gradient.segment(
+          static_cast<Eigen::Index>(n_outer_) + offset, n_eta_
+        ) = parameters.eta_factor.transpose() * eta_gradient;
+      }
+    } else {
+      for (std::size_t index = 0; index < n_eta_total_; ++index) {
+        result.gradient[static_cast<Eigen::Index>(n_outer_ + index)] =
+          -0.5 * objective_gradient[eta_offset + index];
+      }
     }
 
     result.logp = -0.5 * objective[0] - 0.5 * prior +
-      parameters.log_jacobian + bounded.log_jacobian;
+      parameters.log_jacobian + bounded.log_jacobian +
+      parameters.eta_log_jacobian;
     result.parameters = std::move(parameters);
     result.outer.assign(
       bounded.value.data(),
@@ -215,6 +265,7 @@ class HmcTarget {
   std::vector<double> lower_, upper_, initial_;
   std::vector<PopulationPrior> priors_;
   bool omega_full_ = false;
+  bool noncentered_ = false;
   int n_eta_base_ = 0;
   int n_subjects_ = 0;
   int n_eta_ = 0;
@@ -296,6 +347,11 @@ class HmcTarget {
       theta_base_.size() + sigma_base_.size() + omega_base_.size());
     result.transform = Matrix::Zero(n_native, encoded.size());
     result.log_jacobian_gradient = Vector::Zero(encoded.size());
+    result.eta_factor_gradient.assign(
+      static_cast<std::size_t>(encoded.size()),
+      Matrix::Zero(n_eta_base_, n_eta_base_)
+    );
+    result.eta_log_jacobian_gradient = Vector::Zero(encoded.size());
     std::size_t cursor = 0U;
     for (int index : theta_free_) {
       result.theta[static_cast<std::size_t>(index)] =
@@ -314,6 +370,7 @@ class HmcTarget {
       ++cursor;
     }
     const int omega_offset = sigma_offset + static_cast<int>(sigma_base_.size());
+    const std::size_t omega_cursor = cursor;
     if (omega_full_ && !omega_free_.empty()) {
       Matrix lower = Matrix::Zero(n_eta_base_, n_eta_base_);
       for (std::size_t entry = 0; entry < omega_base_.size(); ++entry) {
@@ -370,6 +427,47 @@ class HmcTarget {
     }
     if (cursor != static_cast<std::size_t>(encoded.size())) {
       throw std::invalid_argument("Native HMC encoded parameter length is invalid.");
+    }
+    if (noncentered_) {
+      Matrix covariance = Matrix::Zero(n_eta_base_, n_eta_base_);
+      for (std::size_t entry = 0; entry < result.omega.size(); ++entry) {
+        const int row = omega_rows_[entry];
+        const int column = omega_cols_[entry];
+        covariance(row, column) = result.omega[entry];
+        covariance(column, row) = result.omega[entry];
+      }
+      Eigen::LLT<Matrix> decomposition(covariance);
+      if (decomposition.info() != Eigen::Success) {
+        throw std::invalid_argument(
+          "Native non-centred HMC requires positive-definite OMEGA."
+        );
+      }
+      result.eta_factor = decomposition.matrixL();
+      if (omega_full_ && !omega_free_.empty()) {
+        for (std::size_t entry = 0; entry < omega_base_.size(); ++entry) {
+          const int row = omega_rows_[entry];
+          const int column = omega_cols_[entry];
+          result.eta_factor_gradient[omega_cursor + entry](row, column) =
+            row == column ? result.eta_factor(row, column) : 1.0;
+        }
+      } else if (!omega_full_ && !omega_free_.empty()) {
+        for (std::size_t entry = 0; entry < omega_free_.size(); ++entry) {
+          const int native = omega_free_[entry];
+          const int row = omega_rows_[static_cast<std::size_t>(native)];
+          result.eta_factor_gradient[omega_cursor + entry](row, row) =
+            0.5 * result.eta_factor(row, row);
+        }
+      }
+      result.eta_log_jacobian = static_cast<double>(n_subjects_) *
+        result.eta_factor.diagonal().array().log().sum();
+      for (std::size_t outer = 0; outer < n_outer_; ++outer) {
+        result.eta_log_jacobian_gradient[
+          static_cast<Eigen::Index>(outer)] =
+            static_cast<double>(n_subjects_) *
+            result.eta_factor.triangularView<Eigen::Lower>().solve(
+              result.eta_factor_gradient[outer]
+            ).trace();
+      }
     }
     return result;
   }
@@ -468,6 +566,57 @@ class HmcRandom {
   double spare_ = 0.0;
 };
 
+struct HmcMetric {
+  std::string kind = "diagonal";
+  Matrix mass;
+  Matrix inverse_mass;
+  Matrix root;
+  std::vector<std::vector<int>> blocks;
+
+  HmcMetric() = default;
+  HmcMetric(int dimension, const std::string& metric_kind,
+            const std::vector<std::vector<int>>& metric_blocks)
+      : kind(metric_kind), mass(Matrix::Identity(dimension, dimension)),
+        inverse_mass(Matrix::Identity(dimension, dimension)),
+        root(Matrix::Identity(dimension, dimension)), blocks(metric_blocks) {}
+};
+
+inline HmcMetric hmc_metric_from_mass(
+    const Matrix& proposed_mass, const std::string& kind,
+    const std::vector<std::vector<int>>& blocks) {
+  const Matrix symmetric = 0.5 * (proposed_mass + proposed_mass.transpose());
+  Eigen::SelfAdjointEigenSolver<Matrix> decomposition(symmetric);
+  if (decomposition.info() != Eigen::Success) {
+    throw std::runtime_error("HMC metric eigendecomposition failed.");
+  }
+  Vector values = decomposition.eigenvalues().array().max(1e-3).min(1e3);
+  HmcMetric result;
+  result.kind = kind;
+  result.blocks = blocks;
+  result.mass = decomposition.eigenvectors() * values.asDiagonal() *
+    decomposition.eigenvectors().transpose();
+  result.inverse_mass = decomposition.eigenvectors() *
+    values.cwiseInverse().asDiagonal() * decomposition.eigenvectors().transpose();
+  Eigen::LLT<Matrix> cholesky(result.mass);
+  if (cholesky.info() != Eigen::Success) {
+    throw std::runtime_error("Regularized HMC metric is not positive definite.");
+  }
+  result.root = cholesky.matrixL();
+  return result;
+}
+
+inline Vector hmc_momentum(const HmcMetric& metric, HmcRandom& random) {
+  Vector standard(metric.mass.rows());
+  for (Eigen::Index index = 0; index < standard.size(); ++index) {
+    standard[index] = random.normal();
+  }
+  return metric.root * standard;
+}
+
+inline Vector hmc_velocity(const Vector& momentum, const HmcMetric& metric) {
+  return metric.inverse_mass * momentum;
+}
+
 struct HmcMove {
   Vector q;
   Vector momentum;
@@ -475,17 +624,16 @@ struct HmcMove {
   bool valid = false;
 };
 
-inline double hmc_kinetic(const Vector& momentum, const Vector& mass) {
-  return 0.5 * (momentum.array().square() / mass.array()).sum();
+inline double hmc_kinetic(const Vector& momentum, const HmcMetric& metric) {
+  return 0.5 * momentum.dot(hmc_velocity(momentum, metric));
 }
 
 HmcMove hmc_leapfrog(const Vector& q, const Vector& momentum,
                      const Vector& gradient, double epsilon,
-                     const Vector& mass, HmcTarget& target) {
+                     const HmcMetric& metric, HmcTarget& target) {
   HmcMove result;
   result.momentum = momentum + 0.5 * epsilon * gradient;
-  result.q = q + epsilon *
-    (result.momentum.array() / mass.array()).matrix();
+  result.q = q + epsilon * hmc_velocity(result.momentum, metric);
   result.evaluated = target.evaluate(result.q);
   if (!result.evaluated.finite) return result;
   result.momentum += 0.5 * epsilon * result.evaluated.gradient;
@@ -494,28 +642,25 @@ HmcMove hmc_leapfrog(const Vector& q, const Vector& momentum,
 }
 
 double hmc_find_step(const Vector& q, const HmcEvaluation& evaluated,
-                     const Vector& mass, HmcTarget& target,
+                     const HmcMetric& metric, HmcTarget& target,
                      HmcRandom& random) {
   double epsilon = 1.0;
-  Vector momentum(q.size());
-  for (Eigen::Index index = 0; index < q.size(); ++index) {
-    momentum[index] = random.normal() * std::sqrt(mass[index]);
-  }
+  Vector momentum = hmc_momentum(metric, random);
   HmcMove proposal = hmc_leapfrog(
-    q, momentum, evaluated.gradient, epsilon, mass, target);
+    q, momentum, evaluated.gradient, epsilon, metric, target);
   double log_accept = proposal.valid ?
-    proposal.evaluated.logp - hmc_kinetic(proposal.momentum, mass) -
-      evaluated.logp + hmc_kinetic(momentum, mass) :
+    proposal.evaluated.logp - hmc_kinetic(proposal.momentum, metric) -
+      evaluated.logp + hmc_kinetic(momentum, metric) :
     -std::numeric_limits<double>::infinity();
   const int direction =
     std::isfinite(log_accept) && log_accept > std::log(0.5) ? 1 : -1;
   for (int iteration = 0; iteration < 20; ++iteration) {
     const double candidate = epsilon * (direction > 0 ? 2.0 : 0.5);
     proposal = hmc_leapfrog(
-      q, momentum, evaluated.gradient, candidate, mass, target);
+      q, momentum, evaluated.gradient, candidate, metric, target);
     const double candidate_accept = proposal.valid ?
-      proposal.evaluated.logp - hmc_kinetic(proposal.momentum, mass) -
-        evaluated.logp + hmc_kinetic(momentum, mass) :
+      proposal.evaluated.logp - hmc_kinetic(proposal.momentum, metric) -
+        evaluated.logp + hmc_kinetic(momentum, metric) :
       -std::numeric_limits<double>::infinity();
     const bool keep_going = direction > 0 ?
       candidate_accept > std::log(0.5) :
@@ -564,6 +709,7 @@ struct HmcTransition {
   bool accepted = false;
   bool divergence = false;
   double energy_error = std::numeric_limits<double>::quiet_NaN();
+  double energy = std::numeric_limits<double>::quiet_NaN();
   int tree_depth = -1;
   int leapfrog = 0;
   bool max_depth_reached = false;
@@ -571,22 +717,20 @@ struct HmcTransition {
 
 HmcTransition hmc_transition(const Vector& q,
                              const HmcEvaluation& evaluated,
-                             double step_size, const Vector& mass,
+                             double step_size, const HmcMetric& metric,
                              int n_leapfrog, HmcTarget& target,
                              double divergence_threshold,
                              HmcRandom& random) {
-  Vector momentum(q.size());
-  for (Eigen::Index index = 0; index < q.size(); ++index) {
-    momentum[index] = random.normal() * std::sqrt(mass[index]);
-  }
+  Vector momentum = hmc_momentum(metric, random);
   const Vector initial_momentum = momentum;
+  const double energy = -evaluated.logp + hmc_kinetic(initial_momentum, metric);
   Vector proposal_q = q;
   HmcEvaluation proposal = evaluated;
   bool valid = true;
   int completed = 0;
   for (int step = 0; step < n_leapfrog; ++step) {
     HmcMove moved = hmc_leapfrog(
-      proposal_q, momentum, proposal.gradient, step_size, mass, target);
+      proposal_q, momentum, proposal.gradient, step_size, metric, target);
     ++completed;
     if (!moved.valid) {
       valid = false;
@@ -597,8 +741,8 @@ HmcTransition hmc_transition(const Vector& q,
     proposal = std::move(moved.evaluated);
   }
   const double energy_error = valid ?
-    -(proposal.logp - hmc_kinetic(momentum, mass)) +
-      (evaluated.logp - hmc_kinetic(initial_momentum, mass)) :
+    -(proposal.logp - hmc_kinetic(momentum, metric)) +
+      (evaluated.logp - hmc_kinetic(initial_momentum, metric)) :
     std::numeric_limits<double>::infinity();
   const double acceptance = std::isfinite(energy_error) ?
     std::min(1.0, std::exp(-energy_error)) : 0.0;
@@ -611,16 +755,17 @@ HmcTransition hmc_transition(const Vector& q,
   result.divergence = !std::isfinite(energy_error) ||
     std::abs(energy_error) > divergence_threshold;
   result.energy_error = energy_error;
+  result.energy = energy;
   result.leapfrog = completed;
   return result;
 }
 
 inline bool nuts_stop(const Vector& q_minus, const Vector& q_plus,
                       const Vector& r_minus, const Vector& r_plus,
-                      const Vector& mass) {
+                      const HmcMetric& metric) {
   const Vector delta = q_plus - q_minus;
-  return (delta.array() * r_minus.array() / mass.array()).sum() >= 0.0 &&
-    (delta.array() * r_plus.array() / mass.array()).sum() >= 0.0;
+  return delta.dot(hmc_velocity(r_minus, metric)) >= 0.0 &&
+    delta.dot(hmc_velocity(r_plus, metric)) >= 0.0;
 }
 
 struct NutsTree {
@@ -637,11 +782,11 @@ struct NutsTree {
 NutsTree nuts_tree(const Vector& q, const Vector& r,
                    const HmcEvaluation& evaluated, double log_slice,
                    int direction, int depth, double step_size,
-                   const Vector& mass, HmcTarget& target, double joint0,
+                   const HmcMetric& metric, HmcTarget& target, double joint0,
                    double divergence_threshold, HmcRandom& random) {
   if (depth == 0) {
     HmcMove moved = hmc_leapfrog(
-      q, r, evaluated.gradient, direction * step_size, mass, target);
+      q, r, evaluated.gradient, direction * step_size, metric, target);
     NutsTree result;
     result.q_minus = result.q_plus = moved.q;
     result.r_minus = result.r_plus = moved.momentum;
@@ -655,7 +800,7 @@ NutsTree nuts_tree(const Vector& q, const Vector& r,
       return result;
     }
     const double joint =
-      moved.evaluated.logp - hmc_kinetic(moved.momentum, mass);
+      moved.evaluated.logp - hmc_kinetic(moved.momentum, metric);
     const double error = joint0 - joint;
     result.n = log_slice <= joint ? 1 : 0;
     result.active = std::isfinite(joint) &&
@@ -667,17 +812,17 @@ NutsTree nuts_tree(const Vector& q, const Vector& r,
   }
 
   NutsTree left = nuts_tree(
-    q, r, evaluated, log_slice, direction, depth - 1, step_size, mass,
+    q, r, evaluated, log_slice, direction, depth - 1, step_size, metric,
     target, joint0, divergence_threshold, random);
   if (!left.active) return left;
   NutsTree right = direction < 0 ?
     nuts_tree(
       left.q_minus, left.r_minus, left.e_minus, log_slice, direction,
-      depth - 1, step_size, mass, target, joint0, divergence_threshold,
+      depth - 1, step_size, metric, target, joint0, divergence_threshold,
       random) :
     nuts_tree(
       left.q_plus, left.r_plus, left.e_plus, log_slice, direction,
-      depth - 1, step_size, mass, target, joint0, divergence_threshold,
+      depth - 1, step_size, metric, target, joint0, divergence_threshold,
       random);
 
   NutsTree result;
@@ -698,7 +843,7 @@ NutsTree nuts_tree(const Vector& q, const Vector& r,
   result.e_plus = direction < 0 ? left.e_plus : right.e_plus;
   result.n = left.n + right.n;
   result.active = right.active && nuts_stop(
-    result.q_minus, result.q_plus, result.r_minus, result.r_plus, mass);
+    result.q_minus, result.q_plus, result.r_minus, result.r_plus, metric);
   result.alpha = left.alpha + right.alpha;
   result.n_alpha = left.n_alpha + right.n_alpha;
   result.divergent = left.divergent || right.divergent;
@@ -708,15 +853,12 @@ NutsTree nuts_tree(const Vector& q, const Vector& r,
 
 HmcTransition nuts_transition(const Vector& q,
                               const HmcEvaluation& evaluated,
-                              double step_size, const Vector& mass,
+                              double step_size, const HmcMetric& metric,
                               int max_depth, HmcTarget& target,
                               double divergence_threshold,
                               HmcRandom& random) {
-  Vector momentum(q.size());
-  for (Eigen::Index index = 0; index < q.size(); ++index) {
-    momentum[index] = random.normal() * std::sqrt(mass[index]);
-  }
-  const double joint0 = evaluated.logp - hmc_kinetic(momentum, mass);
+  Vector momentum = hmc_momentum(metric, random);
+  const double joint0 = evaluated.logp - hmc_kinetic(momentum, metric);
   const double log_slice = joint0 - random.exponential();
   Vector q_minus = q, q_plus = q, proposal_q = q;
   Vector r_minus = momentum, r_plus = momentum;
@@ -734,10 +876,10 @@ HmcTransition nuts_transition(const Vector& q,
     NutsTree tree = direction < 0 ?
       nuts_tree(
         q_minus, r_minus, e_minus, log_slice, direction, depth,
-        step_size, mass, target, joint0, divergence_threshold, random) :
+        step_size, metric, target, joint0, divergence_threshold, random) :
       nuts_tree(
         q_plus, r_plus, e_plus, log_slice, direction, depth,
-        step_size, mass, target, joint0, divergence_threshold, random);
+        step_size, metric, target, joint0, divergence_threshold, random);
     if (tree.active && tree.n > 0 &&
         random.bernoulli(
           static_cast<double>(tree.n) /
@@ -756,7 +898,7 @@ HmcTransition nuts_transition(const Vector& q,
     }
     n += tree.n;
     active = tree.active &&
-      nuts_stop(q_minus, q_plus, r_minus, r_plus, mass);
+      nuts_stop(q_minus, q_plus, r_minus, r_plus, metric);
     alpha += tree.alpha;
     n_alpha += tree.n_alpha;
     divergent = divergent || tree.divergent;
@@ -769,23 +911,276 @@ HmcTransition nuts_transition(const Vector& q,
   result.acceptance = alpha / static_cast<double>(std::max(n_alpha, 1));
   result.accepted = (proposal_q - q).squaredNorm() > 0.0;
   result.divergence = divergent;
+  result.energy = -joint0;
   result.tree_depth = depth_reached;
   result.leapfrog = leapfrog;
   result.max_depth_reached = depth_reached >= max_depth && active;
   return result;
 }
 
-Vector adapted_mass(const std::vector<Vector>& warmup, int count) {
-  if (count < 2) return Vector::Ones(warmup.front().size());
-  Vector mean = Vector::Zero(warmup.front().size());
-  for (int index = 0; index < count; ++index) mean += warmup[index];
-  mean /= static_cast<double>(count);
-  Vector variance = Vector::Zero(mean.size());
-  for (int index = 0; index < count; ++index) {
-    variance += (warmup[index] - mean).array().square().matrix();
+inline double hmc_log_add_exp(double left, double right) {
+  if (!std::isfinite(left)) return right;
+  if (!std::isfinite(right)) return left;
+  const double maximum = std::max(left, right);
+  return maximum + std::log(
+    std::exp(left - maximum) + std::exp(right - maximum));
+}
+
+inline bool nuts_generalized_stop(const Vector& r_minus,
+                                  const Vector& r_plus,
+                                  const Vector& rho,
+                                  const HmcMetric& metric) {
+  return hmc_velocity(r_minus, metric).dot(rho) >= 0.0 &&
+    hmc_velocity(r_plus, metric).dot(rho) >= 0.0;
+}
+
+struct MultinomialNutsTree {
+  Vector q_minus, r_minus, q_plus, r_plus, q_proposal, rho;
+  HmcEvaluation e_minus, e_plus, e_proposal;
+  double log_weight = -std::numeric_limits<double>::infinity();
+  bool active = false;
+  double alpha = 0.0;
+  int n_alpha = 0;
+  bool divergent = false;
+  int leapfrog = 0;
+};
+
+MultinomialNutsTree nuts_multinomial_tree(
+    const Vector& q, const Vector& r, const HmcEvaluation& evaluated,
+    int direction, int depth, double step_size, const HmcMetric& metric,
+    HmcTarget& target, double joint0, double divergence_threshold,
+    HmcRandom& random) {
+  if (depth == 0) {
+    HmcMove moved = hmc_leapfrog(
+      q, r, evaluated.gradient, direction * step_size, metric, target);
+    MultinomialNutsTree result;
+    result.q_minus = result.q_plus = moved.q;
+    result.r_minus = result.r_plus = moved.momentum;
+    result.e_minus = result.e_plus = moved.evaluated;
+    result.rho = moved.valid ? moved.momentum : Vector::Zero(r.size());
+    result.n_alpha = 1;
+    result.leapfrog = 1;
+    const double joint = moved.valid ?
+      moved.evaluated.logp - hmc_kinetic(moved.momentum, metric) :
+      -std::numeric_limits<double>::infinity();
+    const double error = joint0 - joint;
+    const bool valid = moved.valid && std::isfinite(error) &&
+      std::abs(error) <= divergence_threshold;
+    result.q_proposal = valid ? moved.q : q;
+    result.e_proposal = valid ? moved.evaluated : evaluated;
+    result.log_weight = valid ? joint - joint0 :
+      -std::numeric_limits<double>::infinity();
+    result.active = valid;
+    result.alpha = moved.valid ?
+      std::min(1.0, std::exp(std::min(0.0, joint - joint0))) : 0.0;
+    result.divergent = !valid;
+    return result;
   }
-  variance /= static_cast<double>(count - 1);
-  return (variance.array() + 1e-3).max(1e-3).min(1e3).matrix();
+  MultinomialNutsTree left = nuts_multinomial_tree(
+    q, r, evaluated, direction, depth - 1, step_size, metric, target,
+    joint0, divergence_threshold, random);
+  if (!left.active) return left;
+  MultinomialNutsTree right = direction < 0 ?
+    nuts_multinomial_tree(
+      left.q_minus, left.r_minus, left.e_minus, direction, depth - 1,
+      step_size, metric, target, joint0, divergence_threshold, random) :
+    nuts_multinomial_tree(
+      left.q_plus, left.r_plus, left.e_plus, direction, depth - 1,
+      step_size, metric, target, joint0, divergence_threshold, random);
+  // A subtree that already terminated is not a reversible extension of its
+  // parent trajectory. Its leapfrog/acceptance diagnostics still inform
+  // adaptation, but its states must not enter the multinomial candidate set.
+  if (!right.active) {
+    left.active = false;
+    left.alpha += right.alpha;
+    left.n_alpha += right.n_alpha;
+    left.divergent = left.divergent || right.divergent;
+    left.leapfrog += right.leapfrog;
+    return left;
+  }
+  MultinomialNutsTree result;
+  result.log_weight = hmc_log_add_exp(left.log_weight, right.log_weight);
+  const double right_probability = std::isfinite(right.log_weight) ?
+    std::exp(right.log_weight - result.log_weight) : 0.0;
+  const bool choose_right = random.bernoulli(right_probability);
+  result.q_proposal = choose_right ? right.q_proposal : left.q_proposal;
+  result.e_proposal = choose_right ? right.e_proposal : left.e_proposal;
+  result.q_minus = direction < 0 ? right.q_minus : left.q_minus;
+  result.r_minus = direction < 0 ? right.r_minus : left.r_minus;
+  result.e_minus = direction < 0 ? right.e_minus : left.e_minus;
+  result.q_plus = direction < 0 ? left.q_plus : right.q_plus;
+  result.r_plus = direction < 0 ? left.r_plus : right.r_plus;
+  result.e_plus = direction < 0 ? left.e_plus : right.e_plus;
+  result.rho = left.rho + right.rho;
+  const bool generalized_turn = nuts_generalized_stop(
+    result.r_minus, result.r_plus, result.rho, metric);
+  result.active = right.active && generalized_turn;
+  result.alpha = left.alpha + right.alpha;
+  result.n_alpha = left.n_alpha + right.n_alpha;
+  result.divergent = left.divergent || right.divergent;
+  result.leapfrog = left.leapfrog + right.leapfrog;
+  return result;
+}
+
+HmcTransition nuts_multinomial_transition(
+    const Vector& q, const HmcEvaluation& evaluated, double step_size,
+    const HmcMetric& metric, int max_depth, HmcTarget& target,
+    double divergence_threshold, HmcRandom& random) {
+  Vector momentum = hmc_momentum(metric, random);
+  const double joint0 = evaluated.logp - hmc_kinetic(momentum, metric);
+  Vector q_minus = q, q_plus = q, proposal_q = q;
+  Vector r_minus = momentum, r_plus = momentum, rho = momentum;
+  HmcEvaluation e_minus = evaluated, e_plus = evaluated, proposal = evaluated;
+  double log_weight = 0.0;
+  bool active = true;
+  double alpha = 0.0;
+  int n_alpha = 0, leapfrog = 0, depth_reached = 0;
+  bool divergent = false;
+  for (int depth = 0; depth < max_depth && active; ++depth) {
+    const int direction = random.direction();
+    MultinomialNutsTree tree = direction < 0 ?
+      nuts_multinomial_tree(
+        q_minus, r_minus, e_minus, direction, depth, step_size, metric,
+        target, joint0, divergence_threshold, random) :
+      nuts_multinomial_tree(
+        q_plus, r_plus, e_plus, direction, depth, step_size, metric,
+        target, joint0, divergence_threshold, random);
+    alpha += tree.alpha;
+    n_alpha += tree.n_alpha;
+    divergent = divergent || tree.divergent;
+    leapfrog += tree.leapfrog;
+    depth_reached = depth + 1;
+    if (!tree.active) {
+      active = false;
+      break;
+    }
+    const double total_weight = hmc_log_add_exp(log_weight, tree.log_weight);
+    const double tree_probability = std::isfinite(tree.log_weight) ?
+      std::exp(tree.log_weight - total_weight) : 0.0;
+    if (random.bernoulli(tree_probability)) {
+      proposal_q = tree.q_proposal;
+      proposal = tree.e_proposal;
+    }
+    if (direction < 0) {
+      q_minus = tree.q_minus; r_minus = tree.r_minus; e_minus = tree.e_minus;
+    } else {
+      q_plus = tree.q_plus; r_plus = tree.r_plus; e_plus = tree.e_plus;
+    }
+    rho += tree.rho;
+    log_weight = total_weight;
+    active = tree.active && nuts_generalized_stop(
+      r_minus, r_plus, rho, metric);
+  }
+  HmcTransition result;
+  result.q = proposal_q;
+  result.evaluated = proposal;
+  result.acceptance = alpha / static_cast<double>(std::max(n_alpha, 1));
+  result.accepted = (proposal_q - q).squaredNorm() > 0.0;
+  result.divergence = divergent;
+  result.energy = -joint0;
+  result.tree_depth = depth_reached;
+  result.leapfrog = leapfrog;
+  result.max_depth_reached = depth_reached >= max_depth && active;
+  return result;
+}
+
+HmcMetric adapted_metric(const std::vector<Vector>& warmup, int start, int count,
+                         const std::string& kind,
+                         const std::vector<std::vector<int>>& configured_blocks) {
+  const int dimension = static_cast<int>(warmup.front().size());
+  if (count - start < 2 || kind == "unit") {
+    return HmcMetric(dimension, kind, configured_blocks);
+  }
+  Vector mean = Vector::Zero(warmup.front().size());
+  for (int index = start; index < count; ++index) mean += warmup[index];
+  mean /= static_cast<double>(count - start);
+  std::vector<std::vector<int>> blocks;
+  if (kind == "diagonal") {
+    for (int index = 0; index < dimension; ++index) blocks.push_back({index});
+  } else if (kind == "dense") {
+    blocks.push_back(std::vector<int>(static_cast<std::size_t>(dimension)));
+    std::iota(blocks.front().begin(), blocks.front().end(), 0);
+  } else {
+    blocks = configured_blocks;
+  }
+  const double shrink = static_cast<double>(count - start) /
+    static_cast<double>(count - start + 5);
+  Matrix mass = Matrix::Zero(dimension, dimension);
+  for (const std::vector<int>& block : blocks) {
+    const int width = static_cast<int>(block.size());
+    Matrix covariance = Matrix::Zero(width, width);
+    for (int sample = start; sample < count; ++sample) {
+      for (int row = 0; row < width; ++row) {
+        const double centered_row = warmup[sample][block[row]] - mean[block[row]];
+        for (int column = 0; column < width; ++column) {
+          covariance(row, column) += centered_row *
+            (warmup[sample][block[column]] - mean[block[column]]);
+        }
+      }
+    }
+    covariance /= static_cast<double>(count - start - 1);
+    covariance = shrink * covariance +
+      (1.0 - shrink) * 1e-3 * Matrix::Identity(width, width);
+    Eigen::SelfAdjointEigenSolver<Matrix> decomposition(
+      0.5 * (covariance + covariance.transpose()));
+    if (decomposition.info() != Eigen::Success) {
+      throw std::runtime_error("HMC covariance adaptation failed.");
+    }
+    const Vector variance =
+      decomposition.eigenvalues().array().max(1e-3).min(1e3);
+    const Matrix precision = decomposition.eigenvectors() *
+      variance.cwiseInverse().asDiagonal() *
+      decomposition.eigenvectors().transpose();
+    for (int row = 0; row < width; ++row) {
+      for (int column = 0; column < width; ++column) {
+        mass(block[row], block[column]) = precision(row, column);
+      }
+    }
+  }
+  return hmc_metric_from_mass(mass, kind, configured_blocks);
+}
+
+struct HmcWarmupSchedule {
+  int initial_buffer = 0;
+  int terminal_buffer = 0;
+  int first_window = 25;
+  std::vector<int> ends;
+};
+
+HmcWarmupSchedule hmc_warmup_schedule(int n_warmup, int initial_buffer,
+                                      int terminal_buffer, int first_window) {
+  HmcWarmupSchedule result;
+  result.initial_buffer = initial_buffer;
+  result.terminal_buffer = terminal_buffer;
+  result.first_window = first_window;
+  if (n_warmup < 20) {
+    result.initial_buffer = n_warmup;
+    result.terminal_buffer = 0;
+    return result;
+  }
+  if (initial_buffer + terminal_buffer + first_window > n_warmup) {
+    result.initial_buffer = std::max(1, static_cast<int>(std::floor(0.15 * n_warmup)));
+    result.terminal_buffer = std::max(1, static_cast<int>(std::floor(0.10 * n_warmup)));
+    result.first_window = std::max(
+      1, n_warmup - result.initial_buffer - result.terminal_buffer);
+  }
+  const int slow = n_warmup - result.initial_buffer - result.terminal_buffer;
+  if (slow <= 0) {
+    result.initial_buffer = n_warmup;
+    result.terminal_buffer = 0;
+    return result;
+  }
+  int consumed = 0;
+  int width = std::min(result.first_window, slow);
+  while (consumed < slow) {
+    const int remaining = slow - consumed;
+    if (remaining < 2 * width) width = remaining;
+    consumed += width;
+    result.ends.push_back(result.initial_buffer + consumed);
+    width = std::min(2 * width, slow - consumed);
+    if (width <= 0) break;
+  }
+  return result;
 }
 
 Rcpp::List hmc_evaluation_to_r(const HmcEvaluation& evaluated) {
@@ -828,7 +1223,62 @@ Rcpp::List native_hmc_sample(ObjectiveTape& tape,
     throw std::invalid_argument("Native HMC controls are invalid.");
   }
   HmcTarget target(tape, config);
+  const std::string nuts_variant = config.containsElementNamed("nuts_variant") ?
+    Rcpp::as<std::string>(config["nuts_variant"]) : "classic_slice";
+  if (method == "NUTS" && nuts_variant != "classic_slice" &&
+      nuts_variant != "multinomial") {
+    throw std::invalid_argument("Native NUTS variant is invalid.");
+  }
   const int dimension = static_cast<int>(target.dimension());
+  const std::string metric_kind = config.containsElementNamed("hmc_metric") ?
+    Rcpp::as<std::string>(config["hmc_metric"]) : "diagonal";
+  if (metric_kind != "unit" && metric_kind != "diagonal" &&
+      metric_kind != "dense" && metric_kind != "block") {
+    throw std::invalid_argument("Native HMC metric is invalid.");
+  }
+  std::vector<std::vector<int>> metric_blocks;
+  if (config.containsElementNamed("hmc_metric_blocks")) {
+    Rcpp::List supplied = config["hmc_metric_blocks"];
+    std::vector<bool> used(static_cast<std::size_t>(dimension), false);
+    for (R_xlen_t block_index = 0; block_index < supplied.size(); ++block_index) {
+      Rcpp::IntegerVector source = supplied[block_index];
+      std::vector<int> block;
+      block.reserve(static_cast<std::size_t>(source.size()));
+      for (int index : source) {
+        if (index < 0 || index >= dimension || used[static_cast<std::size_t>(index)]) {
+          throw std::invalid_argument("Native HMC metric blocks are invalid or overlap.");
+        }
+        used[static_cast<std::size_t>(index)] = true;
+        block.push_back(index);
+      }
+      if (block.empty()) throw std::invalid_argument("Native HMC metric blocks cannot be empty.");
+      metric_blocks.push_back(std::move(block));
+    }
+    for (int index = 0; index < dimension; ++index) {
+      if (!used[static_cast<std::size_t>(index)]) metric_blocks.push_back({index});
+    }
+  }
+  const int initial_buffer = config.containsElementNamed("adapt_initial_buffer") ?
+    Rcpp::as<int>(config["adapt_initial_buffer"]) : 75;
+  const int terminal_buffer = config.containsElementNamed("adapt_terminal_buffer") ?
+    Rcpp::as<int>(config["adapt_terminal_buffer"]) : 50;
+  const int first_window = config.containsElementNamed("adapt_first_window") ?
+    Rcpp::as<int>(config["adapt_first_window"]) : 25;
+  const HmcWarmupSchedule warmup_schedule = hmc_warmup_schedule(
+    n_warmup, initial_buffer, terminal_buffer, first_window);
+  const std::string initialization = config.containsElementNamed("initialization") ?
+    Rcpp::as<std::string>(config["initialization"]) : "auto";
+  const double initialization_radius =
+    config.containsElementNamed("initialization_radius") ?
+      Rcpp::as<double>(config["initialization_radius"]) : 2.0;
+  const int initialization_attempts =
+    config.containsElementNamed("initialization_attempts") ?
+      Rcpp::as<int>(config["initialization_attempts"]) : 100;
+  if ((initialization != "auto" && initialization != "model" &&
+       initialization != "jitter") || initialization_radius < 0.0 ||
+      initialization_attempts < 1) {
+    throw std::invalid_argument("Native HMC initialization controls are invalid.");
+  }
   const int total = n_warmup + n_sample * n_thin;
   const int output_columns = static_cast<int>(
     config.containsElementNamed("output_columns") ?
@@ -841,32 +1291,54 @@ Rcpp::List native_hmc_sample(ObjectiveTape& tape,
     HmcRandom random(seed + static_cast<std::uint64_t>(chain_id));
     Vector q(dimension);
     for (int index = 0; index < dimension; ++index) {
-      q[index] = target.initial()[static_cast<std::size_t>(index)] +
-        0.02 * random.normal();
+      q[index] = target.initial()[static_cast<std::size_t>(index)];
     }
-    HmcEvaluation evaluated = target.evaluate(q);
-    if (!evaluated.finite) {
+    HmcEvaluation evaluated;
+    bool initialized = false;
+    int initialization_count = 0;
+    std::string initialization_source;
+    if (initialization == "auto" || initialization == "model") {
+      evaluated = target.evaluate(q);
+      initialization_count = 1;
+      initialized = evaluated.finite;
+      if (initialized) initialization_source = "model initial";
+      if (!initialized && initialization == "model") {
+        throw std::runtime_error(
+          "The native HMC model initial point has non-finite posterior density or gradient.");
+      }
+    }
+    for (int attempt = 0; !initialized && attempt < initialization_attempts; ++attempt) {
+      const double radius = initialization_radius *
+        std::pow(0.5, static_cast<double>(attempt / 25));
       for (int index = 0; index < dimension; ++index) {
-        q[index] = target.initial()[static_cast<std::size_t>(index)];
+        q[index] = target.initial()[static_cast<std::size_t>(index)] +
+          radius * (2.0 * random.uniform() - 1.0);
       }
       evaluated = target.evaluate(q);
+      ++initialization_count;
+      initialized = evaluated.finite;
+      if (initialized) initialization_source = "bounded random jitter";
     }
-    if (!evaluated.finite) {
+    if (!initialized) {
       throw std::runtime_error(
-        "Unable to initialize native HMC at a finite posterior density.");
+        "Unable to initialize native HMC at a finite posterior density after bounded attempts.");
     }
 
-    Vector mass = Vector::Ones(dimension);
+    HmcMetric metric(dimension, metric_kind, metric_blocks);
     double epsilon = std::isfinite(step_size) && step_size > 0.0 ?
-      step_size : hmc_find_step(q, evaluated, mass, target, random);
+      step_size : hmc_find_step(q, evaluated, metric, target, random);
     DualAverage dual(epsilon, target_acceptance);
     std::vector<Vector> warmup(
       static_cast<std::size_t>(std::max(n_warmup, 1)),
       Vector::Zero(dimension));
+    std::size_t metric_window = 0;
+    int metric_window_start = warmup_schedule.ends.empty() ? 0 :
+      warmup_schedule.initial_buffer;
     Rcpp::NumericMatrix draws(n_sample, output_columns);
-    Rcpp::NumericMatrix trace(total, 5);
+    Rcpp::NumericMatrix trace(total, 6);
     Rcpp::CharacterVector trace_names = Rcpp::CharacterVector::create(
-      "acceptance", "divergence", "tree_depth", "leapfrog", "step_size");
+      "acceptance", "divergence", "tree_depth", "leapfrog", "step_size",
+      "energy");
     trace.attr("dimnames") =
       Rcpp::List::create(R_NilValue, trace_names);
     int keep = 0;
@@ -877,11 +1349,15 @@ Rcpp::List native_hmc_sample(ObjectiveTape& tape,
 
     for (int iteration = 0; iteration < total; ++iteration) {
       HmcTransition transition = method == "NUTS" ?
-        nuts_transition(
-          q, evaluated, epsilon, mass, max_depth, target,
-          divergence_threshold, random) :
+        (nuts_variant == "multinomial" ?
+          nuts_multinomial_transition(
+            q, evaluated, epsilon, metric, max_depth, target,
+            divergence_threshold, random) :
+          nuts_transition(
+            q, evaluated, epsilon, metric, max_depth, target,
+            divergence_threshold, random)) :
         hmc_transition(
-          q, evaluated, epsilon, mass, n_leapfrog, target,
+          q, evaluated, epsilon, metric, n_leapfrog, target,
           divergence_threshold, random);
       q = std::move(transition.q);
       evaluated = std::move(transition.evaluated);
@@ -891,15 +1367,21 @@ Rcpp::List native_hmc_sample(ObjectiveTape& tape,
         transition.tree_depth < 0 ? NA_REAL : transition.tree_depth;
       trace(iteration, 3) = transition.leapfrog;
       trace(iteration, 4) = epsilon;
+      trace(iteration, 5) = transition.energy;
 
       if (iteration < n_warmup) {
         warmup[static_cast<std::size_t>(iteration)] = q;
         epsilon = dual.update(transition.acceptance);
-        if (adapt_mass && n_warmup >= 20 &&
-            iteration + 1 == n_warmup / 2) {
-          mass = adapted_mass(warmup, iteration + 1);
-          epsilon = hmc_find_step(q, evaluated, mass, target, random);
+        if (adapt_mass && metric_kind != "unit" &&
+            metric_window < warmup_schedule.ends.size() &&
+            iteration + 1 == warmup_schedule.ends[metric_window]) {
+          metric = adapted_metric(
+            warmup, metric_window_start, iteration + 1,
+            metric_kind, metric_blocks);
+          epsilon = hmc_find_step(q, evaluated, metric, target, random);
           dual = DualAverage(epsilon, target_acceptance);
+          metric_window_start = iteration + 1;
+          ++metric_window;
         }
         if (iteration + 1 == n_warmup) epsilon = dual.final();
       } else {
@@ -931,10 +1413,46 @@ Rcpp::List native_hmc_sample(ObjectiveTape& tape,
       Rcpp::checkUserInterrupt();
     }
     chains[chain_id] = draws;
+    double ebfmi = NA_REAL;
+    if (post_iterations >= 3) {
+      double mean_energy = 0.0;
+      for (int index = n_warmup; index < total; ++index) {
+        mean_energy += trace(index, 5);
+      }
+      mean_energy /= static_cast<double>(post_iterations);
+      double numerator = 0.0;
+      double denominator = 0.0;
+      for (int index = n_warmup; index < total; ++index) {
+        const double centered = trace(index, 5) - mean_energy;
+        denominator += centered * centered;
+        if (index > n_warmup) {
+          const double delta = trace(index, 5) - trace(index - 1, 5);
+          numerator += delta * delta;
+        }
+      }
+      if (std::isfinite(numerator) && denominator > 0.0) {
+        ebfmi = numerator / denominator;
+      }
+    }
+    Rcpp::RObject mass_output = metric.kind == "diagonal" ?
+      Rcpp::RObject(libertad::eigen_vector_to_r(metric.mass.diagonal())) :
+      Rcpp::RObject(libertad::eigen_matrix_to_r(metric.mass));
+    Rcpp::List schedule_output = Rcpp::List::create(
+      Rcpp::Named("n_warmup") = n_warmup,
+      Rcpp::Named("initial_buffer") = warmup_schedule.initial_buffer,
+      Rcpp::Named("terminal_buffer") = warmup_schedule.terminal_buffer,
+      Rcpp::Named("first_window") = warmup_schedule.first_window,
+      Rcpp::Named("windows") = Rcpp::wrap(warmup_schedule.ends));
     diagnostics[chain_id] = Rcpp::List::create(
       Rcpp::Named("trace") = trace,
       Rcpp::Named("step_size") = epsilon,
-      Rcpp::Named("mass") = libertad::eigen_vector_to_r(mass),
+      Rcpp::Named("mass") = mass_output,
+      Rcpp::Named("metric") = metric.kind,
+      Rcpp::Named("warmup_schedule") = schedule_output,
+      Rcpp::Named("initialization") = Rcpp::List::create(
+        Rcpp::Named("source") = initialization_source,
+        Rcpp::Named("attempts") = initialization_count),
+      Rcpp::Named("ebfmi") = ebfmi,
       Rcpp::Named("divergences") = post_divergences,
       Rcpp::Named("mean_acceptance") =
         post_iterations ? post_acceptance / post_iterations : NA_REAL,

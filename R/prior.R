@@ -68,6 +68,81 @@ nm_prior <- function(parameter,
 
 .nm_prior_nll <- function(model, parameters) -2 * .nm_log_prior(model, parameters)
 
+# Resolve prior targets and normalization constants once for iterative
+# stochastic estimators. This is algebraically identical to `.nm_log_prior()`
+# but avoids reparsing parameter names and dispatching density functions on
+# every MCMC proposal.
+.nm_prior_evaluator <- function(model) {
+  priors <- model$LIK_CONFIG$priors
+  if (is.null(priors) || !nrow(priors)) {
+    return(list(
+      log_density = function(parameters) 0,
+      nll = function(parameters) 0,
+      count = 0L
+    ))
+  }
+  names <- toupper(as.character(priors$parameter))
+  family <- sub("[0-9]+$", "", names)
+  index <- as.integer(sub("^[A-Z]+", "", names))
+  distribution <- as.character(priors$distribution)
+  mean <- as.numeric(priors$mean)
+  sd <- as.numeric(priors$sd)
+  shape <- as.numeric(priors$shape)
+  rate <- as.numeric(priors$rate)
+  normal_constant <- -log(sd) - 0.5 * log(2 * pi)
+  inverse_constant <- shape * log(rate) - lgamma(shape)
+  values <- function(parameters) {
+    result <- numeric(length(index))
+    theta <- family == "THETA"
+    sigma <- family == "SIGMA"
+    omega <- family == "OMEGA"
+    if (any(theta)) result[theta] <- parameters$theta[index[theta]]
+    if (any(sigma)) result[sigma] <- parameters$sigma[index[sigma]]
+    if (any(omega)) result[omega] <- parameters$omega[index[omega]]
+    result
+  }
+  log_density <- function(parameters) {
+    value <- values(parameters)
+    if (any(!is.finite(value))) return(-Inf)
+    density <- numeric(length(value))
+    normal <- distribution == "normal"
+    if (any(normal)) {
+      standardized <- (value[normal] - mean[normal]) / sd[normal]
+      density[normal] <- normal_constant[normal] - 0.5 * standardized^2
+    }
+    lognormal <- distribution == "lognormal"
+    if (any(lognormal)) {
+      if (any(value[lognormal] <= 0)) return(-Inf)
+      logged <- log(value[lognormal])
+      standardized <- (logged - mean[lognormal]) / sd[lognormal]
+      density[lognormal] <- normal_constant[lognormal] - logged -
+        0.5 * standardized^2
+    }
+    half_normal <- distribution == "half_normal"
+    if (any(half_normal)) {
+      if (any(value[half_normal] < 0)) return(-Inf)
+      standardized <- (value[half_normal] - mean[half_normal]) /
+        sd[half_normal]
+      density[half_normal] <- log(2) + normal_constant[half_normal] -
+        0.5 * standardized^2
+    }
+    inverse_gamma <- distribution == "inverse_gamma"
+    if (any(inverse_gamma)) {
+      if (any(value[inverse_gamma] <= 0)) return(-Inf)
+      selected <- value[inverse_gamma]
+      density[inverse_gamma] <- inverse_constant[inverse_gamma] -
+        (shape[inverse_gamma] + 1) * log(selected) -
+        rate[inverse_gamma] / selected
+    }
+    sum(density)
+  }
+  list(
+    log_density = log_density,
+    nll = function(parameters) -2 * log_density(parameters),
+    count = length(index)
+  )
+}
+
 .nm_prior_nll_native_gradient <- function(model, parameters) {
   gradient <- numeric(
     nrow(model$THETAS) + nrow(model$SIGMAS) + nrow(model$OMEGAS)

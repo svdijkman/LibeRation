@@ -1,12 +1,12 @@
 {
   "schema": "liber.ecosystem/1",
-  "release": "0.9.0-research-beta.16",
+  "release": "0.9.0-research-beta.18",
   "packages": {
-    "LibeRtAD": {"version": "0.8.1", "required": true},
-    "LibeRation": {"version": "0.10.5", "required": true},
-    "LibeRary": {"version": "0.8.0", "required": false},
-    "LibeRator": {"version": "0.4.0", "required": false},
-    "LibeRality": {"version": "0.3.0", "required": false},
+    "LibeRtAD": {"version": "0.8.2", "required": true},
+    "LibeRation": {"version": "0.10.7", "required": true},
+    "LibeRary": {"version": "0.8.2", "required": false},
+    "LibeRator": {"version": "0.4.1", "required": false},
+    "LibeRality": {"version": "0.3.1", "required": false},
     "LibeRties": {"version": "0.8.3", "required": false}
   },
   "contracts": {

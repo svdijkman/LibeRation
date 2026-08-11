@@ -130,6 +130,50 @@ MatrixT<Scalar> solve_linear(MatrixT<Scalar> matrix, MatrixT<Scalar> rhs,
 }
 
 template <class Scalar>
+MatrixT<Scalar> solve_linear_recorded_pivot(
+    MatrixT<Scalar> matrix, MatrixT<Scalar> rhs,
+    const std::string& context) {
+  const Eigen::Index n = matrix.rows();
+  if (matrix.cols() != n || rhs.rows() != n) {
+    throw std::invalid_argument(context +
+                                " linear solve has inconsistent dimensions.");
+  }
+  // Select each pivot numerically at tape-recording time without emitting a
+  // CompareOp.  Radau's I-h*A*J system is then differentiated through the
+  // selected row ordering. This avoids retaping merely because two acceptable
+  // pivots exchange magnitude as parameters move.
+  for (Eigen::Index column = 0; column < n; ++column) {
+    Eigen::Index pivot = column;
+    double largest = std::abs(scalar_value(matrix(column, column)));
+    for (Eigen::Index row = column + 1; row < n; ++row) {
+      const double candidate = std::abs(scalar_value(matrix(row, column)));
+      if (candidate > largest) {
+        largest = candidate;
+        pivot = row;
+      }
+    }
+    if (!std::isfinite(largest) || largest <= 1e-14) {
+      throw std::domain_error(
+        context + " linear system is singular at the recording point.");
+    }
+    if (pivot != column) {
+      matrix.row(column).swap(matrix.row(pivot));
+      rhs.row(column).swap(rhs.row(pivot));
+    }
+    const Scalar diagonal = matrix(column, column);
+    matrix.row(column) /= diagonal;
+    rhs.row(column) /= diagonal;
+    for (Eigen::Index row = 0; row < n; ++row) {
+      if (row == column) continue;
+      const Scalar factor = matrix(row, column);
+      matrix.row(row) -= factor * matrix.row(column);
+      rhs.row(row) -= factor * rhs.row(column);
+    }
+  }
+  return rhs;
+}
+
+template <class Scalar>
 MatrixT<Scalar> matrix_exp_pade(const MatrixT<Scalar>& input) {
   if (input.rows() != input.cols()) {
     throw std::invalid_argument("Matrix exponential requires a square matrix.");
@@ -312,7 +356,19 @@ inline bool use_specialized_advan(const ModelEngine& engine) {
 }
 
 inline std::string propagation_kernel_name(const ModelEngine& engine) {
-  if (engine.dde_enabled) return "dde-rk4-method-of-steps";
+  if (engine.dde_enabled) {
+    if (engine.advan == 16 || engine.advan == 17) {
+      return std::string(engine.dae_enabled ? "ddae-" : "dde-") +
+        "advan" + std::to_string(engine.advan) +
+        "-radau-iia5-collocation";
+    }
+    if (engine.dae_enabled) {
+      return "ddae-advan" + std::to_string(engine.advan) +
+        "-rk4-method-of-steps-newton";
+    }
+    return "dde-advan" + std::to_string(engine.advan) +
+      "-rk4-method-of-steps";
+  }
   if (engine.dae_enabled) {
     return "dae-advan" + std::to_string(engine.advan) +
       (implicit_ode_advan(engine.advan) ? "-implicit-newton" : "-rk45-newton");
@@ -663,7 +719,7 @@ struct DynamicDataT {
 };
 
 template <class Scalar>
-Scalar dynamic_row_value(const Rcpp::DataFrame& data, const std::string& name,
+Scalar dynamic_row_value(const EventDataView& data, const std::string& name,
                          int row, const DynamicDataT<Scalar>* dynamic_data) {
   if (dynamic_data != nullptr) {
     const Scalar* value = dynamic_data->find(name, row);
@@ -673,7 +729,7 @@ Scalar dynamic_row_value(const Rcpp::DataFrame& data, const std::string& name,
 }
 
 template <class Scalar>
-Scalar dynamic_row_optional(const Rcpp::DataFrame& data, const std::string& name,
+Scalar dynamic_row_optional(const EventDataView& data, const std::string& name,
                             int row, double fallback,
                             const DynamicDataT<Scalar>* dynamic_data) {
   if (dynamic_data != nullptr) {
@@ -685,20 +741,21 @@ Scalar dynamic_row_optional(const Rcpp::DataFrame& data, const std::string& name
 
 template <class Scalar>
 ParametersT<Scalar> evaluate_parameters_t(
-    const ModelEngine& engine, const Rcpp::DataFrame& data, int row, int subject,
+    const ModelEngine& engine, const EventDataView& data, int row, int subject,
     const std::vector<Scalar>& theta, const std::vector<Scalar>& eta,
     int eta_columns, const std::vector<Scalar>& sigma, int mixture_number,
     const DynamicDataT<Scalar>* dynamic_data = nullptr) {
   std::vector<Scalar> inputs(engine.pred->input_names.size(), Scalar(0.0));
   for (std::size_t i = 0; i < engine.pred->input_names.size(); ++i) {
-    const std::string& name = engine.pred->input_names[i];
-    int index = indexed_name(name, "THETA_");
+    const CompiledInputBinding& binding = engine.pred_inputs[i];
+    const std::string& name = binding.name;
+    int index = binding.theta;
     if (index >= 0) {
       if (index >= static_cast<int>(theta.size())) throw std::out_of_range("THETA index exceeds values.");
       inputs[i] = theta[static_cast<std::size_t>(index)];
       continue;
     }
-    index = indexed_name(name, "ETA_");
+    index = binding.eta;
     if (index >= 0) {
       const int column = eta_column(engine, data, row, index, eta_columns);
       const std::size_t position = static_cast<std::size_t>(subject * eta_columns + column);
@@ -706,13 +763,13 @@ ParametersT<Scalar> evaluate_parameters_t(
       inputs[i] = eta[position];
       continue;
     }
-    index = indexed_name(name, "SIGMA_");
+    index = binding.sigma;
     if (index >= 0) {
       if (index >= static_cast<int>(sigma.size())) throw std::out_of_range("SIGMA index exceeds values.");
       inputs[i] = sigma[static_cast<std::size_t>(index)];
       continue;
     }
-    if (starts_with(name, "ERR_") || name == "F") continue;
+    if (binding.zero_error) continue;
     if (name == "MIXNUM") {
       inputs[i] = Scalar(mixture_number);
       continue;
@@ -734,7 +791,7 @@ ParametersT<Scalar> evaluate_parameters_t(
 
 template <class Scalar>
 Scalar evaluate_post_prediction_t(
-    const ModelEngine& engine, const Rcpp::DataFrame& data,
+    const ModelEngine& engine, const EventDataView& data,
     int row, int subject, const Scalar& time, const VectorT<Scalar>& state,
     const std::vector<Scalar>& theta, const std::vector<Scalar>& eta,
     int eta_columns, const std::vector<Scalar>& sigma, int mixture_number,
@@ -744,25 +801,26 @@ Scalar evaluate_post_prediction_t(
   std::vector<Scalar> inputs(
     engine.post_pred->input_names.size(), Scalar(0.0));
   for (std::size_t i = 0; i < engine.post_pred->input_names.size(); ++i) {
-    const std::string& name = engine.post_pred->input_names[i];
-    int index = indexed_name(name, "THETA_");
+    const CompiledInputBinding& binding = engine.post_pred_inputs[i];
+    const std::string& name = binding.name;
+    int index = binding.theta;
     if (index >= 0) {
       inputs[i] = theta.at(static_cast<std::size_t>(index));
       continue;
     }
-    index = indexed_name(name, "ETA_");
+    index = binding.eta;
     if (index >= 0) {
       const int column = eta_column(engine, data, row, index, eta_columns);
       inputs[i] = eta.at(
         static_cast<std::size_t>(subject * eta_columns + column));
       continue;
     }
-    index = indexed_name(name, "SIGMA_");
+    index = binding.sigma;
     if (index >= 0) {
       inputs[i] = sigma.at(static_cast<std::size_t>(index));
       continue;
     }
-    index = indexed_name(name, "A_");
+    index = binding.state;
     if (index >= 0) {
       if (index >= state.size()) {
         throw std::out_of_range("$PRED A() index exceeds state dimension.");
@@ -800,7 +858,7 @@ Scalar evaluate_post_prediction_t(
 
 template <class Scalar>
 VectorT<Scalar> evaluate_algebraic_residuals_t(
-    const ModelEngine& engine, const Rcpp::DataFrame& data,
+    const ModelEngine& engine, const EventDataView& data,
     int row, int subject, const Scalar& time, const VectorT<Scalar>& state,
     const ParametersT<Scalar>& parameters,
     const std::vector<Scalar>& theta, const std::vector<Scalar>& eta,
@@ -810,28 +868,28 @@ VectorT<Scalar> evaluate_algebraic_residuals_t(
   if (!engine.alg) throw std::logic_error("DAE algebraic residual program is missing.");
   std::vector<Scalar> inputs(engine.alg->input_names.size(), Scalar(0.0));
   for (std::size_t i = 0; i < engine.alg->input_names.size(); ++i) {
-    const std::string& name = engine.alg->input_names[i];
-    int index = indexed_name(name, "A_");
+    const CompiledInputBinding& binding = engine.alg_inputs[i];
+    const std::string& name = binding.name;
+    int index = binding.state;
     if (index >= 0) { inputs[i] = state[index]; continue; }
     if (name == "T") { inputs[i] = time; continue; }
-    auto variable = std::find(engine.dae_variables.begin(), engine.dae_variables.end(), name);
-    if (variable != engine.dae_variables.end()) {
-      inputs[i] = algebraic[std::distance(engine.dae_variables.begin(), variable)];
+    if (binding.algebraic >= 0) {
+      inputs[i] = algebraic[static_cast<std::size_t>(binding.algebraic)];
       continue;
     }
     auto parameter = parameters.find(name);
     if (parameter != parameters.end()) { inputs[i] = parameter->second; continue; }
-    index = indexed_name(name, "THETA_");
+    index = binding.theta;
     if (index >= 0) { inputs[i] = theta.at(static_cast<std::size_t>(index)); continue; }
-    index = indexed_name(name, "ETA_");
+    index = binding.eta;
     if (index >= 0) {
       const int column = eta_column(engine, data, row, index, eta_columns);
       inputs[i] = eta.at(static_cast<std::size_t>(subject * eta_columns + column));
       continue;
     }
-    index = indexed_name(name, "SIGMA_");
+    index = binding.sigma;
     if (index >= 0) { inputs[i] = sigma.at(static_cast<std::size_t>(index)); continue; }
-    if (starts_with(name, "ERR_") || name == "F") continue;
+    if (binding.zero_error) continue;
     if (name == "MIXNUM") { inputs[i] = Scalar(mixture_number); continue; }
     inputs[i] = dynamic_row_value(data, name, row, dynamic_data);
   }
@@ -843,7 +901,7 @@ VectorT<Scalar> evaluate_algebraic_residuals_t(
 
 template <class Scalar>
 VectorT<Scalar> solve_algebraic_t(
-    const ModelEngine& engine, const Rcpp::DataFrame& data,
+    const ModelEngine& engine, const EventDataView& data,
     int row, int subject, const Scalar& time, const VectorT<Scalar>& state,
     const ParametersT<Scalar>& parameters,
     const std::vector<Scalar>& theta, const std::vector<Scalar>& eta,
@@ -855,13 +913,16 @@ VectorT<Scalar> solve_algebraic_t(
     const VectorT<Scalar> residual = evaluate_algebraic_residuals_t(
       engine, data, row, subject, time, state, parameters, theta, eta,
       eta_columns, sigma, mixture_number, value, dynamic_data);
-    Scalar maximum = Scalar(0.0);
+    double maximum = 0.0;
     for (Eigen::Index i = 0; i < residual.size(); ++i) {
-      maximum = libertad::choose_gt(
-        libertad::scalar_abs(residual[i]), maximum,
-        libertad::scalar_abs(residual[i]), maximum);
+      maximum = std::max(maximum, std::abs(scalar_value(residual[i])));
     }
-    if (path_le(maximum, Scalar(engine.dae_tolerance))) return value;
+    // Always record at least one Newton correction. A recording point can
+    // satisfy the algebraic equation at its initial value while a later tape
+    // replay still depends on the differential state or parameters. After the
+    // first correction, choose the required work only at recording time so
+    // convergence jitter does not create CompareOps and repeated retaping.
+    if (iteration > 0 && maximum <= engine.dae_tolerance) return value;
     MatrixT<Scalar> jacobian = MatrixT<Scalar>::Zero(value.size(), value.size());
     for (Eigen::Index column = 0; column < value.size(); ++column) {
       const double delta = engine.dae_jacobian_step *
@@ -897,7 +958,8 @@ VectorT<Scalar> solve_algebraic_t(
             jacobian(rows[local_row], columns[local_column]);
         }
       }
-      const MatrixT<Scalar> local_update = solve_linear(local, rhs, "DAE Newton block");
+      const MatrixT<Scalar> local_update = solve_linear_recorded_pivot(
+        local, rhs, "DAE Newton block");
       for (std::size_t local_column = 0; local_column < columns.size(); ++local_column) {
         update[columns[local_column]] = local_update(static_cast<Eigen::Index>(local_column), 0);
       }
@@ -919,6 +981,13 @@ VectorT<Scalar> solve_algebraic_t(
 
 template <class Scalar>
 struct DdeHistoryT {
+  struct DenseSegment {
+    Scalar from;
+    Scalar to;
+    VectorT<Scalar> before;
+    std::array<VectorT<Scalar>, 3> derivative;
+  };
+
   struct Jump {
     Scalar time;
     VectorT<Scalar> before;
@@ -929,11 +998,12 @@ struct DdeHistoryT {
   std::vector<VectorT<Scalar>> state;
   std::vector<double> baseline;
   std::vector<Jump> jumps;
+  std::vector<DenseSegment> dense;
 
   void reset(const Scalar& at, const VectorT<Scalar>& value,
              const std::vector<double>& history) {
     time.assign(1U, at); state.assign(1U, value); baseline = history;
-    jumps.clear();
+    jumps.clear(); dense.clear();
   }
   void append(const Scalar& at, const VectorT<Scalar>& value) {
     if (!time.empty() && std::abs(scalar_value(time.back() - at)) <= 1e-12) {
@@ -949,7 +1019,7 @@ struct DdeHistoryT {
         } else {
           VectorT<Scalar> before = state.back();
           if (time.size() == 1U && jumps.empty() &&
-              baseline.size() == static_cast<std::size_t>(before.size())) {
+              baseline.size() >= static_cast<std::size_t>(before.size())) {
             for (Eigen::Index index = 0; index < before.size(); ++index) {
               before[index] = Scalar(
                 baseline[static_cast<std::size_t>(index)]);
@@ -961,6 +1031,13 @@ struct DdeHistoryT {
       state.back() = value; return;
     }
     time.push_back(at); state.push_back(value);
+  }
+  void append_radau(const Scalar& from, const Scalar& to,
+                    const VectorT<Scalar>& before,
+                    const std::array<VectorT<Scalar>, 3>& derivative,
+                    const VectorT<Scalar>& after) {
+    dense.push_back({from, to, before, derivative});
+    append(to, after);
   }
   const Jump* jump_at(const Scalar& target) const {
     for (auto jump = jumps.rbegin(); jump != jumps.rend(); ++jump) {
@@ -981,6 +1058,36 @@ struct DdeHistoryT {
     }
     if (const Jump* jump = jump_at(target)) {
       return (left_limit ? jump->before : jump->after)[component];
+    }
+    // At a shared continuous mesh point prefer the segment ending there.  Its
+    // stiffly accurate endpoint derivative is the DDE left limit; explicit
+    // jumps have already been handled above.
+    for (auto segment = dense.begin(); segment != dense.end(); ++segment) {
+      if (target_value < scalar_value(segment->from) - 1e-12 ||
+          target_value > scalar_value(segment->to) + 1e-12) continue;
+      const Scalar width = segment->to - segment->from;
+      if (!(scalar_value(width) > 0.0)) continue;
+      Scalar theta = (target - segment->from) / width;
+      if (scalar_value(theta) < 0.0) theta = Scalar(0.0);
+      if (scalar_value(theta) > 1.0) theta = Scalar(1.0);
+      const double root = std::sqrt(6.0);
+      const std::array<double, 3> nodes = {
+        (4.0 - root) / 10.0, (4.0 + root) / 10.0, 1.0
+      };
+      Scalar value = segment->before[component];
+      for (std::size_t stage = 0; stage < 3U; ++stage) {
+        const std::size_t first = (stage + 1U) % 3U;
+        const std::size_t second = (stage + 2U) % 3U;
+        const double denominator =
+          (nodes[stage] - nodes[first]) * (nodes[stage] - nodes[second]);
+        const Scalar integral =
+          Scalar(1.0 / denominator) * theta * theta * theta / Scalar(3.0) -
+          Scalar((nodes[first] + nodes[second]) / denominator) *
+            theta * theta / Scalar(2.0) +
+          Scalar(nodes[first] * nodes[second] / denominator) * theta;
+        value += width * integral * segment->derivative[stage][component];
+      }
+      return value;
     }
     if (time.size() == 1U) return state.back()[component];
     if (target_value >= scalar_value(time.back()) - 1e-12) {
@@ -1004,7 +1111,7 @@ struct DdeHistoryT {
 
 template <class Scalar>
 VectorT<Scalar> evaluate_derivatives_t(
-    const ModelEngine& engine, const Rcpp::DataFrame& data,
+    const ModelEngine& engine, const EventDataView& data,
     int row, int subject, const Scalar& time, const VectorT<Scalar>& state,
     const ParametersT<Scalar>& parameters,
     const std::vector<Scalar>& theta, const std::vector<Scalar>& eta,
@@ -1017,8 +1124,9 @@ VectorT<Scalar> evaluate_derivatives_t(
     eta_columns, sigma, mixture_number, dynamic_data) : VectorT<Scalar>();
   std::vector<Scalar> inputs(engine.des->input_names.size(), Scalar(0.0));
   for (std::size_t i = 0; i < engine.des->input_names.size(); ++i) {
-    const std::string& name = engine.des->input_names[i];
-    int index = indexed_name(name, "A_");
+    const CompiledInputBinding& binding = engine.des_inputs[i];
+    const std::string& name = binding.name;
+    int index = binding.state;
     if (index >= 0) {
       if (index >= state.size()) throw std::out_of_range("A() index exceeds ODE state dimension.");
       inputs[i] = state[index];
@@ -1028,15 +1136,13 @@ VectorT<Scalar> evaluate_derivatives_t(
       inputs[i] = time;
       continue;
     }
-    auto lag = std::find(engine.dde_lag_inputs.begin(), engine.dde_lag_inputs.end(), name);
-    if (lag != engine.dde_lag_inputs.end()) {
+    if (binding.lag >= 0) {
       if (lag_values == nullptr) throw std::logic_error("DDE lag history is unavailable.");
-      inputs[i] = (*lag_values)[std::distance(engine.dde_lag_inputs.begin(), lag)];
+      inputs[i] = (*lag_values)[static_cast<std::size_t>(binding.lag)];
       continue;
     }
-    auto variable = std::find(engine.dae_variables.begin(), engine.dae_variables.end(), name);
-    if (variable != engine.dae_variables.end()) {
-      inputs[i] = algebraic[std::distance(engine.dae_variables.begin(), variable)];
+    if (binding.algebraic >= 0) {
+      inputs[i] = algebraic[static_cast<std::size_t>(binding.algebraic)];
       continue;
     }
     auto parameter = parameters.find(name);
@@ -1044,23 +1150,23 @@ VectorT<Scalar> evaluate_derivatives_t(
       inputs[i] = parameter->second;
       continue;
     }
-    index = indexed_name(name, "THETA_");
+    index = binding.theta;
     if (index >= 0) {
       inputs[i] = theta.at(static_cast<std::size_t>(index));
       continue;
     }
-    index = indexed_name(name, "ETA_");
+    index = binding.eta;
     if (index >= 0) {
       const int column = eta_column(engine, data, row, index, eta_columns);
       inputs[i] = eta.at(static_cast<std::size_t>(subject * eta_columns + column));
       continue;
     }
-    index = indexed_name(name, "SIGMA_");
+    index = binding.sigma;
     if (index >= 0) {
       inputs[i] = sigma.at(static_cast<std::size_t>(index));
       continue;
     }
-    if (starts_with(name, "ERR_") || name == "F") continue;
+    if (binding.zero_error) continue;
     if (name == "MIXNUM") {
       inputs[i] = Scalar(mixture_number);
       continue;
@@ -1256,7 +1362,7 @@ VectorT<Scalar> integrate_implicit_interval_t(
 }
 
 template <class Scalar>
-Scalar bioavailability_t(const ParametersT<Scalar>& p, const Rcpp::DataFrame& data,
+Scalar bioavailability_t(const ParametersT<Scalar>& p, const EventDataView& data,
                          int row, int cmt,
                          const DynamicDataT<Scalar>* dynamic_data = nullptr) {
   const std::string name = "F" + std::to_string(cmt);
@@ -1269,7 +1375,7 @@ Scalar bioavailability_t(const ParametersT<Scalar>& p, const Rcpp::DataFrame& da
 
 template <class Scalar>
 Scalar event_infusion_rate_t(const ParametersT<Scalar>& p,
-                             const Rcpp::DataFrame& data, int row, int cmt,
+                             const EventDataView& data, int row, int cmt,
                              double amount, double rate_code,
                              const DynamicDataT<Scalar>* dynamic_data = nullptr) {
   if (rate_code >= 0.0) return Scalar(rate_code);
@@ -1291,7 +1397,7 @@ Scalar event_infusion_rate_t(const ParametersT<Scalar>& p,
 
 template <class Scalar>
 Scalar observation_scale_t(const ParametersT<Scalar>& p,
-                           const Rcpp::DataFrame& data, int row, int cmt,
+                           const EventDataView& data, int row, int cmt,
                            const TopologyT<Scalar>& topology,
                            const DynamicDataT<Scalar>* dynamic_data = nullptr) {
   const std::string name = "S" + std::to_string(cmt);
@@ -1323,6 +1429,183 @@ void remove_finished_t(std::vector<ActiveInfusionT<Scalar>>& active,
 }
 
 template <class Scalar>
+struct RadauDdeStepT {
+  VectorT<Scalar> after;
+  std::array<VectorT<Scalar>, 3> derivative;
+  Scalar error = Scalar(std::numeric_limits<double>::infinity());
+  bool converged = false;
+};
+
+template <class Scalar, class Rhs>
+RadauDdeStepT<Scalar> radau_iia5_dde_step_t(
+    const Rhs& rhs, const VectorT<Scalar>& before,
+    const Scalar& time, const Scalar& h, const OdeControl& control,
+    bool ends_at_delayed_jump, bool optimized = false) {
+  // This is the AD form of LibeR's clean-room Radau IIA implementation.  The
+  // coupled stages, finite-difference Jacobian arithmetic and linear solve all
+  // remain on the CppAD tape.
+  const double root = std::sqrt(6.0);
+  const std::array<double, 3> c = {
+    (4.0 - root) / 10.0, (4.0 + root) / 10.0, 1.0
+  };
+  const double a[3][3] = {
+    {(88.0 - 7.0 * root) / 360.0,
+     (296.0 - 169.0 * root) / 1800.0,
+     (-2.0 + 3.0 * root) / 225.0},
+    {(296.0 + 169.0 * root) / 1800.0,
+     (88.0 + 7.0 * root) / 360.0,
+     (-2.0 - 3.0 * root) / 225.0},
+    {(16.0 - root) / 36.0,
+     (16.0 + root) / 36.0,
+     1.0 / 9.0}
+  };
+  const Eigen::Index n = before.size();
+  const VectorT<Scalar> f0 = rhs(time, before, false);
+  std::array<VectorT<Scalar>, 3> stage = {
+    before + Scalar(c[0]) * h * f0,
+    before + Scalar(c[1]) * h * f0,
+    before + h * f0
+  };
+  std::array<VectorT<Scalar>, 3> derivative = {f0, f0, f0};
+  std::array<MatrixT<Scalar>, 3> jacobian;
+  bool jacobian_ready = false;
+  MatrixT<Scalar> optimized_inverse;
+  if (optimized) {
+    MatrixT<Scalar> step_jacobian(n, n);
+    for (Eigen::Index column = 0; column < n; ++column) {
+      VectorT<Scalar> perturbed = before;
+      const double delta = std::sqrt(std::numeric_limits<double>::epsilon()) *
+        std::max(1.0, std::abs(scalar_value(before[column])));
+      perturbed[column] += Scalar(delta);
+      step_jacobian.col(column) =
+        (rhs(time, perturbed, false) - f0) / Scalar(delta);
+    }
+    MatrixT<Scalar> system = MatrixT<Scalar>::Zero(3 * n, 3 * n);
+    for (std::size_t i = 0; i < 3U; ++i) {
+      for (std::size_t j = 0; j < 3U; ++j) {
+        system.block(static_cast<Eigen::Index>(i) * n,
+                     static_cast<Eigen::Index>(j) * n, n, n) =
+          -h * Scalar(a[i][j]) * step_jacobian;
+        if (i == j) {
+          for (Eigen::Index diagonal = 0; diagonal < n; ++diagonal) {
+            system(static_cast<Eigen::Index>(i) * n + diagonal,
+                   static_cast<Eigen::Index>(j) * n + diagonal) += Scalar(1.0);
+          }
+        }
+      }
+    }
+    MatrixT<Scalar> identity = MatrixT<Scalar>::Identity(3 * n, 3 * n);
+    optimized_inverse = solve_linear_recorded_pivot(
+      system, identity,
+      "ADVAN Radau IIA simplified Newton preconditioner");
+  }
+  RadauDdeStepT<Scalar> result;
+  // Choose Newton work at recording time so the replayed tape is independent
+  // of incidental convergence-iteration boundaries. The final scalar check
+  // certifies the recorded solution without adding a residual CompareOp.
+  for (int iteration = 0; iteration < 8; ++iteration) {
+    VectorT<Scalar> residual(3 * n);
+    Scalar residual_error = Scalar(0.0);
+    for (std::size_t j = 0; j < 3U; ++j) {
+      const bool left = ends_at_delayed_jump && j == 2U;
+      const Scalar stage_time = time + Scalar(c[j]) * h;
+      derivative[j] = rhs(stage_time, stage[j], left);
+      if (!optimized && !jacobian_ready) {
+        jacobian[j].resize(n, n);
+        for (Eigen::Index column = 0; column < n; ++column) {
+          VectorT<Scalar> perturbed = stage[j];
+          const double delta = std::sqrt(std::numeric_limits<double>::epsilon()) *
+            std::max(1.0, std::abs(scalar_value(stage[j][column])));
+          perturbed[column] += Scalar(delta);
+          jacobian[j].col(column) =
+            (rhs(stage_time, perturbed, left) - derivative[j]) / Scalar(delta);
+        }
+      }
+    }
+    jacobian_ready = true;
+    for (std::size_t i = 0; i < 3U; ++i) {
+      VectorT<Scalar> local = stage[i] - before;
+      for (std::size_t j = 0; j < 3U; ++j) {
+        local -= h * Scalar(a[i][j]) * derivative[j];
+      }
+      residual.segment(static_cast<Eigen::Index>(i) * n, n) = local;
+      const Scalar local_error = scaled_error_t(
+        local, before, stage[i], control);
+      residual_error = libertad::choose_gt(
+        local_error, residual_error, local_error, residual_error);
+    }
+    // Select the simplified-Newton work at recording time. A structurally
+    // linear DDE normally needs one correction; nonlinear systems retain up
+    // to eight corrections on their fixed tape.
+    if (iteration > 0 && scalar_value(residual_error) < 0.03) {
+      result.converged = true;
+      break;
+    }
+    VectorT<Scalar> update;
+    if (optimized) {
+      update = optimized_inverse * (-residual);
+    } else {
+      MatrixT<Scalar> system = MatrixT<Scalar>::Zero(3 * n, 3 * n);
+      for (std::size_t i = 0; i < 3U; ++i) {
+        for (std::size_t j = 0; j < 3U; ++j) {
+          system.block(static_cast<Eigen::Index>(i) * n,
+                       static_cast<Eigen::Index>(j) * n, n, n) =
+            -h * Scalar(a[i][j]) * jacobian[j];
+          if (i == j) {
+            for (Eigen::Index diagonal = 0; diagonal < n; ++diagonal) {
+              system(static_cast<Eigen::Index>(i) * n + diagonal,
+                     static_cast<Eigen::Index>(j) * n + diagonal) += Scalar(1.0);
+            }
+          }
+        }
+      }
+      MatrixT<Scalar> rhs_matrix(3 * n, 1);
+      rhs_matrix.col(0) = -residual;
+      update = solve_linear_recorded_pivot(
+        system, rhs_matrix, "ADVAN Radau IIA Newton").col(0);
+    }
+    for (std::size_t i = 0; i < 3U; ++i) {
+      const VectorT<Scalar> local =
+        update.segment(static_cast<Eigen::Index>(i) * n, n);
+      stage[i] += local;
+    }
+  }
+  Scalar final_error = Scalar(0.0);
+  for (std::size_t j = 0; j < 3U; ++j) {
+    derivative[j] = rhs(
+      time + Scalar(c[j]) * h, stage[j],
+      ends_at_delayed_jump && j == 2U);
+  }
+  for (std::size_t i = 0; i < 3U; ++i) {
+    VectorT<Scalar> residual = stage[i] - before;
+    for (std::size_t j = 0; j < 3U; ++j) {
+      residual -= h * Scalar(a[i][j]) * derivative[j];
+    }
+    const Scalar local_error = scaled_error_t(
+      residual, before, stage[i], control);
+    final_error = libertad::choose_gt(
+      local_error, final_error, local_error, final_error);
+  }
+  const double final_error_value = scalar_value(final_error);
+  if (!std::isfinite(final_error_value) || final_error_value >= 0.03) {
+    return result;
+  }
+  // Convergence is certified when the tape is recorded. Replaying the fixed
+  // Newton map remains differentiable and avoids a residual CompareOp that
+  // would otherwise retape on floating-point jitter near machine precision.
+  // Non-finite stage output is still rejected by the enclosing tape evaluator.
+  result.converged = true;
+  if (!result.converged) return result;
+  result.after = stage[2];
+  result.derivative = derivative;
+  // The double simulation path performs embedded adaptive control.  AD tapes
+  // replay the accepted maximum-step mesh to avoid an estimator-driven tape
+  // explosion; the fifth-order stages and dense output remain identical.
+  result.error = Scalar(0.0);
+  return result;
+}
+
+template <class Scalar>
 VectorT<Scalar> propagate_to_t(const ModelEngine& engine,
                               const MatrixT<Scalar>& k, VectorT<Scalar> state,
                               const Scalar& from, const Scalar& to,
@@ -1348,7 +1631,7 @@ VectorT<Scalar> propagate_to_t(const ModelEngine& engine,
 
 template <class Scalar>
 VectorT<Scalar> propagate_ode_to_t(
-    const ModelEngine& engine, const Rcpp::DataFrame& data,
+    const ModelEngine& engine, const EventDataView& data,
     int row, int subject, const std::vector<Scalar>& theta,
     const std::vector<Scalar>& eta, int eta_columns,
     const std::vector<Scalar>& sigma, const ParametersT<Scalar>& parameters,
@@ -1373,14 +1656,19 @@ VectorT<Scalar> propagate_ode_to_t(
         throw std::logic_error("DDE propagation requires an initialized history.");
       }
       Scalar time = cursor;
+      // Keep the AD replay mesh away from exact maximum-step ratios, where an
+      // infinitesimal delay change would otherwise move a propagated jump to
+      // the neighbouring step and force immediate retaping.
+      double suggested_step = (engine.advan == 16 || engine.advan == 17) ?
+        0.9 * engine.dde_step : engine.dde_step;
       int steps = 0;
       while (path_lt(time, segment_end - Scalar(1e-12))) {
         if (++steps > engine.dde_max_steps) {
           throw std::runtime_error("DDE method-of-steps exceeded max_steps.");
         }
         const double remaining = scalar_value(segment_end - time);
-        Scalar step_end = remaining <= engine.dde_step + 1e-12 ?
-          segment_end : time + Scalar(engine.dde_step);
+        Scalar step_end = remaining <= suggested_step + 1e-12 ?
+          segment_end : time + Scalar(suggested_step);
         bool ends_at_delayed_jump = false;
         for (const auto& jump : dde_history->jumps) {
           for (const std::string& delay_name : engine.dde_lag_delays) {
@@ -1401,9 +1689,24 @@ VectorT<Scalar> propagate_ode_to_t(
           }
         }
         const Scalar h = step_end - time;
+        std::vector<double> lag_cache_time;
+        std::vector<bool> lag_cache_left;
+        std::vector<VectorT<Scalar>> lag_cache_value;
         auto rhs = [&](const Scalar& stage_time,
                        const VectorT<Scalar>& value,
                        bool left_limit = false) {
+          const double stage_time_value = scalar_value(stage_time);
+          for (std::size_t cached = 0; cached < lag_cache_time.size(); ++cached) {
+            if (lag_cache_left[cached] == left_limit &&
+                std::abs(lag_cache_time[cached] - stage_time_value) <= 1e-14) {
+              VectorT<Scalar> derivative = evaluate_derivatives_t(
+                engine, data, row, subject, stage_time, value, parameters,
+                theta, eta, eta_columns, sigma, mixture_number, dynamic_data,
+                &lag_cache_value[cached]);
+              derivative += input;
+              return derivative;
+            }
+          }
           VectorT<Scalar> lag_values(static_cast<Eigen::Index>(engine.dde_lag_inputs.size()));
           for (std::size_t lag = 0; lag < engine.dde_lag_inputs.size(); ++lag) {
             auto delay = parameters.find(engine.dde_lag_delays[lag]);
@@ -1414,16 +1717,62 @@ VectorT<Scalar> propagate_ode_to_t(
               throw std::domain_error("DDE delay '" + engine.dde_lag_delays[lag] +
                                       "' must be finite and at least the integration step.");
             }
-            lag_values[static_cast<Eigen::Index>(lag)] = dde_history->at(
-              stage_time - delay->second, engine.dde_lag_states[lag],
-              left_limit);
+            const Scalar target = stage_time - delay->second;
+            const int lag_state = engine.dde_lag_states[lag];
+            if (lag_state < engine.n_state ||
+                scalar_value(target) < scalar_value(dde_history->time.front()) - 1e-12) {
+              lag_values[static_cast<Eigen::Index>(lag)] = dde_history->at(
+                target, lag_state, left_limit);
+            } else {
+              VectorT<Scalar> delayed_state(engine.n_state);
+              for (int component = 0; component < engine.n_state; ++component) {
+                delayed_state[component] = dde_history->at(
+                  target, component, left_limit);
+              }
+              const VectorT<Scalar> delayed_algebraic = solve_algebraic_t(
+                engine, data, row, subject, target, delayed_state, parameters,
+                theta, eta, eta_columns, sigma, mixture_number, dynamic_data);
+              const int algebraic = lag_state - engine.n_state;
+              if (algebraic < 0 || algebraic >= delayed_algebraic.size()) {
+                throw std::out_of_range(
+                  "DDE lag algebraic state is outside the DAE variable vector.");
+              }
+              lag_values[static_cast<Eigen::Index>(lag)] =
+                delayed_algebraic[algebraic];
+            }
           }
+          lag_cache_time.push_back(stage_time_value);
+          lag_cache_left.push_back(left_limit);
+          lag_cache_value.push_back(lag_values);
           VectorT<Scalar> derivative = evaluate_derivatives_t(
             engine, data, row, subject, stage_time, value, parameters,
             theta, eta, eta_columns, sigma, mixture_number, dynamic_data, &lag_values);
           derivative += input;
           return derivative;
         };
+        if (engine.advan == 16 || engine.advan == 17) {
+          const RadauDdeStepT<Scalar> trial = radau_iia5_dde_step_t(
+            rhs, state, time, h, engine.ode_control, ends_at_delayed_jump,
+            engine.liber_optimized);
+          if (!trial.converged) {
+            throw std::runtime_error(
+              "ADVAN" + std::to_string(engine.advan) +
+              " Radau IIA stages did not converge; reduce DDE_CONFIG$step.");
+          }
+          const VectorT<Scalar> before = state;
+          state = trial.after;
+          if (ends_at_delayed_jump &&
+              std::abs(scalar_value(step_end - segment_end)) <= 1e-12) {
+            const VectorT<Scalar> right_derivative = rhs(
+              step_end, state, false);
+            state -= (step_end - Scalar(scalar_value(step_end))) *
+              right_derivative;
+          }
+          dde_history->append_radau(
+            time, step_end, before, trial.derivative, state);
+          time = step_end;
+          continue;
+        }
         const VectorT<Scalar> k1 = rhs(time, state);
         const VectorT<Scalar> k2 = rhs(
           time + Scalar(0.5) * h, state + Scalar(0.5) * h * k1);
@@ -1500,7 +1849,7 @@ std::vector<ActiveInfusionT<Scalar>> periodic_infusions_t(
 
 template <class Scalar>
 VectorT<Scalar> steady_ode_bolus_post_t(
-    const ModelEngine& engine, const Rcpp::DataFrame& data,
+    const ModelEngine& engine, const EventDataView& data,
     int row, int subject, const std::vector<Scalar>& theta,
     const std::vector<Scalar>& eta, int eta_columns,
     const std::vector<Scalar>& sigma, const ParametersT<Scalar>& parameters,
@@ -1526,7 +1875,7 @@ VectorT<Scalar> steady_ode_bolus_post_t(
 
 template <class Scalar>
 VectorT<Scalar> steady_ode_infusion_pre_t(
-    const ModelEngine& engine, const Rcpp::DataFrame& data,
+    const ModelEngine& engine, const EventDataView& data,
     int row, int subject, const std::vector<Scalar>& theta,
     const std::vector<Scalar>& eta, int eta_columns,
     const std::vector<Scalar>& sigma, const ParametersT<Scalar>& parameters,
@@ -1589,22 +1938,22 @@ VectorT<Scalar> steady_infusion_pre_t(const ModelEngine& engine,
 
 template <class Scalar>
 std::vector<Scalar> simulate_analytical_t(
-    const ModelEngine& engine, const Rcpp::DataFrame& data,
+    const ModelEngine& engine, const EventDataView& data,
     const std::vector<Scalar>& theta, const std::vector<Scalar>& eta,
     const std::vector<Scalar>& sigma,
     const std::vector<int>& mixture_assignment = std::vector<int>(),
     const DynamicDataT<Scalar>* dynamic_data = nullptr) {
   const int n_rows = data.nrows();
-  Rcpp::NumericVector time = data["TIME"];
-  Rcpp::NumericVector amount = data["AMT"];
-  Rcpp::NumericVector rate = data["RATE"];
-  Rcpp::NumericVector interval = data["II"];
-  Rcpp::IntegerVector evid = data["EVID"];
-  Rcpp::IntegerVector cmt = data["CMT"];
-  Rcpp::IntegerVector ss = data["SS"];
-  Rcpp::IntegerVector eta_subject_index = data[".ID_INDEX"];
-  Rcpp::IntegerVector subject_index = data.containsElementNamed(".STRUCT_ID_INDEX") ?
-    Rcpp::IntegerVector(data[".STRUCT_ID_INDEX"]) : eta_subject_index;
+  auto time = data.values("TIME");
+  auto amount = data.values("AMT");
+  auto rate = data.values("RATE");
+  auto interval = data.values("II");
+  auto evid = data.values("EVID");
+  auto cmt = data.values("CMT");
+  auto ss = data.values("SS");
+  auto eta_subject_index = data.values(".ID_INDEX");
+  auto subject_index = data.containsElementNamed(".STRUCT_ID_INDEX") ?
+    data.values(".STRUCT_ID_INDEX") : eta_subject_index;
   int n_subjects = 0;
   for (int value : eta_subject_index) n_subjects = std::max(n_subjects, value);
   if (n_subjects < 1 || eta.size() % static_cast<std::size_t>(n_subjects) != 0U) {

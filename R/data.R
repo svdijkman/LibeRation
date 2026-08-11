@@ -4,31 +4,16 @@
 )
 
 .nm_expand_addl <- function(data) {
-  generated <- vector("list", 0L)
-  for (i in seq_len(nrow(data))) {
-    n <- as.integer(data$ADDL[[i]])
-    if (is.na(n) || n < 0L) .nm_stop("ADDL must be a non-negative integer at row ", i, ".")
-    if (n == 0L) next
-    if (!is.finite(data$II[[i]]) || data$II[[i]] <= 0) {
-      .nm_stop("ADDL > 0 requires II > 0 at row ", i, ".")
-    }
-    if (!(data$EVID[[i]] %in% c(1L, 4L)) || data$AMT[[i]] <= 0) {
-      .nm_stop("ADDL is only valid on positive dosing records (row ", i, ").")
-    }
-    for (k in seq_len(n)) {
-      row <- data[i, , drop = FALSE]
-      row$TIME <- row$TIME + k * row$II
-      row$ADDL <- 0L
-      row$.generated <- TRUE
-      row$.source_row <- data$.source_row[[i]]
-      row$.sort_priority <- -1L
-      generated[[length(generated) + 1L]] <- row
-    }
-  }
+  layout <- .liberation_expand_addl_layout(
+    data$TIME, data$EVID, data$AMT, data$II, data$ADDL,
+    data$.source_row
+  )
+  data <- data[layout$source, , drop = FALSE]
+  data$TIME <- layout$time
   data$ADDL <- 0L
-  if (length(generated)) {
-    data <- rbind(data, do.call(rbind, generated))
-  }
+  data$.generated <- layout$generated
+  data$.source_row <- layout$source_row
+  data$.sort_priority <- layout$sort_priority
   data
 }
 
@@ -98,8 +83,9 @@ nm_dataset <- function(data, expand_addl = TRUE) {
   if (isTRUE(expand_addl)) data <- .nm_expand_addl(data)
   id_levels <- unique(as.character(data$ID))
   data$.ID_INDEX <- match(as.character(data$ID), id_levels)
-  order_index <- order(data$.ID_INDEX, data$TIME, data$.sort_priority,
-                       data$.source_row, method = "radix")
+  order_index <- .liberation_event_order(
+    data$.ID_INDEX, data$TIME, data$.sort_priority, data$.source_row
+  )
   data <- data[order_index, , drop = FALSE]
   rownames(data) <- NULL
   for (id in unique(data$.ID_INDEX)) {

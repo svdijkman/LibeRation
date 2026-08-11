@@ -15,6 +15,118 @@
   nm_dataset(out)
 }
 
+.nm_subject_store <- function(data) {
+  index <- as.integer(data$.ID_INDEX)
+  subject_ids <- unique(index)
+  if (!length(subject_ids) || anyNA(subject_ids)) {
+    .nm_stop("A shared subject-data store requires valid subject indices.")
+  }
+  starts <- c(1L, which(diff(index) != 0L) + 1L)
+  lengths <- diff(c(starts, length(index) + 1L))
+  if (!identical(index[starts], subject_ids) ||
+      anyDuplicated(index[starts]) || length(starts) != length(subject_ids)) {
+    .nm_stop("Subject rows must be contiguous in the normalized dataset.")
+  }
+  store <- new.env(parent = emptyenv())
+  store$data <- data
+  store$subject_ids <- subject_ids
+  store$starts <- unname(starts)
+  store$lengths <- unname(lengths)
+  store$pointer <- .liberation_subject_store_create(
+    data, as.integer(store$starts), as.integer(store$lengths)
+  )
+  store$metadata <- new.env(parent = emptyenv())
+  store$metadata$columns <- names(data)
+  store$materializations <- 0L
+  store$projections <- 0L
+  class(store) <- c("nm_subject_store", "environment")
+  store
+}
+
+.nm_subject_store_view <- function(store, subject) {
+  if (!inherits(store, "nm_subject_store")) {
+    .nm_stop("Invalid shared subject-data store.")
+  }
+  subject <- as.integer(subject)
+  if (length(subject) != 1L || is.na(subject) || subject < 1L ||
+      subject > length(store$subject_ids)) {
+    .nm_stop("Subject view is outside the shared data store.")
+  }
+  structure(
+    list(
+      pointer = store$pointer, subject = subject,
+      rows = as.integer(store$lengths[[subject]]), metadata = store$metadata
+    ),
+    class = "nm_subject_view"
+  )
+}
+
+.nm_subject_store_data <- function(store, subject) {
+  if (!inherits(store, "nm_subject_store")) {
+    .nm_stop("Invalid shared subject-data store.")
+  }
+  subject <- as.integer(subject)
+  if (length(subject) != 1L || is.na(subject) || subject < 1L ||
+      subject > length(store$subject_ids)) {
+    .nm_stop("Subject view is outside the shared data store.")
+  }
+  store$materializations <- store$materializations + 1L
+  rows <- seq.int(store$starts[[subject]], length.out = store$lengths[[subject]])
+  out <- as.data.frame(store$data[rows, , drop = FALSE])
+  internal <- intersect(
+    c(".ID_INDEX", ".source_row", ".generated", ".sort_priority"), names(out)
+  )
+  out[internal] <- NULL
+  nm_dataset(out)
+}
+
+.nm_subject_view_project <- function(view, columns, observed_only = FALSE,
+                                     first_only = FALSE) {
+  store <- attr(view, "store", exact = TRUE)
+  if (inherits(store, "nm_subject_store")) {
+    store$projections <- store$projections + 1L
+  }
+  .liberation_subject_view_project(
+    view, unique(as.character(columns)), isTRUE(observed_only),
+    isTRUE(first_only)
+  )
+}
+
+.nm_subject_store_chunk <- function(store, subjects) {
+  subjects <- as.integer(subjects)
+  if (!length(subjects)) return(NULL)
+  first <- store$starts[[subjects[[1L]]]]
+  last_subject <- tail(subjects, 1L)
+  last <- store$starts[[last_subject]] + store$lengths[[last_subject]] - 1L
+  raw <- as.data.frame(store$data[seq.int(first, last), , drop = FALSE])
+  raw$.ID_INDEX <- match(raw$.ID_INDEX, unique(raw$.ID_INDEX))
+  rownames(raw) <- NULL
+  attr(raw, "addl_materialized") <- TRUE
+  class(raw) <- unique(c("nm_dataset", class(raw)))
+  raw
+}
+
+.nm_context_observation_counts <- function(context) {
+  source <- if (!is.null(context$subject_store)) {
+    context$subject_store$pointer
+  } else {
+    lapply(context$subjects, function(evaluator) evaluator$data_input())
+  }
+  as.integer(.liberation_subject_observation_counts(source))
+}
+
+.nm_subject_dynamic_input <- function(evaluator, interaction = TRUE) {
+  value <- if (isTRUE(interaction)) evaluator$objective_dynamic else
+    evaluator$noninteraction_dynamic
+  if (!is.null(value)) return(value)
+  value <- evaluator$data_input
+  if (is.function(value)) value <- value()
+  if (is.null(value)) {
+    .nm_stop("Subject evaluator does not expose dynamic input data.")
+  }
+  value
+}
+
 .nm_residual_variance <- function(model, prediction, sigma, dvid = 1L) {
   type <- model$LIK_CONFIG$error
   if (length(dvid) == 1L && length(prediction) > 1L) {
@@ -71,20 +183,14 @@
     ".ID_INDEX", ".OCC_INDEX", "F", "T"
   )
   parameter <- grepl("^(THETA|ETA|SIGMA|ERR|A)_", inputs)
-  intersect(inputs[!parameter & !inputs %in% structural], names(data))
+  data_names <- if (inherits(data, "nm_subject_view")) {
+    data$metadata$columns
+  } else names(data)
+  intersect(inputs[!parameter & !inputs %in% structural], data_names)
 }
 
 .nm_structure_key <- function(value) {
-  raw <- serialize(value, NULL, version = 2L)
-  bytes <- as.integer(raw)
-  weight <- (seq_along(bytes) %% 65521L) + 1L
-  paste(
-    length(bytes),
-    format(sum(bytes) %% 2147483647, scientific = FALSE, trim = TRUE),
-    format(sum((bytes * weight) %% 2147483629) %% 2147483647,
-           scientific = FALSE, trim = TRUE),
-    sep = "-"
-  )
+  digest::digest(value, algo = "sha256", serialize = TRUE)
 }
 
 .nm_prediction_structure <- function(model, data) {
@@ -95,13 +201,29 @@
   )
   source <- paste(model$PRED %||% "", model$DES %||% "")
   if (!grepl("\\bID\\b", source, perl = TRUE)) ignored <- c(ignored, "ID")
+  if (inherits(data, "nm_subject_view")) {
+    key <- .liberation_subject_view_signature(
+      data, unique(ignored), include_fo_layout = FALSE
+    )
+    return(list(
+      key = key,
+      value = list(
+        signature = key, dynamic_columns = dynamic,
+        rows = as.integer(data$rows), storage = "native-row-view"
+      )
+    ))
+  }
   columns <- setdiff(names(data), ignored)
-  value <- list(
+  structural <- list(
     dynamic_columns = dynamic,
     structural_data = as.data.frame(data[columns], stringsAsFactors = FALSE),
     rows = nrow(data)
   )
-  list(key = .nm_structure_key(value), value = value)
+  key <- .nm_structure_key(structural)
+  list(
+    key = key,
+    value = list(signature = key, dynamic_columns = dynamic, rows = nrow(data))
+  )
 }
 
 .nm_prediction_pool_tape <- function(pool, engine, data, theta, sigma, n_eta) {
@@ -123,21 +245,45 @@
 
 .nm_fo_structure <- function(model, data) {
   prediction <- .nm_prediction_structure(model, data)
+  if (inherits(data, "nm_subject_view")) {
+    dynamic <- .nm_prediction_dynamic_columns(model, data)
+    ignored <- c(
+      "DV", "MDV", "LLOQ", "BLQ", "CENS", ".source_row", ".generated",
+      ".sort_priority", ".ID_INDEX", dynamic
+    )
+    source <- paste(model$PRED %||% "", model$DES %||% "")
+    if (!grepl("\\bID\\b", source, perl = TRUE)) ignored <- c(ignored, "ID")
+    key <- .liberation_subject_view_signature(
+      data, unique(ignored), include_fo_layout = TRUE
+    )
+    return(list(
+      key = key,
+      value = list(
+        signature = key, prediction_signature = prediction$key,
+        rows = as.integer(data$rows), storage = "native-row-view"
+      )
+    ))
+  }
   observed <- data$EVID == 0L & data$MDV == 0L & is.finite(data$DV)
-  value <- c(prediction$value, list(
+  value <- list(
+    prediction_signature = prediction$key,
     observed = as.logical(observed),
     dvid = if ("DVID" %in% names(data)) as.integer(data$DVID) else rep.int(1L, nrow(data))
-  ))
+  )
   list(key = .nm_structure_key(value), value = value)
 }
 
 .nm_fo_pool_tape <- function(pool, evaluator, theta, sigma, omega) {
-  structure <- .nm_fo_structure(evaluator$engine$model, evaluator$data)
+  data <- evaluator$data_input()
+  structure <- .nm_fo_structure(evaluator$engine$model, data)
   bucket <- pool[[structure$key]] %||% list()
   if (length(bucket)) {
     for (entry in bucket) {
       if (identical(entry$structure, structure$value)) {
         evaluator$fo_tape <- entry$tape
+        evaluator$fo_dynamic <- .liberation_fo_tape_new_dynamic(
+          entry$tape$pointer, data
+        )
         return(invisible(entry$tape))
       }
     }
@@ -149,21 +295,62 @@
   invisible(evaluator$fo_tape)
 }
 
+.nm_shared_fo_objective_eligible <- function(model) {
+  likelihood <- model$LIK_CONFIG %||% list()
+  !isTRUE(model$USE_ODE) &&
+    !identical(likelihood$error, "likelihood") &&
+    identical(likelihood$sigma_corr %||% "independent", "independent") &&
+    identical(likelihood$blq_method %||% "none", "none") &&
+    identical(as.integer(likelihood$iov %||% 0L), 0L) &&
+    !length(likelihood$residual_groups %||% list()) &&
+    !length(model$MIXTURE %||% list()) &&
+    is.null(model$RE_CONFIG)
+}
+
+.nm_objective_pool_tape <- function(pool, engine, data, theta, sigma, omega,
+                                    n_eta, prediction_tape) {
+  structure <- .nm_fo_structure(engine$model, data)
+  bucket <- pool[[structure$key]] %||% list()
+  if (length(bucket)) {
+    for (entry in bucket) {
+      if (identical(entry$structure, structure$value)) {
+        return(list(tape = entry$tape, recorded = FALSE))
+      }
+    }
+  }
+  tape <- list(pointer = .liberation_shared_fo_objective_tape_create(
+    engine$pointer, prediction_tape$pointer, data, as.numeric(theta),
+    matrix(0, 1L, n_eta), as.numeric(sigma), as.numeric(omega)
+  ))
+  pool[[structure$key]] <- c(
+    bucket, list(list(structure = structure$value, tape = tape))
+  )
+  list(tape = tape, recorded = TRUE)
+}
+
 .NMSubjectEvaluator <- R6::R6Class(
   ".NMSubjectEvaluator",
   public = list(
     engine = NULL,
     data = NULL,
+    data_store = NULL,
+    data_subject = NA_integer_,
     objective_tape = NULL,
     noninteraction_tape = NULL,
     prediction_tape = NULL,
     fo_tape = NULL,
     curvature_tapes = NULL,
+    prediction_dynamic = NULL,
+    objective_dynamic = NULL,
+    noninteraction_dynamic = NULL,
+    fo_dynamic = NULL,
     tape_anchor = NULL,
     tape_signature = NULL,
     tape_records = 0L,
     tape_retapes = 0L,
     tape_checks = 0L,
+    data_materializations = 0L,
+    data_projections = 0L,
     tape_profile = "full",
     n_theta = 0L,
     n_eta = 0L,
@@ -171,41 +358,110 @@
 
     initialize = function(engine, data, theta, sigma, omega, n_eta = NULL,
                           prediction_tape = NULL,
+                          objective_tape = NULL,
+                          objective_tape_recorded = TRUE,
+                          data_store = NULL, data_subject = NA_integer_,
                           tape_profile = c("full", "fo")) {
       self$tape_profile <- match.arg(tape_profile)
       self$engine <- engine
-      self$data <- .nm_engine_data(engine$model, data)
+      normalized_data <- if (inherits(data, "nm_subject_view")) data else
+        .nm_engine_data(engine$model, data)
+      self$data_store <- data_store
+      self$data_subject <- as.integer(data_subject)
+      self$data <- if (is.null(data_store)) normalized_data else NULL
       self$n_theta <- length(theta)
-      self$n_eta <- as.integer(n_eta %||% .nm_eta_columns(engine$model, self$data))
+      self$n_eta <- as.integer(n_eta %||% .nm_eta_columns(engine$model, normalized_data))
       self$n_sigma <- length(sigma)
-      self$tape_signature <- .nm_prediction_structure(engine$model, self$data)$key
+      self$tape_signature <- .nm_prediction_structure(engine$model, normalized_data)$key
       self$record_tapes(
         theta, sigma, omega, rep(0, self$n_eta),
-        prediction_tape = prediction_tape
+        prediction_tape = prediction_tape, objective_tape = objective_tape,
+        objective_tape_recorded = objective_tape_recorded,
+        recording_data = normalized_data
       )
     },
 
+    data_frame = function() {
+      if (!is.null(self$data)) return(self$data)
+      self$data_materializations <- self$data_materializations + 1L
+      .nm_subject_store_data(self$data_store, self$data_subject)
+    },
+
+    data_input = function() {
+      if (!is.null(self$data)) return(self$data)
+      .nm_subject_store_view(self$data_store, self$data_subject)
+    },
+
+    project = function(columns, observed_only = FALSE, first_only = FALSE) {
+      columns <- unique(as.character(columns))
+      self$data_projections <- self$data_projections + 1L
+      if (!is.null(self$data)) {
+        rows <- seq_len(nrow(self$data))
+        if (isTRUE(observed_only)) {
+          rows <- rows[
+            self$data$EVID[rows] == 0L & self$data$MDV[rows] == 0L &
+              is.finite(self$data$DV[rows])
+          ]
+        }
+        if (isTRUE(first_only) && length(rows)) rows <- rows[[1L]]
+        result <- lapply(columns, function(column) {
+          if (column %in% names(self$data)) self$data[[column]][rows] else NULL
+        })
+        names(result) <- columns
+        attr(result, "rows") <- as.integer(rows - 1L)
+        return(result)
+      }
+      .nm_subject_view_project(
+        self$data_input(), columns, observed_only = observed_only,
+        first_only = first_only
+      )
+    },
+
+    observation_data = function(columns = character()) {
+      self$project(
+        unique(c("DV", "DVID", "TIME", ".ID_INDEX", columns)),
+        observed_only = TRUE
+      )
+    },
+
+    observation_count = function() {
+      .liberation_subject_observation_count(self$data_input())
+    },
+
     record_tapes = function(theta, sigma, omega, eta = rep(0, self$n_eta),
-                            retape = FALSE, prediction_tape = NULL) {
+                            retape = FALSE, prediction_tape = NULL,
+                            objective_tape = NULL,
+                            objective_tape_recorded = TRUE,
+                            recording_data = NULL) {
+      data <- recording_data %||% self$data_input()
       self$curvature_tapes <- list()
       self$fo_tape <- NULL
+      self$fo_dynamic <- NULL
       eta <- matrix(as.numeric(eta), 1L, self$n_eta)
       self$prediction_tape <- prediction_tape %||% self$engine$prediction_tape(
-        self$data, theta = theta, eta = eta, sigma = sigma
+        data, theta = theta, eta = eta, sigma = sigma
       )
-      .liberation_prediction_tape_new_dynamic(
-        self$prediction_tape$pointer, self$data
+      self$prediction_dynamic <- .liberation_prediction_tape_new_dynamic(
+        self$prediction_tape$pointer, data
       )
-      self$objective_tape <- self$engine$objective_tape(
-        self$data, theta = theta, eta = eta, sigma = sigma, omega = omega
+      self$objective_tape <- objective_tape %||% self$engine$objective_tape(
+        data, theta = theta, eta = eta, sigma = sigma, omega = omega
+      )
+      self$objective_dynamic <- .liberation_objective_tape_new_dynamic(
+        self$objective_tape$pointer, data
       )
       self$noninteraction_tape <- if (identical(self$tape_profile, "fo")) NULL else
         self$engine$objective_tape(
-          self$data, theta = theta, eta = eta, sigma = sigma, omega = omega,
+          data, theta = theta, eta = eta, sigma = sigma, omega = omega,
           interaction = FALSE
         )
+      self$noninteraction_dynamic <- if (is.null(self$noninteraction_tape)) NULL else
+        .liberation_objective_tape_new_dynamic(
+          self$noninteraction_tape$pointer, data
+        )
       self$tape_anchor <- c(theta, as.numeric(eta), sigma, omega)
-      self$tape_records <- self$tape_records + 1L
+      self$tape_records <- self$tape_records +
+        as.integer(is.null(objective_tape) || isTRUE(objective_tape_recorded))
       if (isTRUE(retape)) self$tape_retapes <- self$tape_retapes + 1L
       invisible(self)
     },
@@ -237,6 +493,20 @@
       c(theta, eta, sigma, omega)
     },
 
+    activate_objective_tape = function(tape = self$objective_tape,
+                                       dynamic = self$objective_dynamic) {
+      if (!is.null(tape)) {
+        if (is.null(dynamic)) {
+          dynamic <- .liberation_objective_tape_new_dynamic(
+            tape$pointer, self$data_input()
+          )
+        } else {
+          .liberation_objective_tape_set_dynamic(tape$pointer, dynamic)
+        }
+      }
+      invisible(tape)
+    },
+
     prediction_point = function(theta, eta, sigma) c(theta, eta, sigma),
 
     fo_point = function(theta, sigma, omega) c(theta, sigma, omega),
@@ -246,17 +516,28 @@
         self$ensure_valid_tapes(theta, sigma, omega)
       }
       if (is.null(self$fo_tape)) {
-        .liberation_prediction_tape_new_dynamic(
-          self$prediction_tape$pointer, self$data
+        data <- self$data_input()
+        .liberation_prediction_tape_set_dynamic(
+          self$prediction_tape$pointer, self$prediction_dynamic
         )
         self$fo_tape <- list(
           pointer = .liberation_fo_tape_create(
-            self$engine$pointer, self$prediction_tape$pointer, self$data,
-            as.numeric(theta), as.numeric(sigma), as.numeric(omega)
+            self$engine$pointer, self$prediction_tape$pointer, data,
+            as.numeric(theta), as.numeric(sigma), as.numeric(omega),
+            isTRUE(getOption("LibeRation.fo_low_rank", TRUE)),
+            as.numeric(getOption("LibeRation.fo_low_rank_tolerance", 1e-9)),
+            as.numeric(getOption(
+              "LibeRation.fo_low_rank_condition_tolerance", 1e-12
+            ))
           )
         )
+        self$fo_dynamic <- .liberation_fo_tape_new_dynamic(
+          self$fo_tape$pointer, data
+        )
       }
-      .liberation_fo_tape_new_dynamic(self$fo_tape$pointer, self$data)
+      .liberation_objective_tape_set_dynamic(
+        self$fo_tape$pointer, self$fo_dynamic
+      )
       invisible(self$fo_tape)
     },
 
@@ -286,18 +567,23 @@
           theta, eta, sigma, omega, gradient = FALSE,
           interaction = TRUE
         )
-        .liberation_prediction_tape_new_dynamic(
-          self$prediction_tape$pointer, self$data
+        data <- self$data_input()
+        .liberation_prediction_tape_set_dynamic(
+          self$prediction_tape$pointer, self$prediction_dynamic
         )
         self$curvature_tapes[[approximation]] <- list(
           pointer = .liberation_curvature_tape_create(
             self$engine$pointer, self$prediction_tape$pointer,
-            self$objective_tape$pointer, self$data, as.numeric(theta),
+            self$objective_tape$pointer, data, as.numeric(theta),
             as.numeric(eta), as.numeric(sigma), as.numeric(omega),
             approximation
           ),
           anchor = as.numeric(eta)
         )
+        self$curvature_tapes[[approximation]]$dynamic <-
+          .liberation_objective_tape_new_dynamic(
+            self$curvature_tapes[[approximation]]$pointer, data
+          )
       }
       invisible(self$curvature_tapes[[approximation]])
     },
@@ -307,6 +593,10 @@
       private$with_retape(
         function() {
           self$ensure_curvature_tape(theta, eta, sigma, omega, approximation)
+          self$activate_objective_tape(
+            self$curvature_tapes[[approximation]],
+            self$curvature_tapes[[approximation]]$dynamic
+          )
           .liberation_objective_tape_eval(
             self$curvature_tapes[[approximation]]$pointer,
             self$objective_point(theta, eta, sigma, omega),
@@ -324,6 +614,11 @@
       }
       private$with_retape(
         function() {
+          self$activate_objective_tape(
+            if (isTRUE(interaction)) self$objective_tape else self$noninteraction_tape,
+            if (isTRUE(interaction)) self$objective_dynamic else
+              self$noninteraction_dynamic
+          )
           .liberation_objective_tape_eval(
             if (isTRUE(interaction)) self$objective_tape$pointer else self$noninteraction_tape$pointer,
             self$objective_point(theta, eta, sigma, omega),
@@ -340,11 +635,23 @@
         .nm_stop("ETA samples have the wrong number of columns.")
       }
       if (isTRUE(self$engine$model$USE_ODE)) {
-        self$ensure_valid_tapes(theta, sigma, omega, eta[1L, ])
+        # Adaptive ODE trajectories may differ between proposal points.  A
+        # single batched tape cannot safely represent all such paths, so let
+        # the scalar evaluator validate/retape at every ETA point.
+        return(vapply(seq_len(nrow(eta)), function(row) {
+          self$objective(
+            theta, eta[row, ], sigma, omega, gradient = FALSE,
+            interaction = interaction
+          )$value
+        }, numeric(1)))
       }
       private$with_retape(
         function() {
           tape <- if (isTRUE(interaction)) self$objective_tape else self$noninteraction_tape
+          self$activate_objective_tape(
+            tape, if (isTRUE(interaction)) self$objective_dynamic else
+              self$noninteraction_dynamic
+          )
           .liberation_objective_tape_eta_values(
             tape$pointer,
             self$objective_point(theta, rep(0, self$n_eta), sigma, omega),
@@ -361,7 +668,16 @@
         .nm_stop("ETA samples have the wrong number of columns.")
       }
       if (isTRUE(self$engine$model$USE_ODE)) {
-        self$ensure_valid_tapes(theta, sigma, omega, eta[1L, ])
+        evaluated <- lapply(seq_len(nrow(eta)), function(row) {
+          self$objective(
+            theta, eta[row, ], sigma, omega, gradient = TRUE,
+            interaction = interaction
+          )
+        })
+        return(list(
+          value = vapply(evaluated, `[[`, numeric(1), "value"),
+          gradient = do.call(rbind, lapply(evaluated, `[[`, "gradient"))
+        ))
       }
       points <- cbind(
         matrix(theta, nrow(eta), length(theta), byrow = TRUE), eta,
@@ -371,6 +687,10 @@
       private$with_retape(
         function() {
           tape <- if (isTRUE(interaction)) self$objective_tape else self$noninteraction_tape
+          self$activate_objective_tape(
+            tape, if (isTRUE(interaction)) self$objective_dynamic else
+              self$noninteraction_dynamic
+          )
           .liberation_objective_tape_point_gradients(tape$pointer, points)
         }, theta, sigma, omega, eta[1L, ]
       )
@@ -385,6 +705,10 @@
       private$with_retape(
         function() {
           tape <- if (isTRUE(interaction)) self$objective_tape else self$noninteraction_tape
+          self$activate_objective_tape(
+            tape, if (isTRUE(interaction)) self$objective_dynamic else
+              self$noninteraction_dynamic
+          )
           .liberation_objective_tape_hessian_subset(
             tape$pointer, self$objective_point(theta, eta, sigma, omega),
             as.integer(rows), as.integer(columns)
@@ -403,8 +727,8 @@
       }
       private$with_retape(
         function() {
-          .liberation_prediction_tape_new_dynamic(
-            self$prediction_tape$pointer, self$data
+          .liberation_prediction_tape_set_dynamic(
+            self$prediction_tape$pointer, self$prediction_dynamic
           )
           point <- self$prediction_point(theta, eta, sigma)
           if (isTRUE(jacobian) && !is.null(columns)) {
@@ -421,7 +745,9 @@
 
     eta_mode = function(theta, sigma, omega, start = rep(0, self$n_eta),
                          maxit = 100L, tolerance = 1e-7,
-                         interaction = TRUE, exact_hessian = TRUE) {
+                         interaction = TRUE, exact_hessian = TRUE,
+                         prior_mean = NULL, base_precision = NULL,
+                         prior_precision = NULL) {
       if (isTRUE(self$engine$model$USE_ODE)) {
         self$ensure_valid_tapes(theta, sigma, omega, start)
       }
@@ -432,13 +758,37 @@
       }
       eta_positions <- self$n_theta + seq_len(self$n_eta)
       tape <- if (isTRUE(interaction)) self$objective_tape else self$noninteraction_tape
+      self$activate_objective_tape(
+        tape, if (isTRUE(interaction)) self$objective_dynamic else
+          self$noninteraction_dynamic
+      )
+      custom_prior <- !is.null(prior_mean) || !is.null(base_precision) ||
+        !is.null(prior_precision)
+      if (custom_prior &&
+          (is.null(prior_mean) || is.null(base_precision) ||
+           is.null(prior_precision))) {
+        .nm_stop(
+          "Custom ETA mode fitting requires prior mean, population precision, ",
+          "and replacement prior precision."
+        )
+      }
       native <- tryCatch(
-        .liberation_objective_tape_eta_mode(
-          tape$pointer,
-          self$objective_point(theta, start, sigma, omega),
-          eta_positions, as.numeric(start), as.integer(maxit),
-          as.numeric(tolerance), isTRUE(exact_hessian)
-        ),
+        if (custom_prior) {
+          .liberation_objective_tape_eta_mode_prior(
+            tape$pointer,
+            self$objective_point(theta, start, sigma, omega),
+            eta_positions, as.numeric(start), as.numeric(prior_mean),
+            as.matrix(base_precision), as.matrix(prior_precision),
+            as.integer(maxit), as.numeric(tolerance), isTRUE(exact_hessian)
+          )
+        } else {
+          .liberation_objective_tape_eta_mode(
+            tape$pointer,
+            self$objective_point(theta, start, sigma, omega),
+            eta_positions, as.numeric(start), as.integer(maxit),
+            as.numeric(tolerance), isTRUE(exact_hessian)
+          )
+        },
         error = identity
       )
       if (!inherits(native, "error") && identical(as.integer(native$convergence), 0L)) {
@@ -462,12 +812,22 @@
                          interaction = interaction)$value,
           error = function(e) Inf
         )
+        if (custom_prior && is.finite(value)) {
+          centered <- eta - prior_mean
+          value <- value - drop(crossprod(eta, base_precision %*% eta)) +
+            drop(crossprod(centered, prior_precision %*% centered))
+        }
         if (is.finite(value)) value else .Machine$double.xmax / 1e100
       }
       gr <- function(eta) {
         result <- self$objective(theta, eta, sigma, omega, gradient = TRUE,
                                  interaction = interaction)
-        unname(result$gradient[eta_positions])
+        value <- unname(result$gradient[eta_positions])
+        if (custom_prior) {
+          value <- value - 2 * as.numeric(base_precision %*% eta) +
+            2 * as.numeric(prior_precision %*% (eta - prior_mean))
+        }
+        value
       }
       fit <- stats::optim(
         as.numeric(start), fn, gr, method = "BFGS",
@@ -477,6 +837,21 @@
         theta, fit$par, sigma, omega, gradient = TRUE,
         hessian = isTRUE(exact_hessian), interaction = interaction
       )
+      if (custom_prior) {
+        centered <- fit$par - prior_mean
+        at_mode$value <- at_mode$value -
+          drop(crossprod(fit$par, base_precision %*% fit$par)) +
+          drop(crossprod(centered, prior_precision %*% centered))
+        at_mode$gradient[eta_positions] <-
+          at_mode$gradient[eta_positions] -
+          2 * as.numeric(base_precision %*% fit$par) +
+          2 * as.numeric(prior_precision %*% centered)
+        if (isTRUE(exact_hessian)) {
+          at_mode$hessian[eta_positions, eta_positions] <-
+            at_mode$hessian[eta_positions, eta_positions, drop = FALSE] -
+            2 * base_precision + 2 * prior_precision
+        }
+      }
       curvature <- if (isTRUE(exact_hessian)) {
         .nm_positive_definite(
           at_mode$hessian[eta_positions, eta_positions, drop = FALSE],
@@ -537,7 +912,11 @@
     if (isTRUE(interaction)) evaluator$objective_tape$pointer else
       evaluator$noninteraction_tape$pointer
   })
-  .liberation_objective_tape_collection_values(tapes, points)
+  .liberation_objective_tape_collection_values(
+    tapes, points, lapply(
+      evaluators, .nm_subject_dynamic_input, interaction = interaction
+    )
+  )
 }
 
 .nm_objective_collection_gradient <- function(evaluators, parameters, eta,
@@ -564,10 +943,47 @@
     if (isTRUE(interaction)) evaluator$objective_tape$pointer else
       evaluator$noninteraction_tape$pointer
   })
-  .liberation_objective_tape_collection_gradients(tapes, points)
+  .liberation_objective_tape_collection_gradients(
+    tapes, points, lapply(
+      evaluators, .nm_subject_dynamic_input, interaction = interaction
+    )
+  )
 }
 
-.nm_estimation_context <- function(model, data, n_cores = 1L, method = NULL) {
+.nm_objective_collection_value_gradient <- function(
+    evaluators, parameters, eta, interaction = TRUE) {
+  eta <- as.matrix(eta)
+  if (!length(evaluators)) {
+    return(list(value = numeric(), gradient = matrix(numeric(), 0L, 0L)))
+  }
+  if (nrow(eta) != length(evaluators)) {
+    .nm_stop("ETA rows must match the number of subject evaluators.")
+  }
+  if (isTRUE(evaluators[[1L]]$engine$model$USE_ODE)) {
+    invisible(Map(function(evaluator, subject) {
+      evaluator$ensure_valid_tapes(
+        parameters$theta, parameters$sigma, parameters$omega, eta[subject, ]
+      )
+    }, evaluators, seq_along(evaluators)))
+  }
+  points <- cbind(
+    matrix(parameters$theta, nrow(eta), length(parameters$theta), byrow = TRUE),
+    eta,
+    matrix(parameters$sigma, nrow(eta), length(parameters$sigma), byrow = TRUE),
+    matrix(parameters$omega, nrow(eta), length(parameters$omega), byrow = TRUE)
+  )
+  tapes <- lapply(evaluators, function(evaluator) {
+    if (isTRUE(interaction)) evaluator$objective_tape$pointer else
+      evaluator$noninteraction_tape$pointer
+  })
+  .liberation_objective_tape_collection_value_gradients(
+    tapes, points, lapply(
+      evaluators, .nm_subject_dynamic_input, interaction = interaction
+    )
+  )
+}
+
+.nm_estimation_context_build <- function(model, data, n_cores = 1L, method = NULL) {
   engine <- if (inherits(model, "NMEngine")) model else nm_compile(model)
   model <- engine$model
   data <- .nm_engine_data(model, data)
@@ -608,21 +1024,63 @@
   n_cores <- min(n_cores, max(n_subjects, 1L))
   expanded_n_eta <- .nm_eta_columns(model, data)
   tape_profile <- if (!is.null(method) && identical(toupper(method), "FO")) "fo" else "full"
-  subject_data <- lapply(seq_len(n_subjects), function(index) .nm_subject_data(data, index))
+  use_subject_views <- isTRUE(getOption("LibeRation.subject_data_views", TRUE))
+  subject_store <- if (use_subject_views) .nm_subject_store(data) else NULL
+  subject_data <- if (use_subject_views) NULL else
+    lapply(seq_len(n_subjects), function(index) .nm_subject_data(data, index))
+  subject_input <- function(index) {
+    if (use_subject_views) .nm_subject_store_view(subject_store, index) else
+      subject_data[[index]]
+  }
   prediction_pool <- new.env(parent = emptyenv())
+  objective_pool <- new.env(parent = emptyenv())
+  shared_fo_objective <- identical(tape_profile, "fo") &&
+    isTRUE(getOption("LibeRation.fo_objective_tape_sharing", TRUE)) &&
+    .nm_shared_fo_objective_eligible(model)
   subjects <- lapply(seq_len(n_subjects), function(index) {
+    current_data <- subject_input(index)
     prediction_tape <- .nm_prediction_pool_tape(
-      prediction_pool, engine, subject_data[[index]], model$THETAS$Value,
+      prediction_pool, engine, current_data, model$THETAS$Value,
       model$SIGMAS$Value, expanded_n_eta
     )
+    objective <- if (shared_fo_objective) {
+      .nm_objective_pool_tape(
+        objective_pool, engine, current_data, model$THETAS$Value,
+        model$SIGMAS$Value, model$OMEGAS$Value, expanded_n_eta,
+        prediction_tape
+      )
+    } else list(tape = NULL, recorded = TRUE)
     .NMSubjectEvaluator$new(
-      engine, subject_data[[index]], model$THETAS$Value,
+      engine, current_data, model$THETAS$Value,
       model$SIGMAS$Value, model$OMEGAS$Value, n_eta = expanded_n_eta,
-      prediction_tape = prediction_tape, tape_profile = tape_profile
+      prediction_tape = prediction_tape, objective_tape = objective$tape,
+      objective_tape_recorded = objective$recorded,
+      data_store = subject_store,
+      data_subject = if (use_subject_views) index else NA_integer_,
+      tape_profile = tape_profile
     )
   })
+  native_subject_threads <- 1L
+  stochastic_method <- toupper(method %||% "")
+  fused_native_thread_eligible <- n_cores > 1L &&
+    isTRUE(getOption("LibeRation.native_subject_threads", TRUE)) &&
+    identical(model$NUMERICAL_MODE %||% "nonmem_compatibility", "liber_optimized") &&
+    stochastic_method %in% c("SAEM", "BAYES") &&
+    all(vapply(subjects, function(evaluator) {
+      startsWith(
+        evaluator$prediction_tape$propagation_kernel %||% "",
+        "specialized-advan"
+      )
+    }, logical(1)))
+  cppad_native_thread_eligible <- n_cores > 1L &&
+    isTRUE(getOption("LibeRation.cppad_subject_threads", TRUE)) &&
+    identical(model$NUMERICAL_MODE %||% "nonmem_compatibility", "liber_optimized") &&
+    stochastic_method %in% c("ITS", "IMP")
+  native_thread_eligible <- fused_native_thread_eligible ||
+    cppad_native_thread_eligible
+  if (native_thread_eligible) native_subject_threads <- n_cores
   parallel_state <- NULL
-  if (n_cores > 1L) {
+  if (n_cores > 1L && native_subject_threads == 1L) {
     starts <- floor((seq_len(n_cores) - 1L) * n_subjects / n_cores) + 1L
     ends <- floor(seq_len(n_cores) * n_subjects / n_cores)
     chunks <- Map(seq.int, starts, ends)
@@ -641,34 +1099,69 @@
       parallel::clusterApply(
         cluster, seq_along(chunks),
         function(index, data_chunks, specification, theta, sigma, omega,
-                 n_eta, tape_profile, library_paths) {
+                 n_eta, tape_profile, library_paths, use_subject_views) {
           .libPaths(unique(c(library_paths, .libPaths())))
           namespace <- asNamespace("LibeRation")
           compiler <- get("nm_compile", envir = namespace)
           evaluator_class <- get(".NMSubjectEvaluator", envir = namespace)
           prediction_pool_tape <- get(".nm_prediction_pool_tape", envir = namespace)
+          objective_pool_tape <- get(".nm_objective_pool_tape", envir = namespace)
+          subject_store_create <- get(".nm_subject_store", envir = namespace)
+          subject_store_view <- get(".nm_subject_store_view", envir = namespace)
+          shared_fo_eligible <- get(
+            ".nm_shared_fo_objective_eligible", envir = namespace
+          )
           compiled <- compiler(specification)
           prediction_pool <- new.env(parent = emptyenv())
-          evaluators <- lapply(data_chunks[[index]], function(subject_data) {
+          objective_pool <- new.env(parent = emptyenv())
+          share_objective <- identical(tape_profile, "fo") &&
+            shared_fo_eligible(specification)
+          worker_store <- if (use_subject_views) {
+            subject_store_create(data_chunks[[index]])
+          } else NULL
+          subject_count <- if (use_subject_views) {
+            length(worker_store$subject_ids)
+          } else length(data_chunks[[index]])
+          evaluators <- lapply(seq_len(subject_count), function(subject) {
+            subject_data <- if (use_subject_views) {
+              subject_store_view(worker_store, subject)
+            } else data_chunks[[index]][[subject]]
             prediction_tape <- prediction_pool_tape(
               prediction_pool, compiled, subject_data, theta, sigma, n_eta
             )
+            objective <- if (share_objective) {
+              objective_pool_tape(
+                objective_pool, compiled, subject_data, theta, sigma, omega,
+                n_eta, prediction_tape
+              )
+            } else list(tape = NULL, recorded = TRUE)
             evaluator_class$new(
               compiled, subject_data, theta, sigma, omega, n_eta = n_eta,
-              prediction_tape = prediction_tape, tape_profile = tape_profile
+              prediction_tape = prediction_tape,
+              objective_tape = objective$tape,
+              objective_tape_recorded = objective$recorded,
+              data_store = worker_store,
+              data_subject = if (use_subject_views) subject else NA_integer_,
+              tape_profile = tape_profile
             )
           })
           state <- new.env(parent = emptyenv())
           state$subjects <- evaluators
           state$model <- specification
+          state$subject_store <- worker_store
           registry <- get(".nm_parallel_registry", envir = namespace)
           registry$state <- state
           TRUE
         },
-        data_chunks = lapply(chunks, function(rows) subject_data[rows]),
+        data_chunks = if (use_subject_views) {
+          lapply(chunks, function(rows) .nm_subject_store_chunk(subject_store, rows))
+        } else {
+          lapply(chunks, function(rows) subject_data[rows])
+        },
         specification = model, theta = model$THETAS$Value,
         sigma = model$SIGMAS$Value, omega = model$OMEGAS$Value,
         n_eta = expanded_n_eta, tape_profile = tape_profile,
+        use_subject_views = use_subject_views,
         library_paths = .libPaths()
       )
       TRUE
@@ -681,8 +1174,78 @@
     parallel_state <- list(cluster = cluster, chunks = chunks, n_cores = n_cores)
   }
   list(engine = engine, model = model, data = data, subjects = subjects,
+       subject_store = subject_store,
+       subject_data_layout = if (use_subject_views) "native-row-view" else "copied",
        n_subjects = n_subjects, n_eta = expanded_n_eta,
-       parallel = parallel_state)
+       parallel = parallel_state,
+       native_subject_threads = native_subject_threads,
+       shared_fo_objective = shared_fo_objective)
+}
+
+.nm_estimation_context_cache <- new.env(parent = emptyenv())
+.nm_estimation_context_cache$.order <- character()
+
+.nm_estimation_context_cache_clear <- function() {
+  keys <- setdiff(ls(.nm_estimation_context_cache, all.names = TRUE), ".order")
+  if (length(keys)) rm(list = keys, envir = .nm_estimation_context_cache)
+  .nm_estimation_context_cache$.order <- character()
+  invisible(NULL)
+}
+
+.nm_estimation_context <- function(model, data, n_cores = 1L, method = NULL) {
+  definition <- if (inherits(model, "NMEngine")) model$model else model
+  cacheable <- identical(toupper(method %||% ""), "FO") &&
+    identical(as.integer(n_cores), 1L) &&
+    isTRUE(getOption("LibeRation.fo_context_cache", TRUE)) &&
+    .nm_shared_fo_objective_eligible(definition)
+  if (!cacheable) {
+    context <- .nm_estimation_context_build(model, data, n_cores, method)
+    context$cache_hit <- FALSE
+    return(context)
+  }
+  signature <- list(
+    version = 2L, method = "FO", model = definition,
+    data = as.data.frame(data, stringsAsFactors = FALSE),
+    tape_options = list(
+      sharing = getOption("LibeRation.fo_objective_tape_sharing", TRUE),
+      low_rank = getOption("LibeRation.fo_low_rank", TRUE),
+      low_rank_tolerance = getOption(
+        "LibeRation.fo_low_rank_tolerance", 1e-9
+      ),
+      low_rank_condition_tolerance = getOption(
+        "LibeRation.fo_low_rank_condition_tolerance", 1e-12
+      ),
+      tape_guard_radius = getOption("LibeRation.tape_guard_radius", 0.5),
+      subject_data_views = getOption("LibeRation.subject_data_views", TRUE)
+    )
+  )
+  key <- .nm_structure_key(signature)
+  if (exists(key, envir = .nm_estimation_context_cache, inherits = FALSE)) {
+    entry <- get(key, envir = .nm_estimation_context_cache, inherits = FALSE)
+    if (identical(entry$signature, signature)) {
+      context <- entry$context
+      .nm_estimation_context_cache$.order <- c(
+        setdiff(.nm_estimation_context_cache$.order, key), key
+      )
+      context$cache_hit <- TRUE
+      return(context)
+    }
+  }
+  context <- .nm_estimation_context_build(model, data, n_cores, method)
+  context$cache_hit <- FALSE
+  assign(key, list(signature = signature, context = context),
+         envir = .nm_estimation_context_cache)
+  .nm_estimation_context_cache$.order <- c(
+    .nm_estimation_context_cache$.order, key
+  )
+  limit <- max(1L, as.integer(getOption("LibeRation.fo_context_cache_size", 4L)))
+  while (length(.nm_estimation_context_cache$.order) > limit) {
+    drop <- .nm_estimation_context_cache$.order[[1L]]
+    rm(list = drop, envir = .nm_estimation_context_cache)
+    .nm_estimation_context_cache$.order <-
+      .nm_estimation_context_cache$.order[-1L]
+  }
+  context
 }
 
 .nm_outer_map <- function(model) {
@@ -879,16 +1442,29 @@
 .nm_cpp_population_objective <- function(context, map, approximation,
                                           eta_maxit, tolerance,
                                           initial_eta = NULL) {
+  started <- proc.time()[["elapsed"]]
+  finish <- function(result) {
+    result$initialization_seconds <- unname(
+      proc.time()[["elapsed"]] - started
+    )
+    result
+  }
   if (!isTRUE(getOption("LibeRation.cpp_population_objective", TRUE))) {
-    return(list(pointer = NULL, reason = "disabled by option"))
+    return(finish(list(pointer = NULL, reason = "disabled by option")))
   }
   if (!is.null(context$parallel)) {
-    return(list(pointer = NULL, reason = "PSOCK workers require R coordination"))
+    return(finish(list(
+      pointer = NULL, reason = "PSOCK workers require R coordination"
+    )))
   }
   approximation <- match.arg(
     tolower(approximation), c("fo", "its", "foce", "focei", "laplace")
   )
   parameters <- map$decode(map$start)
+  mu <- if (.nm_liber_optimized(context) && approximation != "fo" &&
+            context$n_eta > 0L) {
+    .nm_mu_specialization(context, map, enabled = TRUE)
+  } else NULL
   primary <- curvature <- list()
   # Adaptive ODE tapes are owned and retaped by the C++ population object.
   # Analytical models retain the already-recorded subject tapes, including
@@ -955,16 +1531,40 @@
     prior_index = priors$index, prior_family = priors$family,
     prior_mean = priors$mean, prior_sd = priors$sd,
     prior_shape = priors$shape, prior_rate = priors$rate,
+    mu = if (isTRUE(mu$active) && length(mu$theta)) list(
+      active = TRUE, theta = as.integer(mu$theta),
+      links = unname(mu$links[as.character(mu$theta)]),
+      design_columns = unname(mu$design_columns)
+    ) else list(active = FALSE),
     fo_population_batch = isTRUE(getOption("LibeRation.fo_population_batch", TRUE)),
+    fo_population_scalar = isTRUE(getOption(
+      "LibeRation.fo_population_scalar", TRUE
+    )),
+    fo_low_rank = isTRUE(getOption("LibeRation.fo_low_rank", TRUE)),
+    fo_low_rank_tolerance = as.numeric(getOption(
+      "LibeRation.fo_low_rank_tolerance", 1e-9
+    )),
+    fo_low_rank_condition_tolerance = as.numeric(getOption(
+      "LibeRation.fo_low_rank_condition_tolerance", 1e-12
+    )),
     fo_population_max_operations = as.numeric(getOption(
       "LibeRation.fo_population_max_operations", 2e6
-    ))
+    )),
+    subject_materializer = NULL,
+    subject_store = if (is.null(context$subject_store)) NULL else
+      context$subject_store$pointer
   )
-  tryCatch(
+  subject_inputs <- lapply(context$subjects, function(evaluator) {
+    if (is.null(context$subject_store)) return(evaluator$data_frame())
+    if (approximation == "fo") return(evaluator$fo_dynamic %||% numeric())
+    if (approximation == "foce") evaluator$noninteraction_dynamic %||% numeric() else
+      evaluator$objective_dynamic %||% numeric()
+  })
+  finish(tryCatch(
     list(
       pointer = .liberation_population_objective_create(
         context$engine$pointer,
-        lapply(context$subjects, function(evaluator) evaluator$data),
+        subject_inputs,
         primary, curvature, config
       ),
       reason = NULL
@@ -973,7 +1573,7 @@
       pointer = NULL,
       reason = paste("compiled population initialization failed:", conditionMessage(error))
     )
-  )
+  ))
 }
 
 .nm_log_gradient <- function(iteration, objective, parameters, map, value = NULL,
@@ -1019,6 +1619,9 @@
   if (optimizer_backend == "auto") optimizer_backend <- "r"
   compiled_pointer <- compiled_objective$pointer %||% NULL
   compiled <- !is.null(compiled_pointer)
+  objective_initialization_seconds <- as.numeric(
+    compiled_objective$initialization_seconds %||% 0
+  )
   started <- proc.time()[["elapsed"]]
   print_every <- as.integer(print_every)
   evaluations <- 0L
@@ -1160,6 +1763,7 @@
       gradient_evaluations = 0L, backend = "fixed-parameters",
       gradient_fallbacks = 0L, gradient_fallback_evaluations = 0L,
       elapsed_seconds = unname(proc.time()[["elapsed"]] - started),
+      objective_initialization_seconds = objective_initialization_seconds,
       message = NULL,
       objective_backend = if (compiled) "persistent-cpp-population-objective" else
         "r-orchestrated-population-objective",
@@ -1173,12 +1777,30 @@
     }
     return(result)
   }
+  if (optimizer_backend == "native" && compiled) {
+    result <- .liberation_population_objective_native_optimizer(
+      compiled_pointer, map$start, map$lower, map$upper,
+      as.integer(maxit), as.numeric(tolerance), as.integer(trace)
+    )
+    result$backend <- "native-bfgs"
+    result$coordinator <- "direct-cpp-population-objective"
+    result$objective_backend <- "persistent-cpp-population-objective"
+    result$population_objective <-
+      .liberation_population_objective_telemetry(compiled_pointer)
+    result$objective_backend <- result$population_objective$backend %||%
+      result$objective_backend
+    result$elapsed_seconds <- unname(proc.time()[["elapsed"]] - started)
+    result$objective_initialization_seconds <- objective_initialization_seconds
+    result$gradient_fallbacks <- 0L
+    result$gradient_fallback_evaluations <- 0L
+    return(result)
+  }
   if (optimizer_backend == "native" && is.function(safe_gradient)) {
     result <- .liberation_native_optimizer(
       safe, safe_gradient, map$start, map$lower, map$upper,
       as.integer(maxit), as.numeric(tolerance), as.integer(trace)
     )
-    result$backend <- "native-bfgs"
+    result$backend <- "native-bfgs-r-callback"
     result$objective_backend <- if (compiled) {
       "persistent-cpp-population-objective"
     } else "r-orchestrated-population-objective"
@@ -1190,6 +1812,7 @@
         result$objective_backend
     }
     result$elapsed_seconds <- unname(proc.time()[["elapsed"]] - started)
+    result$objective_initialization_seconds <- objective_initialization_seconds
     result$gradient_fallbacks <- as.integer(gradient_fallbacks)
     result$gradient_fallback_evaluations <- as.integer(
       gradient_fallback_evaluations
@@ -1251,6 +1874,7 @@
   } else "r-orchestrated-population-objective"
   result$objective_scale <- objective_scale
   result$elapsed_seconds <- unname(proc.time()[["elapsed"]] - started)
+  result$objective_initialization_seconds <- objective_initialization_seconds
   result
 }
 
@@ -1260,6 +1884,19 @@
   if (is.null(starts)) starts <- matrix(0, context$n_subjects, context$n_eta)
   batch_modes <- function(evaluators, starts) {
     if (!length(evaluators)) return(list())
+    native_eligible <- all(vapply(evaluators, function(evaluator) {
+      tape <- if (isTRUE(interaction)) evaluator$objective_tape else
+        evaluator$noninteraction_tape
+      !is.null(tape) && !is.null(tape$pointer)
+    }, logical(1)))
+    if (!native_eligible) {
+      return(lapply(seq_along(evaluators), function(subject) {
+        evaluators[[subject]]$eta_mode(
+          parameters$theta, parameters$sigma, parameters$omega,
+          start = starts[subject, ], maxit = maxit, tolerance = tolerance
+        )
+      }))
+    }
     ode_guard <- isTRUE(evaluators[[1L]]$engine$model$USE_ODE)
     if (ode_guard) invisible(Map(function(evaluator, subject) {
       evaluator$ensure_valid_tapes(
@@ -1279,7 +1916,11 @@
     raw <- tryCatch(
       .liberation_objective_tape_eta_modes(
         tapes, points, length(parameters$theta) + seq_len(context$n_eta), starts,
-        as.integer(maxit), as.numeric(tolerance), isTRUE(exact_hessian)
+        as.integer(maxit), as.numeric(tolerance), isTRUE(exact_hessian),
+        lapply(
+          evaluators, .nm_subject_dynamic_input, interaction = interaction
+        ),
+        isTRUE(.nm_liber_optimized(context))
       ), error = identity
     )
     if (inherits(raw, "error")) {
@@ -1321,7 +1962,9 @@
         logdet = curvature$logdet, jitter = curvature$jitter,
         gradient = as.numeric(mode$gradient),
         iterations = as.integer(mode$iterations),
-        evaluations = as.integer(mode$evaluations), backend = "cpp-batch"
+        evaluations = as.integer(mode$evaluations),
+        optimizer_state_reused = isTRUE(mode$optimizer_state_reused),
+        backend = "cpp-batch"
       )
     })
   }
@@ -1330,13 +1973,13 @@
     pieces <- parallel::clusterApply(
       context$parallel$cluster, seq_along(chunks),
        function(index, start_chunks, theta, sigma, omega, maxit, tolerance,
-                interaction, exact_hessian) {
+                interaction, exact_hessian, optimized) {
         worker_state <- get(
           ".nm_parallel_worker_state", envir = asNamespace("LibeRation")
         )
         evaluators <- worker_state()$subjects
         worker_starts <- start_chunks[[index]]
-        context <- list(n_eta = ncol(worker_starts))
+        context <- list(n_eta = ncol(worker_starts), optimized = optimized)
         parameters <- list(theta = theta, sigma = sigma, omega = omega)
         batch <- get(".nm_subject_modes_batch", envir = asNamespace("LibeRation"))
         batch(evaluators, context, parameters, worker_starts, maxit, tolerance,
@@ -1345,7 +1988,8 @@
       start_chunks = lapply(chunks, function(rows) starts[rows, , drop = FALSE]),
       theta = parameters$theta, sigma = parameters$sigma,
        omega = parameters$omega, maxit = maxit, tolerance = tolerance,
-       interaction = interaction, exact_hessian = exact_hessian
+       interaction = interaction, exact_hessian = exact_hessian,
+       optimized = isTRUE(.nm_liber_optimized(context))
     )
     return(unlist(pieces, recursive = FALSE))
   }
@@ -1375,7 +2019,11 @@
   raw <- tryCatch(
     .liberation_objective_tape_eta_modes(
       tapes, points, length(parameters$theta) + seq_len(context$n_eta), starts,
-      as.integer(maxit), as.numeric(tolerance), isTRUE(exact_hessian)
+      as.integer(maxit), as.numeric(tolerance), isTRUE(exact_hessian),
+      lapply(
+        evaluators, .nm_subject_dynamic_input, interaction = interaction
+      ),
+      isTRUE(context$optimized)
     ), error = identity
   )
   if (inherits(raw, "error")) {
@@ -1410,13 +2058,14 @@
       hessian = curvature$matrix, logdet = curvature$logdet,
       jitter = curvature$jitter, gradient = as.numeric(mode$gradient),
       iterations = as.integer(mode$iterations), evaluations = as.integer(mode$evaluations),
+      optimizer_state_reused = isTRUE(mode$optimizer_state_reused),
       backend = "cpp-batch"
     )
   })
 }
 
-.nm_subject_curvature_logdet <- function(context, evaluator, parameters, eta,
-                                         approximation) {
+.nm_subject_curvature_logdet_reference <- function(
+    context, evaluator, parameters, eta, approximation) {
   eta_columns <- length(parameters$theta) + seq_len(context$n_eta)
   if (approximation == "laplace") {
     curvature <- evaluator$objective_hessian_subset(
@@ -1431,29 +2080,36 @@
     parameters$theta, eta, parameters$sigma, jacobian = TRUE,
     columns = eta_columns
   )
-  observed <- evaluator$data$EVID == 0L & evaluator$data$MDV == 0L &
-    is.finite(evaluator$data$DV)
-  jacobian <- prediction$jacobian[observed, , drop = FALSE]
-  f <- prediction$value[observed]
+  observations <- evaluator$observation_data()
+  observed_rows <- as.integer(attr(observations, "rows")) + 1L
+  jacobian <- prediction$jacobian[observed_rows, , drop = FALSE]
+  f <- prediction$value[observed_rows]
   scale_f <- if (approximation == "foce") {
     evaluator$prediction(
       parameters$theta, rep(0, context$n_eta), parameters$sigma,
       jacobian = FALSE
-    )$value[observed]
+    )$value[observed_rows]
   } else f
-  dvid <- if ("DVID" %in% names(evaluator$data)) {
-    evaluator$data$DVID[observed]
-  } else rep(1L, sum(observed))
+  dvid <- observations$DVID %||% rep(1L, length(observed_rows))
   variance <- .nm_residual_variance(
     context$model, scale_f, parameters$sigma, dvid
   )
-  omega_inverse <- solve(.nm_effect_covariance(
-    context$model, evaluator$data, parameters$omega
+  omega_inverse <- solve(.nm_effect_covariance_evaluator_reference(
+    context$model, evaluator, parameters$omega
   ))
   curvature <- 2 * crossprod(jacobian / sqrt(variance)) + 2 * omega_inverse
   .nm_positive_definite(
     curvature, paste0(toupper(approximation), " Gauss-Newton curvature")
   )$logdet
+}
+
+.nm_subject_curvature_logdet <- function(context, evaluator, parameters, eta,
+                                         approximation) {
+  result <- evaluator$curvature(
+    parameters$theta, eta, parameters$sigma, parameters$omega,
+    approximation, gradient = FALSE
+  )
+  as.numeric(result$value)
 }
 
 .nm_conditional_native_gradient <- function(context, parameters, eta,
@@ -1650,16 +2306,17 @@
     theta, rep(0, evaluator$n_eta), sigma, jacobian = TRUE,
     columns = eta_columns
   )
-  observed <- evaluator$data$EVID == 0L & evaluator$data$MDV == 0L & is.finite(evaluator$data$DV)
-  f <- prediction$value[observed]
-  dv <- evaluator$data$DV[observed]
-  jacobian <- prediction$jacobian[observed, , drop = FALSE]
+  observed_data <- evaluator$observation_data()
+  observed_rows <- as.integer(attr(observed_data, "rows")) + 1L
+  f <- prediction$value[observed_rows]
+  dv <- observed_data$DV
+  jacobian <- prediction$jacobian[observed_rows, , drop = FALSE]
   if (model$LIK_CONFIG$error == "exponential") {
     if (any(dv <= 0) || any(f <= 0)) return(Inf)
     residual <- log(dv) - log(f)
     jacobian <- jacobian / f
   } else residual <- dv - f
-  dvid <- if ("DVID" %in% names(evaluator$data)) evaluator$data$DVID[observed] else 1L
+  dvid <- observed_data$DVID %||% rep(1L, length(dv))
   variance <- .nm_residual_variance(model, f, sigma, dvid)
   correlation <- diag(length(f))
   if (model$LIK_CONFIG$sigma_corr == "ar1" && length(f) > 1L) {
@@ -1669,14 +2326,12 @@
     })
   }
   if (length(model$LIK_CONFIG$residual_groups) && length(f) > 1L) {
-    observed_data <- evaluator$data[observed, , drop = FALSE]
-    observed_dvid <- if ("DVID" %in% names(observed_data)) observed_data$DVID else
-      rep(1L, nrow(observed_data))
+    observed_dvid <- observed_data$DVID %||% rep(1L, length(dv))
     for (group in model$LIK_CONFIG$residual_groups) {
       group_correlation <- .nm_residual_group_value(group, theta, sigma)
-      for (row in seq_len(nrow(observed_data))) {
+      for (row in seq_along(dv)) {
         if (!observed_dvid[[row]] %in% group$dvid) next
-        for (column in seq_len(nrow(observed_data))) {
+        for (column in seq_along(dv)) {
           if (row == column || observed_data$.ID_INDEX[[row]] != observed_data$.ID_INDEX[[column]] ||
               observed_data$TIME[[row]] != observed_data$TIME[[column]] ||
               !observed_dvid[[column]] %in% group$dvid) next
@@ -1690,7 +2345,9 @@
   }
   residual_covariance <- correlation * outer(sqrt(variance), sqrt(variance))
   marginal <- residual_covariance +
-    jacobian %*% .nm_effect_covariance(model, evaluator$data, omega) %*% t(jacobian)
+    jacobian %*% .nm_effect_covariance_evaluator(
+      model, evaluator, omega
+    ) %*% t(jacobian)
   pd <- .nm_positive_definite(marginal, "FO marginal covariance")
   as.numeric(pd$logdet + crossprod(residual, solve(pd$matrix, residual)))
 }
@@ -1762,6 +2419,23 @@
   as.vector(.nm_fo_native_gradient(context, parameters) %*% map$jacobian(parameters))
 }
 
+.nm_assert_final_conditional_modes <- function(modes, method) {
+  convergence <- if (length(modes)) {
+    vapply(modes, function(mode) as.integer(mode$convergence %||% 0L), integer(1))
+  } else integer()
+  failed <- which(is.na(convergence) | convergence != 0L)
+  if (length(failed)) {
+    .nm_stop(
+      method, " did not produce converged final conditional modes for subject",
+      if (length(failed) == 1L) " " else "s ",
+      paste(failed, collapse = ", "),
+      ". The outer estimate has not been accepted because its reported ",
+      "objective would otherwise depend on approximate ETA modes."
+    )
+  }
+  invisible(convergence)
+}
+
 .nm_fit_result <- function(context, method, parameters, objective, modes,
                            optimizer, diagnostics = list()) {
   eta <- if (context$n_eta) {
@@ -1794,9 +2468,12 @@
   tape <- lapply(context$subjects, function(evaluator) evaluator$tape_telemetry())
   diagnostics$optimizer <- list(
     backend = optimizer$backend %||% "unknown",
+    coordinator = optimizer$coordinator %||% "r-callback",
     objective_backend = optimizer$objective_backend %||%
       "r-orchestrated-population-objective",
     elapsed_seconds = optimizer$elapsed_seconds %||% NA_real_,
+    objective_initialization_seconds =
+      optimizer$objective_initialization_seconds %||% 0,
     objective_evaluations = objective_evaluations,
     gradient_evaluations = optimizer$gradient_evaluations %||% NA_integer_,
     gradient_fallbacks = optimizer$gradient_fallbacks %||% 0L,
@@ -1808,6 +2485,22 @@
   diagnostics$conditional_modes <- list(
     iterations = eta_iterations, evaluations = eta_evaluations,
     backends = table(vapply(modes, function(mode) mode$backend %||% "unknown", character(1)))
+  )
+  diagnostics$data_layout <- list(
+    storage = context$subject_data_layout %||% "copied",
+    subjects = context$n_subjects,
+    persistent_subject_frames = sum(vapply(
+      context$subjects, function(evaluator) !is.null(evaluator$data), logical(1)
+    )),
+    subject_frame_materializations = sum(vapply(
+      context$subjects, function(evaluator) evaluator$data_materializations,
+      integer(1)
+    )),
+    minimal_projections = sum(vapply(
+      context$subjects, function(evaluator) evaluator$data_projections,
+      integer(1)
+    )),
+    shared_rows = nrow(context$data)
   )
   diagnostics$tapes <- list(
     unique_structures = length(unique(vapply(tape, `[[`, character(1), "signature"))),
@@ -1821,9 +2514,25 @@
       as.integer(population_work$tape_retapes %||% 0L),
     validity_checks = sum(vapply(tape, `[[`, integer(1), "validity_checks"))
   )
+  objective_semantics <- diagnostics$objective_semantics %||% list(
+    type = "negative_twice_estimator_objective",
+    likelihood_comparable = !method %in% c("BAYES", "HMC", "NUTS")
+  )
+  objective_type <- as.character(
+    objective_semantics$type %||% "negative_twice_estimator_objective"
+  )[[1L]]
+  objective_comparable <- isTRUE(
+    objective_semantics$likelihood_comparable %||% FALSE
+  )
+  diagnostics$objective_semantics <- utils::modifyList(
+    objective_semantics,
+    list(type = objective_type, likelihood_comparable = objective_comparable)
+  )
   structure(
     list(
       version = 1L, method = method, objective = as.numeric(objective),
+      objective_type = objective_type,
+      objective_comparable = objective_comparable,
       theta = parameters$theta, omega = parameters$omega,
       sigma = parameters$sigma, eta = eta,
       convergence = optimizer$convergence, message = optimizer$message,
@@ -1895,6 +2604,7 @@
     interaction = approximation != "foce",
     exact_hessian = approximation == "laplace"
   )
+  .nm_assert_final_conditional_modes(modes, method)
   work <- optimizer$population_objective
   if (is.null(work)) {
     work <- list(
@@ -1930,15 +2640,21 @@
 #' Deterministic conditional methods use exact CppAD gradients for ETA modes.
 #' LAPLACE uses the exact conditional Hessian; FOCE/FOCEI use the
 #' interaction-aware Gauss-Newton curvature; FO integrates the first-order
-#' Gaussian linearization analytically. GQ integrates the exact joint
-#' objective over ETAs with adaptive tensor or Smolyak sparse
-#' Gauss--Hermite quadrature.
-#' Stochastic methods use the same C++ joint objective and are implemented in
-#' the stochastic estimation module. HMC and NUTS use exact joint CppAD
-#' gradients with unconstrained parameter transforms, dual-averaged step-size
-#' adaptation, and a diagonal mass matrix. NPML and NPAG replace the Gaussian
-#' random-effect distribution with a discrete ETA support distribution; NPAG
-#' adapts, expands, and prunes that support.
+#' Gaussian linearization analytically. ITS alternates conditional-mode and
+#' first-order conditional-variance calculations with approximate single-step
+#' population updates. GQ approximates the ETA
+#' marginal integral with finite adaptive tensor or Smolyak sparse
+#' Gauss--Hermite quadrature. IMP uses importance-sampling Monte-Carlo EM;
+#' each E-step calculates normalized importance weights and its M-step optimizes
+#' the corresponding complete-data expectation. SAEM applies the
+#' Robbins--Monro recurrence to that complete-data auxiliary function.
+#' HMC and NUTS use exact joint CppAD gradients with unconstrained parameter
+#' transforms and dual-averaged step-size adaptation. Optimized NUTS uses
+#' multinomial progressive trajectory sampling, a generalized U-turn check,
+#' and windowed regularized diagonal metric adaptation; the retained classic
+#' slice variant is available for comparison. NPML estimates a discrete
+#' fixed-support maximum-likelihood distribution. NPAG adds explicit support
+#' expansion and pruning around the same constrained mixture likelihood.
 #' Serial FO, FOCE, FOCEI, Laplace, and ITS fits expose a persistent C++
 #' population objective through thin callbacks to R's L-BFGS-B/BFGS optimizer;
 #' PSOCK fits retain R coordination across their persistent C++ workers.
@@ -1982,32 +2698,152 @@
 #' @param audit_artifacts Generate an opt-in NONMEM-style audit bundle containing
 #'   a listing, control-stream representation, estimates, covariance/correlation
 #'   matrices when available, subject ETAs, and saved output tables.
-#' @param ... Method-specific controls. For `method = "GQ"`, use `gq_grid`
+#' @param ... Method-specific controls. ITS accepts `its_mstep_maxit`,
+#'   `its_mstep_schedule` (`"fixed"` or `"progressive"`), and
+#'   `its_acceleration` (`"none"` or safeguarded `"aitken"`).
+#'   `its_eta_schedule` optionally relaxes early conditional-mode tolerances
+#'   by `its_eta_tolerance_multiplier` before returning to the requested
+#'   tolerance for the final distribution. The
+#'   compatibility policy fixes the established single-step schedule without
+#'   acceleration or tolerance relaxation; the optimized policy progressively
+#'   increases M-step effort and accepts an accelerated point only when its
+#'   auxiliary objective improves.
+#'   IMP accepts `imp_algorithm` (`"mcem"`, the default, or the explicitly
+#'   labelled `"marginal_ml"` finite-common-random-number alternative),
+#'   `n_imp`, `seed`, and `imp_mstep_maxit`. Optimized MCEM additionally
+#'   supports progressive sample/M-step schedules, antithetic or randomized
+#'   quasi-Monte-Carlo (`"rqmc"`) draws, optional ESS-directed per-subject allocation,
+#'   Gaussian, Student-t, or defensive-mixture proposals, guarded proposal-mode
+#'   reuse, and stationarity stopping through the `imp_*` controls.
+#'   `imp_proposal_curvature = "auto"` uses a Fisher/Gauss--Newton proposal
+#'   curvature in optimized mode and the exact conditional Hessian in
+#'   compatibility mode; exact importance weights preserve the MCEM target.
+#'   The optimized path can also keep the weighted M-step and closed-form
+#'   SIGMA/OMEGA updates in its persistent native context. The
+#'   compatibility policy retains fixed sample/M-step counts, random Gaussian
+#'   proposals, exact proposal curvature, fresh conditional modes, and its
+#'   established optimizer trajectory.
+#'   For `method = "GQ"`, use `gq_grid`
 #'   (`"auto"`, `"tensor"`, or `"smolyak"`), `gq_order` (tensor nodes per ETA
 #'   dimension, default 5), `gq_level` (Smolyak level, default 3),
 #'   `gq_adaptive` (default `TRUE`), `gq_max_points` (retained-grid allocation
-#'   guard, default 100000), and `gq_gradient` (`"score"` or the slower
-#'   `"finite_grid"`). Automatic selection uses tensor quadrature through
-#'   three ETAs and Smolyak quadrature for higher-dimensional models.
+#'   guard, default 100000), and `gq_gradient` (`"score"`, `"finite_grid"`, or
+#'   `"auto"`). A score-based search is always finished against the complete
+#'   finite adaptive-grid objective before the estimate is returned. Automatic
+#'   selection uses tensor quadrature through three ETAs and Smolyak quadrature
+#'   for higher-dimensional models.
 #'   For `method = "HMC"` or `"NUTS"`, controls include `n_warmup` (500),
 #'   `n_sample` (1000 per chain), `n_thin` (1), `n_chains` (4), `seed`,
 #'   optional `step_size`, `target_acceptance` (0.8), `adapt_mass` (`TRUE`),
-#'   `n_leapfrog` (10; HMC), `max_depth` (10; NUTS), and
-#'   `divergence_threshold` (1000). `sampler_backend = "native"` keeps complete
+#'   `n_leapfrog` (10; HMC), `max_depth` (10; NUTS), `nuts_variant`
+#'   (`"auto"`, `"classic_slice"`, or `"multinomial"`), and
+#'   `divergence_threshold` (1000). `hmc_metric` selects `"unit"`,
+#'   `"diagonal"`, `"dense"`, or `"block"` Euclidean geometry; optional
+#'   one-based `hmc_metric_blocks` override the default population/subject
+#'   partition. Warmup uses initial fast, expanding slow metric windows, and
+#'   terminal fast phases controlled by `adapt_initial_buffer` (75),
+#'   `adapt_first_window` (25), and `adapt_terminal_buffer` (50).
+#'   `initialization` selects the model point, bounded random jitter, or the
+#'   robust automatic sequence, with `initialization_radius` and
+#'   `initialization_attempts` controlling the latter. Per-chain energy and
+#'   E-BFMI are retained alongside divergences and tree-depth diagnostics.
+#'   `sampler_backend = "native"` keeps complete
 #'   trajectories in C++; `"r"` retains the slower reference implementation
-#'   for numerical comparison. For `method = "NPML"` or `"NPAG"`, use
+#'   for numerical comparison. `geometry = "auto"` uses a whitened,
+#'   MU-aware non-centred ETA parameterization in `liber_optimized` mode when
+#'   every ETA is MU-referenced and the base positive-definite OMEGA layout is
+#'   available. `"centered"` forces the exact established target;
+#'   `"mu_noncentered"` requires eligibility rather than silently falling back.
+#'   The likelihood tape is unchanged and the Cholesky transform, Jacobian, and
+#'   population/random-effect chain rules are differentiated exactly in both
+#'   sampler backends. For `method = "NPML"` or `"NPAG"`, use
 #'   `np_supports` for an optional fixed starting matrix, `np_points` (25),
-#'   `np_max_support` (100), `np_min_weight` (1e-5), `np_weight_maxit` (1000),
+#'   `np_max_support` (100), method-specific `np_min_weight` (0 for fixed-support
+#'   NPML and 1e-5 for adaptive-grid NPAG), `np_weight_maxit` (1000),
 #'   `np_cycles` (3), and, for NPAG, `np_grid_step` (1), `np_grid_decay`
 #'   (0.5), and `np_max_candidates` (500). `np_estimate_population` controls
-#'   alternating THETA/SIGMA updates. Ordinary covariance is not regular for a
+#'   alternating THETA/SIGMA updates. NPML ignores a nonzero pruning threshold
+#'   with a warning; select NPAG when support adaptation is intended.
+#'   Ordinary covariance is not regular for a
 #'   discrete support distribution; use bootstrap uncertainty for NPML/NPAG.
-#'   IMP, SAEM, and BAYES accept `mu_specialization = TRUE` (the default).
+#'   For `method = "SAEM"`, stochastic approximation is applied to a retained
+#'   complete-data auxiliary-function state rather than to a single sampled
+#'   conditional objective. `saem_kernel = "auto"` retains random-walk
+#'   Metropolis in compatibility mode and selects a robust Laplace/Student-t
+#'   independence Metropolis kernel (f-SAEM) for eligible ETA
+#'   models in `liber_optimized` mode. `fsaem_refresh` (25) controls how often
+#'   conditional modes and curvature are refreshed; `fsaem_eta_maxit` (50)
+#'   bounds that calculation. `fsaem_distribution` selects `"student_t"`
+#'   (the optimized automatic default) or `"gaussian"`; `fsaem_df` (7)
+#'   controls Student-t tail weight. The optimized kernel also refreshes when the
+#'   population point moves materially (`fsaem_parameter_refresh`, 0.15) or
+#'   independence acceptance is poor (`fsaem_low_acceptance`, 0.1), and mixes
+#'   in an exact OMEGA-scaled random-walk rescue kernel with probability
+#'   `fsaem_rescue_probability` (0.1). Set that probability to zero and both
+#'   adaptive thresholds conservatively to recover the fixed-refresh form.
+#'   `saem_kernel = "random_walk"` is the explicit established-kernel comparator.
+#'   SAEM always reports parameter/objective stationarity over
+#'   `stationarity_window` (20) iterations using `stationarity_tolerance`
+#'   (1e-3). `auto_stop` defaults to `FALSE` in compatibility mode and `TRUE`
+#'   in optimized mode;
+#'   `auto_stop_consecutive` and `auto_stop_min_iterations` make confirmation
+#'   explicit. `saem_support_max` and `saem_support_prune` optionally bound the
+#'   retained optimized Q support; both default to zero so the exact
+#'   Robbins--Monro mixture is retained. Optimized execution can thin expensive
+#'   numerical M-steps with `saem_mstep_interval_burn` and
+#'   `saem_mstep_interval` while continuing every stochastic-approximation
+#'   update, and uses post-burn Polyak parameter averaging by default;
+#'   `saem_parameter_averaging = "none"` disables it and
+#'   `saem_average_start` sets its first iteration. Compatibility mode forces
+#'   both M-step intervals to one and disables averaging. `n_replicates` runs
+#'   independently seeded sequential replicates, separated by
+#'   `replicate_seed_stride`. Replicates are ranked with a common-seed marginal
+#'   importance-sampling score rather than their incompatible stochastic
+#'   auxiliary-function histories; `replicate_score_samples` (200),
+#'   `replicate_score_seed`, and `replicate_score_eta_maxit` control that score.
+#'   Use separate queued jobs for replicate-level parallelism.
+#'   For `method = "BAYES"`, `outer_kernel = "auto"` retains the isotropic
+#'   population random walk in compatibility mode and learns a full proposal
+#'   covariance during burn-in in `liber_optimized` mode. The adaptive controls
+#'   are `adaptive_start` (50), `adaptive_interval` (10), and optional
+#'   `adaptive_target` (0.44 in one dimension, 0.234 otherwise). Explicit
+#'   `outer_kernel = "isotropic"` preserves the former proposal. Eligible
+#'   serial compatibility models run that established isotropic/random-walk
+#'   algorithm in the persistent C++ coordinator while retaining R's RNG and
+#'   proposal order; compatibility MU interweaving, subject parallelism, and
+#'   iteration printing retain the R coordinator. Eligible optimized serial
+#'   models additionally keep adaptation and Laplace/Student-t ETA sweeps in
+#'   C++, including MU, IOV/general random effects, and guarded ODE retaping;
+#'   `options(LibeRation.bayes_native_coordinator = FALSE)` retains the
+#'   reference R coordinator for comparison. `eta_kernel = "auto"` uses the
+#'   inexpensive OMEGA-scaled random walk for one ETA and a Laplace-Gaussian
+#'   ETA proposal for multivariate ETAs; `"student_t"` plus `bayes_eta_df`
+#'   provides a robust heavy-tailed alternative. Optimized BAYES also supports
+#'   `delayed_rejection_scale` (0.25), independent `n_chains`, rank-normalized
+#'   split R-hat, bulk/tail ESS, and mean Monte Carlo SE.
+#'   `bayes_gibbs_omega = TRUE` uses exact inverse-gamma Gibbs updates when a
+#'   free diagonal OMEGA has an explicit conjugate prior and the random-effect
+#'   layout is eligible; all other OMEGA structures retain Metropolis updates.
+#'   Subject-parallel models retain the exact R coordinator with PSOCK workers;
+#'   independent chains can be distributed as separate queue jobs.
+#' @param numerical_mode Numerical policy. `"nonmem_compatibility"` is the
+#'   conservative default and uses the defining NONMEM method semantics and
+#'   matched control interpretation for methods with a NONMEM counterpart;
+#'   implementation-specific random streams and undocumented internal stopping
+#'   details are not claimed to be bitwise identical. `"liber_optimized"`
+#'   preserves each estimator's defining target and update equations while
+#'   enabling validated LibeR-specific proposals, caching, batching, and solver
+#'   accelerations. Explicit estimator controls take precedence in either mode.
+#'   IMP, GQ, SAEM, and BAYES accept `mu_specialization = TRUE` (the default).
 #'   IMP then re-centres cached conditional-mode starts as MU values change.
 #'   When an affine MU design varies between subjects (for example an estimated
 #'   covariate coefficient), IMP uses the score path as a warm start and
 #'   automatically refines it against the exact finite common-random-number
 #'   objective.
+#'   GQ reuses the same execution-local conditional-state cache. In optimized
+#'   mode, compiled FOCE/FOCEI/Laplace objectives also preserve `MU + ETA`
+#'   while warm-starting modes as MU values move; compatibility mode is
+#'   unchanged.
 #'   Eligible affine MU models use a generalized least-squares fixed-effect
 #'   M-step in SAEM, with vectorized OMEGA-keyed normal-equation caching and a
 #'   closed-form-only fast path, and a Metropolis-corrected Gaussian MU block
@@ -2028,9 +2864,11 @@ nm_est <- function(model, data,
                    covariance_tolerance = 1e-8,
                    covariance_samples = NULL, covariance_seed = NULL,
                    initial_eta = NULL, collect_output = TRUE,
-                   allow_fd_gradient = FALSE, audit_artifacts = FALSE, ...) {
-  estimation_started <- proc.time()[["elapsed"]]
+                   allow_fd_gradient = FALSE, audit_artifacts = FALSE,
+                   numerical_mode = NULL, ...) {
+  request_started <- proc.time()[["elapsed"]]
   method <- match.arg(method)
+  model <- .nm_model_with_numerical_mode(model, numerical_mode)
   optimizer_backend <- match.arg(optimizer_backend)
   covariance_type <- match.arg(covariance_type)
   if (length(allow_fd_gradient) != 1L || is.na(allow_fd_gradient)) {
@@ -2071,6 +2909,7 @@ nm_est <- function(model, data,
       "likelihood estimation, or ITS/GQ/IMP/SAEM/BAYES/HMC/NUTS/NPML/NPAG."
     )
   }
+  context_started <- proc.time()[["elapsed"]]
   context <- .nm_estimation_context(model, data, n_cores = n_cores, method = method)
   if (!is.null(initial_eta)) {
     initial_eta <- as.matrix(initial_eta)
@@ -2085,6 +2924,10 @@ nm_est <- function(model, data,
             add = TRUE)
   }
   map <- .nm_outer_map(context$model)
+  context_initialization_seconds <- unname(
+    proc.time()[["elapsed"]] - context_started
+  )
+  estimation_started <- proc.time()[["elapsed"]]
   fit <- if (method == "FO") {
     .nm_est_fo(
       context, map, maxit, tolerance, trace, print_every, optimizer_backend
@@ -2101,9 +2944,22 @@ nm_est <- function(model, data,
       optimizer_backend = optimizer_backend, initial_eta = initial_eta, ...
     )
   }
-  model_fit_seconds <- unname(proc.time()[["elapsed"]] - estimation_started)
+  model_fit_wall_seconds <- unname(
+    proc.time()[["elapsed"]] - estimation_started
+  )
+  objective_initialization_seconds <- as.numeric(
+    fit$diagnostics$optimizer$objective_initialization_seconds %||% 0
+  )
+  model_fit_seconds <- max(
+    0, model_fit_wall_seconds - objective_initialization_seconds
+  )
+  initialization_seconds <- context_initialization_seconds +
+    objective_initialization_seconds
   fit$diagnostics$eta_maxit <- as.integer(eta_maxit)
   fit$diagnostics$tolerance <- as.numeric(tolerance)
+  fit$diagnostics$numerical_mode <- model_definition$NUMERICAL_MODE %||%
+    "nonmem_compatibility"
+  fit$numerical_mode <- fit$diagnostics$numerical_mode
   covariance_seconds <- NA_real_
   if (covariance) {
     covariance_started <- proc.time()[["elapsed"]]
@@ -2123,9 +2979,13 @@ nm_est <- function(model, data,
     covariance_seconds <- unname(proc.time()[["elapsed"]] - covariance_started)
   }
   fit$timing <- list(
+    initialization_seconds = as.numeric(initialization_seconds),
     model_fit_seconds = as.numeric(model_fit_seconds),
     covariance_seconds = as.numeric(covariance_seconds),
-    total_seconds = as.numeric(proc.time()[["elapsed"]] - estimation_started)
+    total_seconds = as.numeric(model_fit_seconds +
+      if (is.finite(covariance_seconds)) covariance_seconds else 0),
+    wall_total_seconds = as.numeric(proc.time()[["elapsed"]] - request_started),
+    context_cache_hit = isTRUE(context$cache_hit)
   )
   if (isTRUE(collect_output) && length(fit$model$OUTPUT %||% character())) {
     fit$output <- .nm_fit_selected_outputs(fit)
@@ -2135,7 +2995,8 @@ nm_est <- function(model, data,
       fit, fit$model, fit$data, "estimate",
       details = list(
         method = method, maxit = maxit, eta_maxit = eta_maxit,
-        covariance = covariance, n_cores = n_cores
+        covariance = covariance, n_cores = n_cores,
+        numerical_mode = fit$numerical_mode
       )
     )
   }
@@ -2145,7 +3006,11 @@ nm_est <- function(model, data,
 #' @export
 print.nm_fit <- function(x, ...) {
   cat("LibeRation fit\n")
-  cat("  method:", .nm_fit_method_label(x), " objective:", format(x$objective),
-      " convergence:", x$convergence, "\n")
+  cat(
+    "  method:", .nm_fit_method_label(x),
+    " reported objective:", format(x$objective),
+    if (isFALSE(x$objective_comparable)) " (not likelihood-comparable)" else "",
+    " convergence:", x$convergence, "\n"
+  )
   invisible(x)
 }

@@ -70,12 +70,27 @@ test_that("MU covariates are required to be subject-level", {
       covariates = "WT"
     )
   )
+  covariate_context <- .nm_estimation_context(
+    covariate_model, subject_level, method = "IMP"
+  )
   specialization <- .nm_mu_specialization(
-    .nm_estimation_context(covariate_model, subject_level, method = "IMP"),
-    .nm_outer_map(covariate_model)
+    covariate_context, .nm_outer_map(covariate_model)
   )
   expect_true(specialization$covariate_design)
-  expect_true(.nm_mu_diagnostic(specialization)$covariate_design)
+  diagnostic <- .nm_mu_diagnostic(specialization)
+  expect_true(diagnostic$covariate_design)
+  expect_identical(diagnostic$evaluation_backend, "cpp-native-row-view")
+  expect_equal(
+    drop(.nm_mu_values(specialization, covariate_model$THETAS$Value)),
+    log(covariate_model$THETAS$Value[[1L]]) +
+      covariate_model$THETAS$Value[[3L]] * log(c(60, 70, 80) / 70),
+    tolerance = 1e-12
+  )
+  expect_true(all(vapply(
+    covariate_context$subjects,
+    function(evaluator) evaluator$data_projections == 0L,
+    logical(1)
+  )))
 })
 
 test_that("MU specialization classifies, re-centres, and improves the Gaussian block", {
@@ -154,7 +169,7 @@ test_that("MU specialization classifies, re-centres, and improves the Gaussian b
   expect_match(aliased_specialization$reason, "rank deficient")
 })
 
-test_that("SAEM, IMP, and BAYES report their MU-aware estimator paths", {
+test_that("SAEM, IMP, GQ, and BAYES report their MU-aware estimator paths", {
   fixture <- estimation_fixture(fix = FALSE)
   theta <- fixture$model$THETAS
   theta$FIX <- c(FALSE, TRUE)
@@ -197,6 +212,24 @@ test_that("SAEM, IMP, and BAYES report their MU-aware estimator paths", {
   expect_true(imp$diagnostics$mu_specialization$active)
   expect_gt(imp$diagnostics$mu_specialization$recentered_mode_starts, 0L)
 
+  gq <- nm_est(
+    model, fixture$data, method = "GQ", maxit = 2L,
+    eta_maxit = 15L, gq_order = 3L
+  )
+  expect_true(gq$diagnostics$mu_specialization$active)
+  expect_gt(gq$diagnostics$mu_specialization$recentered_mode_starts, 0L)
+  expect_gt(gq$diagnostics$conditional_state_cache$hits, 0L)
+
+  focei <- nm_est(
+    model, fixture$data, method = "FOCEI", maxit = 2L,
+    eta_maxit = 15L, numerical_mode = "liber_optimized",
+    optimizer_backend = "native", collect_output = FALSE
+  )
+  population_work <-
+    focei$diagnostics$optimizer$population_objective
+  expect_true(population_work$mu_mode_recentering)
+  expect_gt(population_work$mu_mode_recenters, 0L)
+
   bayes <- nm_est(
     model, fixture$data, method = "BAYES",
     n_burn = 2L, n_sample = 3L, n_thin = 1L, seed = 33L
@@ -204,6 +237,13 @@ test_that("SAEM, IMP, and BAYES report their MU-aware estimator paths", {
   expect_true(bayes$diagnostics$mu_specialization$active)
   expect_equal(bayes$diagnostics$mu_specialization$attempted_blocks, 5L)
   expect_true(is.finite(bayes$diagnostics$mu_acceptance))
+  expect_false(
+    bayes$diagnostics$eta_sampler$native_coordinator$used
+  )
+  expect_match(
+    bayes$diagnostics$eta_sampler$native_coordinator$fallback_reason,
+    "MU interweaving"
+  )
 })
 
 test_that("model comparisons retain evidence and explicit nested inference", {
@@ -235,6 +275,22 @@ test_that("model comparisons retain evidence and explicit nested inference", {
   modified$fits[[2L]]$objective <- modified$fits[[2L]]$objective + 1
   saveRDS(modified, path)
   expect_error(nm_compare_read(path), "integrity")
+
+  posterior <- fit
+  posterior$method <- "BAYES"
+  posterior$objective_type <-
+    "negative_twice_log_posterior_at_posterior_mean_sampling_coordinates"
+  posterior$objective_comparable <- FALSE
+  posterior_candidate <- posterior
+  posterior_candidate$objective <- posterior$objective - 10
+  posterior_comparison <- nm_compare(
+    posterior, posterior_candidate,
+    labels = c("posterior A", "posterior B")
+  )
+  expect_false(any(posterior_comparison$metrics$comparable))
+  expect_true(all(is.na(posterior_comparison$metrics$AIC)))
+  expect_true(all(is.na(posterior_comparison$metrics$BIC)))
+  expect_true(all(is.na(posterior_comparison$pairwise$delta_objective)))
 })
 
 test_that("bootstrap supports strata, clusters, and parametric simulation", {
@@ -281,6 +337,12 @@ test_that("Bayesian pointwise likelihood, WAIC, and PPC use posterior draws", {
   fit <- nm_est(
     fixture$model, fixture$data, method = "BAYES",
     n_burn = 2, n_sample = 5, n_thin = 1, seed = 2
+  )
+  expect_false(fit$objective_comparable)
+  expect_match(fit$objective_type, "log_posterior")
+  expect_match(
+    paste(capture.output(print(fit)), collapse = " "),
+    "reported objective:.*not likelihood-comparable"
   )
   log_lik <- nm_log_lik(fit, draws = 3, eta_samples = 3, seed = 4)
   expect_equal(dim(log_lik), c(3L, 3L))

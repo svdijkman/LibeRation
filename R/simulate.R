@@ -16,6 +16,9 @@
 #' @param seed Optional reproducible RNG seed.
 #' @param n_cores Number of parallel simulation workers. Replicates are
 #'   distributed across persistent PSOCK workers on Windows, Linux, and macOS.
+#' @param numerical_mode Numerical policy. `"nonmem_compatibility"` is the
+#'   conservative default used for paired NONMEM work; `"liber_optimized"`
+#'   enables validated LibeR-specific solver accelerations.
 #' @param audit_artifacts Generate an opt-in NONMEM-style audit bundle containing
 #'   a listing, control-stream representation, and simulation table. The bundle
 #'   is materialized when the result is saved as a workspace run.
@@ -41,8 +44,12 @@ nm_simulate <- function(model, data, theta = NULL, eta = NULL, sigma = NULL,
                         omega = NULL, nsim = 1L, random_effects = FALSE,
                         residual = FALSE, sample_mixture = FALSE,
                         censor = FALSE, seed = NULL, n_cores = 1L,
-                        audit_artifacts = FALSE) {
-  engine <- if (inherits(model, "NMEngine")) model else nm_compile(model)
+                        audit_artifacts = FALSE,
+                        numerical_mode = NULL) {
+  selected_model <- .nm_model_with_numerical_mode(model, numerical_mode)
+  engine <- if (inherits(selected_model, "NMEngine")) {
+    selected_model
+  } else nm_compile(selected_model)
   if (isTRUE(residual) && identical(engine$model$LIK_CONFIG$error, "likelihood")) {
     if (is.null(engine$model$OUTCOMES) && is.null(engine$model$KALMAN_CONFIG)) {
       .nm_stop(
@@ -73,6 +80,30 @@ nm_simulate <- function(model, data, theta = NULL, eta = NULL, sigma = NULL,
     set.seed(seed)
   }
   normalized <- .nm_engine_data(engine$model, data)
+  optimized <- .nm_liber_optimized(engine$model)
+  n_subjects <- length(unique(normalized$.ID_INDEX))
+  n_eta <- .nm_eta_columns(engine$model, normalized)
+  random_effect_root <- NULL
+  # Exact invariant reuse is policy-neutral: it changes neither the generated
+  # normal stream nor the matrix multiplication used to construct ETAs.
+  if (isTRUE(random_effects) && n_eta) {
+    random_effect_root <- t(chol(.nm_effect_covariance(
+      engine$model, normalized, omega
+    )))
+  }
+  cached_population_prediction <- NULL
+  needs_population_prediction <- "PRED" %in%
+    (engine$model$OUTPUT %||% character()) &&
+    (isTRUE(random_effects) || (!is.null(eta) && length(eta) && any(eta != 0)))
+  # The population prediction is deterministic for a fixed model, data and
+  # parameter vector.  Reusing it avoids one complete propagation per
+  # replicate without changing arithmetic in the prediction itself.
+  if (needs_population_prediction &&
+      (!isTRUE(sample_mixture) || is.null(engine$model$LIK_CONFIG$mixtures))) {
+    cached_population_prediction <- engine$simulate(
+      normalized, theta = theta, eta = matrix(0, n_subjects, n_eta), sigma = sigma
+    )$IPRED
+  }
   if (isTRUE(random_effects) && !is.null(eta)) {
     .nm_stop("Supply `eta` or set `random_effects = TRUE`, not both.")
   }
@@ -95,8 +126,7 @@ nm_simulate <- function(model, data, theta = NULL, eta = NULL, sigma = NULL,
           specification, dataset, theta = theta, eta = eta, sigma = sigma,
           omega = omega, nsim = 1L, random_effects = random_effects,
           residual = residual, sample_mixture = sample_mixture,
-          censor = censor, seed = seeds[[index]], n_cores = 1L,
-          audit_artifacts = FALSE
+          censor = censor, seed = seeds[[index]], n_cores = 1L
         )
         result$SIM <- index
         result
@@ -114,6 +144,8 @@ nm_simulate <- function(model, data, theta = NULL, eta = NULL, sigma = NULL,
     attr(output, "solver") <- solver
     attr(output, "state_names") <- state_names
     attr(output, "parallel_cores") <- n_cores
+    attr(output, "numerical_mode") <- engine$model$NUMERICAL_MODE %||%
+      "nonmem_compatibility"
     if (audit_artifacts) {
       output <- .nm_attach_audit_artifacts(
         output, engine$model, normalized, "simulate",
@@ -122,21 +154,35 @@ nm_simulate <- function(model, data, theta = NULL, eta = NULL, sigma = NULL,
     }
     return(output)
   }
-  simulate_one <- function(index) {
-    replicate_data <- normalized
-    n_subjects <- length(unique(replicate_data$.ID_INDEX))
-    n_eta <- .nm_eta_columns(engine$model, replicate_data)
+  eta_draw_pool <- if (optimized && isTRUE(random_effects) && n_eta &&
+      !isTRUE(residual) && !isTRUE(sample_mixture)) {
+    .liberation_eta_draw_pool(
+      random_effect_root, as.integer(n_subjects), as.integer(nsim)
+    )
+  } else NULL
+  draw_eta <- function(replicate_data, index = NULL) {
     eta_value <- eta
     if (isTRUE(random_effects)) {
-      covariance <- .nm_effect_covariance(engine$model, replicate_data, omega)
       if (n_eta) {
-        root <- t(chol(covariance))
-        eta_value <- matrix(stats::rnorm(n_subjects * n_eta), n_subjects, n_eta) %*%
-          t(root)
+        if (!is.null(eta_draw_pool) && !is.null(index)) {
+          rows <- (as.integer(index) - 1L) * n_subjects + seq_len(n_subjects)
+          eta_value <- eta_draw_pool[rows, , drop = FALSE]
+        } else {
+          root <- random_effect_root %||%
+            t(chol(.nm_effect_covariance(engine$model, replicate_data, omega)))
+          eta_value <- matrix(
+            stats::rnorm(n_subjects * n_eta), n_subjects, n_eta
+          ) %*% t(root)
+        }
       } else eta_value <- matrix(numeric(), n_subjects, 0L)
     }
     if (is.null(eta_value)) eta_value <- matrix(0, n_subjects, n_eta)
-    eta_value <- as.matrix(eta_value)
+    as.matrix(eta_value)
+  }
+  simulate_one <- function(index, eta_override = NULL,
+                           prediction_override = NULL) {
+    replicate_data <- normalized
+    eta_value <- eta_override %||% draw_eta(replicate_data, index)
     mixture <- engine$model$LIK_CONFIG$mixtures
     if (!is.null(mixture) && isTRUE(sample_mixture)) {
       assignment <- sample.int(
@@ -145,12 +191,14 @@ nm_simulate <- function(model, data, theta = NULL, eta = NULL, sigma = NULL,
       )
       replicate_data$MIXNUM <- assignment[replicate_data$.ID_INDEX]
     }
-    result <- engine$simulate(
+    result <- prediction_override %||% engine$simulate(
       replicate_data, theta = theta, eta = eta_value, sigma = sigma
     )
     if ("PRED" %in% (engine$model$OUTPUT %||% character())) {
       if (!length(eta_value) || all(eta_value == 0)) {
         result$PRED <- result$IPRED
+      } else if (!is.null(cached_population_prediction)) {
+        result$PRED <- cached_population_prediction
       } else {
         population_eta <- matrix(0, n_subjects, n_eta)
         result$PRED <- engine$simulate(
@@ -189,13 +237,39 @@ nm_simulate <- function(model, data, theta = NULL, eta = NULL, sigma = NULL,
     if (nsim > 1L) result$SIM <- index
     result
   }
-  pieces <- lapply(seq_len(nsim), simulate_one)
+  deterministic_reuse <- nsim > 1L && !isTRUE(random_effects) &&
+    !isTRUE(sample_mixture) && (!isTRUE(residual) || optimized)
+  optimized_random_effect_batch <- optimized && nsim > 1L &&
+    isTRUE(random_effects) && !isTRUE(residual) && !isTRUE(sample_mixture)
+  can_batch_prediction <- deterministic_reuse || optimized_random_effect_batch
+  pieces <- if (can_batch_prediction) {
+    eta_values <- lapply(
+      seq_len(nsim), function(index) draw_eta(normalized, index)
+    )
+    predictions <- if (!isTRUE(random_effects)) {
+      # With fixed ETAs and no residual/mixture sampling every replicate has
+      # the same deterministic prediction.  Compute it once and only attach
+      # the replicate identifier in R.
+      rep(list(engine$simulate(
+        normalized, theta = theta, eta = eta_values[[1L]], sigma = sigma
+      )), nsim)
+    } else {
+      engine$simulate_batch(
+        normalized, theta = theta, eta = eta_values, sigma = sigma
+      )
+    }
+    Map(simulate_one, seq_len(nsim), eta_values, predictions)
+  } else {
+    lapply(seq_len(nsim), simulate_one)
+  }
   solver <- attr(pieces[[1L]], "solver")
   state_names <- attr(pieces[[1L]], "state_names")
   output <- do.call(rbind, pieces)
   rownames(output) <- NULL
   attr(output, "solver") <- solver
   attr(output, "state_names") <- state_names
+  attr(output, "numerical_mode") <- engine$model$NUMERICAL_MODE %||%
+    "nonmem_compatibility"
   if (audit_artifacts) {
     output <- .nm_attach_audit_artifacts(
       output, engine$model, normalized, "simulate",
@@ -214,18 +288,25 @@ nm_simulate <- function(model, data, theta = NULL, eta = NULL, sigma = NULL,
   standardized <- numeric(nrow(result))
   groups <- interaction(result$.ID_INDEX, dvid, drop = TRUE, lex.order = TRUE)
   rho <- .nm_ar1_rho(model, sigma = sigma)
-  for (group in levels(groups)) {
-    rows <- which(observed & groups == group)
-    if (!length(rows)) next
-    innovation <- stats::rnorm(length(rows))
-    standardized[rows[[1L]]] <- innovation[[1L]]
-    if (model$LIK_CONFIG$sigma_corr == "ar1" && length(rows) > 1L) {
-      for (position in seq.int(2L, length(rows))) {
-        standardized[rows[[position]]] <- rho * standardized[rows[[position - 1L]]] +
-          sqrt(1 - rho^2) * innovation[[position]]
+  if (.nm_liber_optimized(model)) {
+    standardized <- .liberation_ar1_standardize(
+      observed, as.integer(groups), rho,
+      identical(model$LIK_CONFIG$sigma_corr, "ar1")
+    )
+  } else {
+    for (group in levels(groups)) {
+      rows <- which(observed & groups == group)
+      if (!length(rows)) next
+      innovation <- stats::rnorm(length(rows))
+      standardized[rows[[1L]]] <- innovation[[1L]]
+      if (model$LIK_CONFIG$sigma_corr == "ar1" && length(rows) > 1L) {
+        for (position in seq.int(2L, length(rows))) {
+          standardized[rows[[position]]] <- rho * standardized[rows[[position - 1L]]] +
+            sqrt(1 - rho^2) * innovation[[position]]
+        }
+      } else if (length(rows) > 1L) {
+        standardized[rows[-1L]] <- innovation[-1L]
       }
-    } else if (length(rows) > 1L) {
-      standardized[rows[-1L]] <- innovation[-1L]
     }
   }
   if (length(model$LIK_CONFIG$residual_groups)) {
@@ -290,4 +371,120 @@ nm_prediction_derivatives <- function(model, data, theta = NULL, eta = NULL,
   engine$prediction_derivatives(
     data, theta = theta, eta = eta, sigma = sigma, jacobian = jacobian
   )
+}
+
+#' Create a reusable exact-prediction differentiation plan
+#'
+#' Records the model prediction once and retains both the compiled model and
+#' CppAD tape for repeated evaluations with new parameters or event values.
+#' Event-data columns are supplied as CppAD dynamic parameters. If a change
+#' alters a recorded branch, pivot, or adaptive solver path, evaluation
+#' automatically records a replacement tape before returning a result.
+#'
+#' @param model An `nm_model` or compiled `NMEngine`.
+#' @param data NONMEM-style event data defining the initial tape path.
+#' @param theta Population fixed effects.
+#' @param eta Subject ETA matrix.
+#' @param sigma Residual parameters.
+#' @return A mutable `nm_prediction_plan` backed by a persistent C++ tape.
+#' @export
+nm_prediction_plan <- function(model, data, theta = NULL, eta = NULL,
+                               sigma = NULL) {
+  engine <- if (inherits(model, "NMEngine")) model else nm_compile(model)
+  theta <- as.numeric(theta %||% engine$model$THETAS$Value)
+  sigma <- as.numeric(sigma %||% engine$model$SIGMAS$Value)
+  normalized <- .nm_engine_data(engine$model, data)
+  n_subjects <- length(unique(normalized$.ID_INDEX))
+  n_eta <- .nm_eta_columns(engine$model, normalized)
+  if (is.null(eta)) eta <- matrix(0, n_subjects, n_eta)
+  eta <- as.matrix(eta)
+  if (!identical(dim(eta), c(n_subjects, n_eta))) {
+    .nm_stop("`eta` must have dimensions ", n_subjects, " x ", n_eta, ".")
+  }
+  plan <- new.env(parent = emptyenv())
+  plan$engine <- engine
+  plan$tape <- engine$prediction_tape(
+    normalized, theta = theta, eta = eta, sigma = sigma
+  )
+  plan$data <- normalized
+  plan$theta <- theta
+  plan$eta <- eta
+  plan$sigma <- sigma
+  plan$evaluations <- 0L
+  plan$dynamic_updates <- 0L
+  plan$retapes <- 0L
+  class(plan) <- "nm_prediction_plan"
+  plan
+}
+
+#' Evaluate a reusable exact-prediction differentiation plan
+#'
+#' @param plan An [nm_prediction_plan()] object.
+#' @param data Optional replacement NONMEM-style event data.
+#' @param theta Optional population fixed effects.
+#' @param eta Optional subject ETA matrix.
+#' @param sigma Optional residual parameters.
+#' @param jacobian Whether to return the full prediction Jacobian.
+#' @return Prediction values, optional Jacobian, domain names, and plan
+#'   telemetry.
+#' @export
+nm_prediction_plan_evaluate <- function(plan, data = NULL, theta = NULL,
+                                        eta = NULL, sigma = NULL,
+                                        jacobian = TRUE) {
+  if (!inherits(plan, "nm_prediction_plan") || !is.environment(plan) ||
+      is.null(plan$engine) || is.null(plan$tape)) {
+    .nm_stop("`plan` must be an nm_prediction_plan.")
+  }
+  normalized <- if (is.null(data)) plan$data else
+    .nm_engine_data(plan$engine$model, data)
+  n_subjects <- length(unique(normalized$.ID_INDEX))
+  n_eta <- .nm_eta_columns(plan$engine$model, normalized)
+  theta <- as.numeric(theta %||% plan$theta)
+  sigma <- as.numeric(sigma %||% plan$sigma)
+  if (is.null(eta)) {
+    eta <- if (identical(dim(plan$eta), c(n_subjects, n_eta))) {
+      plan$eta
+    } else matrix(0, n_subjects, n_eta)
+  }
+  eta <- as.matrix(eta)
+  if (!identical(dim(eta), c(n_subjects, n_eta))) {
+    .nm_stop("`eta` must have dimensions ", n_subjects, " x ", n_eta, ".")
+  }
+  point <- c(theta, as.vector(t(eta)), sigma)
+  evaluate <- function() {
+    .liberation_prediction_tape_new_dynamic(plan$tape$pointer, normalized)
+    plan$dynamic_updates <- plan$dynamic_updates + 1L
+    .liberation_prediction_tape_eval(
+      plan$tape$pointer, point, isTRUE(jacobian)
+    )
+  }
+  result <- tryCatch(evaluate(), error = identity)
+  if (inherits(result, "error")) {
+    plan$tape <- plan$engine$prediction_tape(
+      normalized, theta = theta, eta = eta, sigma = sigma
+    )
+    plan$retapes <- plan$retapes + 1L
+    result <- .liberation_prediction_tape_eval(
+      plan$tape$pointer, point, isTRUE(jacobian)
+    )
+  }
+  plan$data <- normalized
+  plan$theta <- theta
+  plan$eta <- eta
+  plan$sigma <- sigma
+  plan$evaluations <- plan$evaluations + 1L
+  names(result$value) <- paste0("ROW_", seq_along(result$value))
+  result$domain <- plan$tape$domain
+  result$propagation_kernel <- plan$tape$propagation_kernel
+  result$operation_count <- plan$tape$operation_count
+  result$variable_count <- plan$tape$variable_count
+  result$derivative_strategy <- attr(result, "derivative_strategy")
+  result$jacobian_nonzeros <- attr(result, "jacobian_nonzeros")
+  result$plan_telemetry <- list(
+    evaluations = plan$evaluations,
+    dynamic_updates = plan$dynamic_updates,
+    retapes = plan$retapes,
+    persistent = TRUE
+  )
+  result
 }

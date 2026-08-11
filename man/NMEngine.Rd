@@ -28,6 +28,7 @@ replaced or cleared from R.}
   \itemize{
     \item \href{#method-NMEngine-initialize}{\code{NMEngine$new()}}
     \item \href{#method-NMEngine-simulate}{\code{NMEngine$simulate()}}
+    \item \href{#method-NMEngine-simulate_batch}{\code{NMEngine$simulate_batch()}}
     \item \href{#method-NMEngine-hmm_filter}{\code{NMEngine$hmm_filter()}}
     \item \href{#method-NMEngine-kalman_filter}{\code{NMEngine$kalman_filter()}}
     \item \href{#method-NMEngine-prediction_tape}{\code{NMEngine$prediction_tape()}}
@@ -87,6 +88,37 @@ replaced or cleared from R.}
   }
   \subsection{Returns}{
     Event data augmented with `IPRED` and compartment amounts.
+  }
+}
+
+\if{html}{\out{<hr>}}
+\if{html}{\out{<a id="method-NMEngine-simulate_batch"></a>}}
+\if{latex}{\out{\hypertarget{method-NMEngine-simulate_batch}{}}}
+\subsection{\code{NMEngine$simulate_batch()}}{
+  Run several deterministic event-table predictions in one C++ call.
+  \subsection{Usage}{
+    \if{html}{\out{<div class="r">}}
+    \preformatted{NMEngine$simulate_batch(
+  data,
+  theta = self$model$THETAS$Value,
+  eta,
+  sigma = self$model$SIGMAS$Value
+)}
+    \if{html}{\out{</div>}}
+  }
+  \subsection{Arguments}{
+    \if{html}{\out{<div class="arguments">}}
+    \describe{
+      \item{\code{data}}{NONMEM-style event data shared by all replicates.}
+      \item{\code{theta}}{Population fixed effects.}
+      \item{\code{eta}}{A list of subject-by-effect random-effect matrices.}
+      \item{\code{sigma}}{Residual parameters.}
+    }
+    \if{html}{\out{</div>}}
+  }
+  \subsection{Returns}{
+    A list of event data frames with the same augmented columns as
+  the single-replicate simulation method.
   }
 }
 

@@ -9,7 +9,8 @@ nm_est_sequence(
   data,
   stages,
   on_error = c("stop", "return"),
-  audit_artifacts = FALSE
+  audit_artifacts = FALSE,
+  numerical_mode = NULL
 )
 }
 \arguments{
@@ -24,6 +25,9 @@ successful fit with failure metadata.}
 
 \item{audit_artifacts}{Generate one audit bundle for the final sequence
 result. Intermediate stages remain represented in the final fit metadata.}
+
+\item{numerical_mode}{Numerical policy inherited by stages that do not set
+one explicitly. See [nm_est()].}
 }
 \value{
 The final `nm_fit`, augmented with sequential-estimation metadata.

@@ -13,20 +13,29 @@ nm_dde_config(
 )
 }
 \arguments{
-\item{history}{Scalar or state-length numeric history before the first event.}
+\item{history}{Scalar or numeric history before the first event. For a DDE
+this has one value per differential state; for an ADVAN17 DDAE it may
+additionally contain one value per algebraic variable.}
 
-\item{step}{Fixed method-of-steps integration step.}
+\item{step}{Maximum accepted step for ADVAN16/17; fixed method-of-steps
+integration step for other DDE models.}
 
-\item{interpolation}{Currently `"linear"`.}
+\item{interpolation}{History interpolation for the general DDE path,
+currently `"linear"`. ADVAN16/17 use their collocation polynomial.}
 
-\item{max_steps}{Maximum fixed steps per propagation call.}
+\item{max_steps}{Maximum attempted steps per propagation call.}
 
 \item{minimum_delay}{Optional declared lower bound for every delay. When
 supplied it must be at least `step`.}
 }
 \description{
-Delayed states are referenced in `$DES` as `LAG(A(i), delay_name)`, where
-`delay_name` is a positive assignment produced by `$PK/$PRED`. The compiled
-method-of-steps solver uses fixed steps and differentiable linear history
-interpolation.
+Delayed states are referenced in `$DES` as `LAG(A(i), delay_name)`. In an
+ADVAN17 DAE, a declared algebraic variable may also be delayed directly,
+for example `LAG(FREE, delay_name)`. `delay_name` is a positive assignment
+produced by `$PK/$PRED`. ADVAN16 and ADVAN17 automatically use LibeR's
+clean-room three-stage Radau IIA order-five collocation path with adaptive
+steps and differentiable collocation-polynomial history. ADVAN18 and general
+DDE models retain the fixed-step RK4 method-of-steps path with differentiable
+linear interpolation. Delayed algebraic values are recovered by the
+differentiable implicit solve at the requested historical state.
 }

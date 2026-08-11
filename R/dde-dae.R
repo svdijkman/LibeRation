@@ -1,14 +1,23 @@
 #' Configure a delay differential-equation model
 #'
-#' Delayed states are referenced in `$DES` as `LAG(A(i), delay_name)`, where
-#' `delay_name` is a positive assignment produced by `$PK/$PRED`. The compiled
-#' method-of-steps solver uses fixed steps and differentiable linear history
-#' interpolation.
+#' Delayed states are referenced in `$DES` as `LAG(A(i), delay_name)`. In an
+#' ADVAN17 DAE, a declared algebraic variable may also be delayed directly,
+#' for example `LAG(FREE, delay_name)`. `delay_name` is a positive assignment
+#' produced by `$PK/$PRED`. ADVAN16 and ADVAN17 automatically use LibeR's
+#' clean-room three-stage Radau IIA order-five collocation path with adaptive
+#' steps and differentiable collocation-polynomial history. ADVAN18 and general
+#' DDE models retain the fixed-step RK4 method-of-steps path with differentiable
+#' linear interpolation. Delayed algebraic values are recovered by the
+#' differentiable implicit solve at the requested historical state.
 #'
-#' @param history Scalar or state-length numeric history before the first event.
-#' @param step Fixed method-of-steps integration step.
-#' @param interpolation Currently `"linear"`.
-#' @param max_steps Maximum fixed steps per propagation call.
+#' @param history Scalar or numeric history before the first event. For a DDE
+#'   this has one value per differential state; for an ADVAN17 DDAE it may
+#'   additionally contain one value per algebraic variable.
+#' @param step Maximum accepted step for ADVAN16/17; fixed method-of-steps
+#'   integration step for other DDE models.
+#' @param interpolation History interpolation for the general DDE path,
+#'   currently `"linear"`. ADVAN16/17 use their collocation polynomial.
+#' @param max_steps Maximum attempted steps per propagation call.
 #' @param minimum_delay Optional declared lower bound for every delay. When
 #'   supplied it must be at least `step`.
 #' @export
@@ -47,21 +56,50 @@ nm_dde_config <- function(history = 0, step = 0.05,
   do.call(nm_dde_config, config)
 }
 
-.nm_rewrite_dde_lags <- function(code, config) {
+.nm_rewrite_dde_lags <- function(code, config,
+                                 algebraic_variables = character()) {
   if (is.null(config)) return(list(code = code, lags = list()))
   pattern <- "LAG\\s*\\(\\s*A\\s*\\(\\s*([0-9]+)\\s*\\)\\s*,\\s*([A-Za-z][A-Za-z0-9_]*)\\s*\\)"
   found <- regmatches(code, gregexpr(pattern, code, perl = TRUE))[[1L]]
   found <- unique(found[nzchar(found)])
-  if (!length(found)) {
-    .nm_stop("DDE_CONFIG requires at least one `LAG(A(i), delay_name)` expression in DES.")
-  }
-  lags <- vector("list", length(found))
-  for (index in seq_along(found)) {
-    state <- as.integer(sub(pattern, "\\1", found[[index]], perl = TRUE))
-    delay <- sub(pattern, "\\2", found[[index]], perl = TRUE)
+  lags <- list()
+  for (expression in found) {
+    state <- as.integer(sub(pattern, "\\1", expression, perl = TRUE))
+    delay <- sub(pattern, "\\2", expression, perl = TRUE)
+    index <- length(lags) + 1L
     input <- paste0("DDE_LAG_", index)
-    code <- gsub(found[[index]], input, code, fixed = TRUE)
-    lags[[index]] <- list(input = input, state = state, delay = delay)
+    code <- gsub(expression, input, code, fixed = TRUE)
+    lags[[index]] <- list(
+      input = input, state = state, delay = delay,
+      source = paste0("A(", state, ")"), algebraic = NULL
+    )
+  }
+  for (variable in algebraic_variables) {
+    algebraic_pattern <- paste0(
+      "LAG\\s*\\(\\s*", variable,
+      "\\s*,\\s*([A-Za-z][A-Za-z0-9_]*)\\s*\\)"
+    )
+    algebraic_found <- regmatches(
+      code, gregexpr(algebraic_pattern, code, perl = TRUE)
+    )[[1L]]
+    algebraic_found <- unique(algebraic_found[nzchar(algebraic_found)])
+    for (expression in algebraic_found) {
+      delay <- sub(algebraic_pattern, "\\1", expression, perl = TRUE)
+      index <- length(lags) + 1L
+      input <- paste0("DDE_LAG_", index)
+      code <- gsub(expression, input, code, fixed = TRUE)
+      lags[[index]] <- list(
+        input = input, state = NA_integer_, delay = delay,
+        source = variable, algebraic = variable
+      )
+    }
+  }
+  if (!length(lags)) {
+    .nm_stop(
+      "DDE_CONFIG requires at least one `LAG(A(i), delay_name)` expression",
+      if (length(algebraic_variables)) " or a LAG() of a DAE algebraic variable" else "",
+      " in DES."
+    )
   }
   list(code = code, lags = lags)
 }
@@ -156,4 +194,3 @@ print.nm_dae_config <- function(x, ...) {
       " Newton iterations:", x$maxit, "\n")
   invisible(x)
 }
-

@@ -15,8 +15,11 @@ retains an unchecked parent item with completed sub-items checked.
   share a prediction tape across subjects with the same event topology.~~
 - [x] ~~Permit one prediction tape to serve heterogeneous covariate values
   without changing active derivatives or event ordering.~~
-- [ ] Extend dynamic-parameter sharing to observation/objective tapes where it
-  gives a measured benefit.
+- [x] ~~Extend dynamic-parameter sharing to analytical Gaussian FO
+  observation/objective tapes where it gives a measured benefit.~~
+- [ ] Extend objective-tape sharing beyond the eligible FO surface only where
+  complex likelihood, mixture, IOV, hierarchical random-effect, ODE and
+  residual-correlation equivalence can be proved.
 - [ ] Investigate dynamic dose magnitudes and event times only for layouts whose
   event order, dose compartment, ADDL expansion, and infusion topology are
   provably unchanged; retain separate tapes when topology differs.
@@ -79,9 +82,19 @@ retains an unchecked parent item with completed sub-items checked.
 - [x] ~~Use closed-form OMEGA sufficient-statistic updates.~~
 - [x] ~~Use closed-form SIGMA updates for additive, proportional, and
   exponential residual models.~~
+- [x] ~~Evaluate fixed-ETA objective values and exact gradients in one native
+  sweep for R-optimizer SAEM paths.~~
+- [x] ~~Retain fixed ETAs, tape references, and reusable point buffers in a
+  persistent native context across R-optimizer callbacks.~~
+- [x] ~~Run eligible OMEGA and SIGMA sufficient-statistic kernels in C++ under
+  both numerical policies.~~
+- [x] ~~Provide an explicit native fixed-ETA M-step with value-only trials,
+  objective scaling, safeguarded interpolation and damped L-BFGS memory for
+  eligible LibeR-optimized analytical models, with fallback telemetry.~~
 - [x] ~~Retain objective, acceptance, and proposal-scale traces.~~
-- [ ] Move the remaining outer stochastic-approximation loop into C++ if a
-  benchmark shows a material benefit.
+- [ ] Move the remaining outer stochastic-approximation loop into C++ only if
+  native profiling demonstrates a material benefit without changing the
+  seeded stochastic trajectory.
 - [ ] Cache/reuse OMEGA factorization within stable parameter states.
 - [ ] Add formal stochastic-approximation stationarity and convergence
   diagnostics.
@@ -106,22 +119,28 @@ retains an unchecked parent item with completed sub-items checked.
   codes.~~
 - [x] ~~Retain tape sharing, validity, record, and retape telemetry.~~
 - [x] ~~Support periodic scaled-gradient output in worker logs.~~
-- [x] ~~Report model-fit, covariance, and total estimation time.~~
+- [x] ~~Report initialization, post-initialization model-fit, covariance,
+  core fit-plus-covariance, and literal wall time.~~
 - [x] ~~Retain objective, projected-gradient, and step-size traces for the native
   optimizer.~~
 - [ ] Capture comparable per-iteration step, scaled/unscaled gradient, and
   parameter-scaling telemetry from the default R optimizer path.
-- [ ] Split timing into prediction, ETA optimization, curvature, population
-  gradient, and covariance phases.
+- [ ] Retain deeper prediction/ETA/curvature/gradient phase timing as an
+  opt-in developer profiler rather than expanding routine user reports.
 
 ## 9. Validation and benchmark matrix - partial
 
-- [x] ~~Implement the ADVAN1-14 model surface and GUI templates.~~
-- [x] ~~Compare predictions with NONMEM 7.3 for ADVAN1-13, including
+- [x] ~~Implement the complete NONMEM 7.6 ADVAN1-18 model surface and GUI
+  templates.~~
+- [x] ~~Compare predictions with NONMEM for ADVAN1-15 and ADVAN18, including
   ADVAN5/7 general linear, ADVAN8/9 stiff, ADVAN9 equilibrium DAE, and
-  ADVAN10 Michaelis--Menten fixtures.~~
-- [ ] Compare ADVAN14 predictions with NONMEM >=7.4; the installed NONMEM 7.3
-  reports ADVAN14 as an unknown subroutine.
+  ADVAN10 Michaelis--Menten, ADVAN15 equilibrium DAE, and ADVAN18 DDE
+  fixtures.~~
+- [x] ~~Validate ADVAN16/17 delay dynamics against equivalent NONMEM ADVAN18
+  controls and the ADVAN17 equilibrium component against ADVAN15.~~
+- [ ] Repeat the direct ADVAN16/17 controls on a NONMEM installation licensed
+  for the optional RADAR5NM extension. The current NONMEM 7.6 runtime rejects
+  both before evaluation, and this remains `not-run` rather than a pass.
 - [x] ~~Validate bolus, infusion, steady state, and modelled infusion
   rate/duration.~~
 - [x] ~~Measure paired core and end-to-end NONMEM/LibeRation times.~~
@@ -237,3 +256,31 @@ when NONMEM control-stream compatibility requires it.
   bootstrap or sandwich samples.
 - [ ] Add BCa bootstrap intervals, explicit occasion-level resampling, and
   durable checkpoint/resume for large distributed uncertainty campaigns.
+
+## 14. Cross-estimator execution architecture - implemented / qualifying
+
+- [x] ~~Fuse eligible analytical ADVAN1--4/11/12 prediction and likelihood
+  value sweeps inside the persistent stochastic context, with tape-equivalence
+  guards and automatic generic fallback.~~
+- [x] ~~Add a bounded native shared-memory subject executor for fused value-only
+  work. Keep R-owned data, mutable CppAD tapes, RNG and retaping on the owning R
+  thread and retain PSOCK for all ineligible cases.~~
+- [x] ~~Use a common conditional-state cache contract for parameter anchors,
+  modes and objective states. IMP and adaptive GQ share one implementation;
+  deterministic conditional methods and SAEM/BAYES use their persistent C++
+  objects because their curvature and seeded-transition semantics differ.~~
+- [x] ~~Extend MU-preserving conditional-mode starts to adaptive GQ and the
+  optimized compiled FOCE/FOCEI/Laplace objective, with recenter telemetry and
+  no change to the NONMEM-compatible path.~~
+- [x] ~~Add a unified stochastic diagnostic contract: SAEM
+  phase/stationarity evidence and independent replicate summaries, plus
+  rank-normalized split R-hat, bulk/tail ESS and MCSE for MCMC methods. Keep
+  SAEM automatic stopping opt-in.~~
+- [x] ~~Add guarded MU/non-centred geometry for joint HMC/NUTS. Eligible
+  optimized models now whiten ETA through OMEGA's Cholesky factor with exact
+  Jacobian and chain-rule gradients; incomplete MU, IOV and general-effect
+  layouts retain explicit centred fallback.~~
+- [x] ~~Run equivalence, fallback and complete standard matched-control
+  benchmark gates before enabling any new fast path by default. The 10 August
+  2026 results are retained under
+  `validation/benchmark/results/20260810-full-cross-method-final/`.~~

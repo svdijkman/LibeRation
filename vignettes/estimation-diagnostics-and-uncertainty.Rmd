@@ -35,6 +35,18 @@ knitr::opts_chunk$set(collapse = TRUE, comment = "#>")
 Method-specific controls are supplied through `...`. Use a fixed seed for
 stochastic methods and record all controls in reports or manifests.
 
+In `liber_optimized` mode, multivariate-ETA SAEM defaults to f-SAEM. Its
+subject-specific Gaussian proposals reuse the optimized Laplace conditional
+mode machinery: warm starts, scale-aware convergence, bounded restarts,
+curvature only at the accepted mode, and bounded positive-definite repair.
+The implementation also mixes occasional exact random-walk rescue steps and
+can refresh early after population-parameter movement or poor independence
+acceptance. This improves robustness to tails and secondary modes without
+changing the conditional target. Eligible ordinary analytical BAYES models
+run their complete adaptive Metropolis coordinator in C++; MU, IOV, ODE,
+parallel, and iteration-printing cases automatically retain the general R
+coordinator.
+
 ### MU-aware stochastic estimation
 
 When a model declares `MU_n` references, `IMP`, `SAEM`, and `BAYES` use the
@@ -85,11 +97,14 @@ grid's order or level.
 HMC and NUTS jointly sample population parameters and individual ETAs on an
 unconstrained scale. Finite THETA bounds and positive variance parameters are
 included through differentiable transforms and their Jacobians. Both methods
-adapt step size and a diagonal mass matrix during warmup. NUTS additionally
-adapts trajectory length. Retained diagnostics include acceptance, divergent
-transitions, NUTS tree-depth saturation, split R-hat, ESS, and per-chain
-traces. Increase `target_acceptance` when divergences remain after checking
-the model and parameterisation.
+adapt step size and a selectable unit, diagonal, dense, or block metric during
+warmup. The three-stage schedule uses an initial fast phase, expanding slow
+metric windows, and a terminal fast phase. NUTS additionally adapts trajectory
+length. Retained diagnostics include acceptance, divergent transitions,
+energy and E-BFMI, NUTS tree-depth saturation, split R-hat, ESS, and per-chain
+traces. E-BFMI below 0.3 is flagged as a possible energy-exploration problem.
+Increase `target_acceptance` when divergences remain after checking the model
+and parameterisation.
 
 NPML optimises mixture weights on a fixed ETA support, initialized from
 conditional modes unless `np_supports` is supplied. NPAG repeatedly expands,
@@ -316,6 +331,9 @@ Likelihood-ratio inference is produced only when the user explicitly declares
 that the candidate nests the reference and the likelihood, data, method, and
 degrees of freedom are compatible. Variance-component and mixture additions
 carry a boundary warning.
+Posterior scores reported by BAYES, HMC, and NUTS are retained for provenance
+but are not treated as likelihood OFVs: their AIC, BIC, and likelihood-ratio
+deltas are `NA`. Use WAIC or PSIS-LOO for predictive Bayesian comparison.
 
 ## Stepwise covariate modelling
 

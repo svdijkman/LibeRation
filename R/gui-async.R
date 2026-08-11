@@ -207,10 +207,16 @@
     n_parameters <- sum(!fit$model$THETAS$FIX) +
       sum(!fit$model$SIGMAS$FIX) + sum(!fit$model$OMEGAS$FIX)
     n_observations <- nrow(gof)
+    likelihood_objective <- .nm_fit_likelihood_comparable(fit)
     c(
-      OFV = fit$objective,
-      AIC = fit$objective + 2 * n_parameters,
-      BIC = fit$objective + log(max(1, n_observations)) * n_parameters,
+      `Reported objective` = fit$objective,
+      OFV = if (likelihood_objective) fit$objective else NA_real_,
+      AIC = if (likelihood_objective) {
+        fit$objective + 2 * n_parameters
+      } else NA_real_,
+      BIC = if (likelihood_objective) {
+        fit$objective + log(max(1, n_observations)) * n_parameters
+      } else NA_real_,
       `Free parameters` = n_parameters,
       Observations = n_observations,
       `Population RMSE` = sqrt(mean(

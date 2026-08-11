@@ -1,3 +1,48 @@
+.nm_numerical_mode <- function(value = NULL) {
+  value <- tolower(trimws(as.character(
+    value %||% "nonmem_compatibility"
+  )[[1L]]))
+  aliases <- c(
+    nonmem = "nonmem_compatibility",
+    compatibility = "nonmem_compatibility",
+    nonmem_compatible = "nonmem_compatibility",
+    nonmem_compatibility = "nonmem_compatibility",
+    liber = "liber_optimized",
+    optimised = "liber_optimized",
+    optimized = "liber_optimized",
+    liber_optimised = "liber_optimized",
+    liber_optimized = "liber_optimized"
+  )
+  resolved <- unname(aliases[value])
+  if (!length(resolved) || is.na(resolved[[1L]])) {
+    .nm_stop(
+      "`numerical_mode` must be 'nonmem_compatibility' or 'liber_optimized'."
+    )
+  }
+  resolved[[1L]]
+}
+
+.nm_model_with_numerical_mode <- function(model, numerical_mode = NULL) {
+  definition <- if (inherits(model, "NMEngine")) model$model else model
+  if (!inherits(definition, "nm_model")) {
+    .nm_stop("`model` must be an nm_model or NMEngine.")
+  }
+  resolved <- .nm_numerical_mode(
+    numerical_mode %||% definition$NUMERICAL_MODE %||% "nonmem_compatibility"
+  )
+  current <- .nm_numerical_mode(
+    definition$NUMERICAL_MODE %||% "nonmem_compatibility"
+  )
+  if (inherits(model, "NMEngine") && identical(resolved, current)) return(model)
+  definition$NUMERICAL_MODE <- resolved
+  definition
+}
+
+.nm_liber_optimized <- function(model_or_context) {
+  model <- model_or_context$model %||% model_or_context
+  identical(model$NUMERICAL_MODE %||% "nonmem_compatibility", "liber_optimized")
+}
+
 .liber_redact_text <- function(value) {
   value <- enc2utf8(as.character(value))
   value <- gsub(

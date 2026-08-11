@@ -15,12 +15,22 @@
         all(fit$model$OMEGAS$FIX)) 0L else sum(!fit$model$OMEGAS$FIX)
 }
 
+.nm_fit_likelihood_comparable <- function(fit) {
+  if (!is.null(fit$objective_comparable)) {
+    return(isTRUE(fit$objective_comparable))
+  }
+  !fit$method %in% c("BAYES", "HMC", "NUTS") &&
+    is.finite(as.numeric(fit$objective)[[1L]])
+}
+
 .nm_fit_fingerprint <- function(fit) {
   digest::digest(list(
     contract = nm_model_to_contract(fit$model),
     data = as.data.frame(fit$data),
     method = fit$method,
     objective = fit$objective,
+    objective_type = fit$objective_type %||% "legacy_estimator_objective",
+    objective_comparable = .nm_fit_likelihood_comparable(fit),
     parameters = .nm_fit_native_parameters(fit)
   ), algo = "sha256", serialize = TRUE)
 }
@@ -30,7 +40,10 @@
 #' The returned object retains model, dataset, fit and diagnostic fingerprints
 #' together with all comparison rules. It is therefore safe to save as a
 #' durable analysis artefact, feed into automated covariate workflows, or
-#' summarize for the local Help AI.
+#' summarize for the local Help AI. AIC, BIC, and likelihood-ratio deltas are
+#' calculated only for fits whose reported objective is a comparable likelihood.
+#' BAYES, HMC, and NUTS posterior scores remain visible but are explicitly
+#' excluded; use [nm_waic()] or [nm_psis_loo()] for those fits.
 #'
 #' @param ... Fitted `nm_fit` objects, or one list of fits.
 #' @param labels Optional unique display labels.
@@ -91,6 +104,12 @@ nm_compare <- function(..., labels = NULL, reference = 1L, nested = FALSE,
   n_parameters <- vapply(fits, .nm_fit_free_parameters, integer(1))
   n_observations <- vapply(fits, .nm_fit_observations, integer(1))
   objective <- vapply(fits, function(fit) as.numeric(fit$objective), numeric(1))
+  objective_type <- vapply(fits, function(fit) {
+    as.character(fit$objective_type %||% "legacy_estimator_objective")[[1L]]
+  }, character(1))
+  likelihood_objective <- vapply(
+    fits, .nm_fit_likelihood_comparable, logical(1)
+  )
   methods <- vapply(fits, `[[`, character(1), "method")
   subjects <- vapply(
     fits, function(fit) length(unique(fit$data$ID)), integer(1)
@@ -99,12 +118,15 @@ nm_compare <- function(..., labels = NULL, reference = 1L, nested = FALSE,
     fits, function(fit) fit$model$LIK_CONFIG$error %||% "unknown", character(1)
   )
   comparable <- same_data & methods == methods[[reference]] &
-    error_models == error_models[[reference]]
+    error_models == error_models[[reference]] & likelihood_objective &
+    likelihood_objective[[reference]]
   bic_sample_size <- if (bic_n == "subjects") subjects else n_observations
   metrics <- data.frame(
     model = labels,
     method = methods,
     objective = objective,
+    objective_type = objective_type,
+    likelihood_objective = likelihood_objective,
     parameters = n_parameters,
     observations = n_observations,
     subjects = subjects,
@@ -119,20 +141,24 @@ nm_compare <- function(..., labels = NULL, reference = 1L, nested = FALSE,
   )
   metrics$delta_AIC <- metrics$delta_BIC <-
     metrics$AIC_weight <- metrics$BIC_weight <- NA_real_
-  metrics$delta_AIC[comparable] <- metrics$AIC[comparable] -
-    min(metrics$AIC[comparable])
-  metrics$delta_BIC[comparable] <- metrics$BIC[comparable] -
-    min(metrics$BIC[comparable])
-  metrics$AIC_weight[comparable] <- exp(
-    -0.5 * metrics$delta_AIC[comparable]
-  )
-  metrics$AIC_weight[comparable] <- metrics$AIC_weight[comparable] /
-    sum(metrics$AIC_weight[comparable])
-  metrics$BIC_weight[comparable] <- exp(
-    -0.5 * metrics$delta_BIC[comparable]
-  )
-  metrics$BIC_weight[comparable] <- metrics$BIC_weight[comparable] /
-    sum(metrics$BIC_weight[comparable])
+  metrics$AIC[!likelihood_objective] <- NA_real_
+  metrics$BIC[!likelihood_objective] <- NA_real_
+  if (any(comparable)) {
+    metrics$delta_AIC[comparable] <- metrics$AIC[comparable] -
+      min(metrics$AIC[comparable])
+    metrics$delta_BIC[comparable] <- metrics$BIC[comparable] -
+      min(metrics$BIC[comparable])
+    metrics$AIC_weight[comparable] <- exp(
+      -0.5 * metrics$delta_AIC[comparable]
+    )
+    metrics$AIC_weight[comparable] <- metrics$AIC_weight[comparable] /
+      sum(metrics$AIC_weight[comparable])
+    metrics$BIC_weight[comparable] <- exp(
+      -0.5 * metrics$delta_BIC[comparable]
+    )
+    metrics$BIC_weight[comparable] <- metrics$BIC_weight[comparable] /
+      sum(metrics$BIC_weight[comparable])
+  }
   ref <- fits[[reference]]
   free_names <- function(fit) {
     names(.nm_fit_native_parameters(fit))[c(
@@ -142,7 +168,9 @@ nm_compare <- function(..., labels = NULL, reference = 1L, nested = FALSE,
   pairwise <- do.call(rbind, lapply(setdiff(seq_along(fits), reference), function(index) {
     compatible <- comparable[[index]]
     df <- n_parameters[[index]] - n_parameters[[reference]]
-    delta <- objective[[reference]] - objective[[index]]
+    delta <- if (compatible) {
+      objective[[reference]] - objective[[index]]
+    } else NA_real_
     valid_lrt <- compatible && nested[[index]] && df > 0L
     p <- if (valid_lrt) stats::pchisq(max(delta, 0), df = df, lower.tail = FALSE) else NA_real_
     added <- setdiff(free_names(fits[[index]]), free_names(ref))

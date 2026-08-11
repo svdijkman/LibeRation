@@ -26,6 +26,7 @@ test_that("individual fitting estimates static and custom-prior ETA states", {
   )
   expect_s3_class(updated, "nm_individual_fit")
   expect_true(isTRUE(updated$diagnostics$custom_prior))
+  expect_equal(updated$diagnostics$backend, "cpp")
 })
 
 test_that("individual fitting expands all-IOV states without resetting amounts", {

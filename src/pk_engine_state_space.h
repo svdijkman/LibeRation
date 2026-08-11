@@ -30,7 +30,7 @@ double hmm_log_sum_exp(const std::vector<double>& values) {
 }
 
 Rcpp::List hmm_filter(
-    const ModelEngine& engine, const Rcpp::DataFrame& data,
+    const ModelEngine& engine, const EventDataView& data,
     const Rcpp::NumericVector& theta, const Rcpp::NumericMatrix& eta,
     const Rcpp::NumericVector& sigma) {
   if (!engine.hmm_enabled) {
@@ -40,10 +40,10 @@ Rcpp::List hmm_filter(
     throw std::invalid_argument(
       "Hidden-state filtering for an additional finite-mixture layer is not yet available.");
   }
-  Rcpp::IntegerVector subjects = data[".ID_INDEX"];
-  Rcpp::IntegerVector evid = data["EVID"];
-  Rcpp::IntegerVector mdv = data["MDV"];
-  Rcpp::NumericVector dv = data["DV"];
+  auto subjects = data.values(".ID_INDEX");
+  auto evid = data.values("EVID");
+  auto mdv = data.values("MDV");
+  auto dv = data.values("DV");
   int n_subjects = 0;
   for (int value : subjects) n_subjects = std::max(n_subjects, value);
   if (eta.nrow() != n_subjects) {
@@ -319,7 +319,7 @@ struct KalmanDecodeSequence {
 };
 
 Rcpp::List kalman_filter(
-    const ModelEngine& engine, const Rcpp::DataFrame& data,
+    const ModelEngine& engine, const EventDataView& data,
     const Rcpp::NumericVector& theta, const Rcpp::NumericMatrix& eta,
     const Rcpp::NumericVector& sigma) {
   if (!engine.kalman_enabled) {
@@ -329,10 +329,10 @@ Rcpp::List kalman_filter(
     throw std::invalid_argument(
       "Kalman decoding for an additional finite-mixture layer is not yet available.");
   }
-  Rcpp::IntegerVector subjects = data[".ID_INDEX"];
-  Rcpp::IntegerVector evid = data["EVID"];
-  Rcpp::IntegerVector mdv = data["MDV"];
-  Rcpp::NumericVector dv = data["DV"];
+  auto subjects = data.values(".ID_INDEX");
+  auto evid = data.values("EVID");
+  auto mdv = data.values("MDV");
+  auto dv = data.values("DV");
   int n_subjects = 0;
   for (int value : subjects) n_subjects = std::max(n_subjects, value);
   if (eta.nrow() != n_subjects) {
@@ -589,7 +589,7 @@ Matrix covariance_sampling_root(const Matrix& covariance,
 }
 
 Rcpp::NumericVector kalman_simulate(
-    const ModelEngine& engine, const Rcpp::DataFrame& data,
+    const ModelEngine& engine, const EventDataView& data,
     const Rcpp::NumericVector& theta, const Rcpp::NumericMatrix& eta,
     const Rcpp::NumericVector& sigma,
     const Rcpp::NumericMatrix& process_normals,
@@ -605,11 +605,12 @@ Rcpp::NumericVector kalman_simulate(
       observation_normals.size() != rows) {
     throw std::invalid_argument("Kalman simulation normal draws have inconsistent dimensions.");
   }
-  Rcpp::IntegerVector subjects = data[".ID_INDEX"];
-  Rcpp::IntegerVector evid = data["EVID"];
-  Rcpp::IntegerVector mdv = data["MDV"];
-  Rcpp::NumericVector input_dv = data["DV"];
-  Rcpp::NumericVector simulated = Rcpp::clone(input_dv);
+  auto subjects = data.values(".ID_INDEX");
+  auto evid = data.values("EVID");
+  auto mdv = data.values("MDV");
+  auto input_dv = data.values("DV");
+  Rcpp::NumericVector simulated(rows);
+  for (int row = 0; row < rows; ++row) simulated[row] = input_dv[row];
   int n_subjects = 0;
   for (int value : subjects) n_subjects = std::max(n_subjects, value);
   if (eta.nrow() != n_subjects) {
@@ -875,4 +876,27 @@ Rcpp::List population_objective_state_api(
 Rcpp::List population_objective_telemetry_api(SEXP pointer) {
   Rcpp::XPtr<PopulationObjective> objective(pointer);
   return objective->telemetry();
+}
+
+Rcpp::List population_objective_native_optimizer_api(
+    SEXP pointer, const Rcpp::NumericVector& start,
+    const Rcpp::NumericVector& lower, const Rcpp::NumericVector& upper,
+    int maxit, double tolerance, int trace) {
+  Rcpp::XPtr<PopulationObjective> objective(pointer);
+  PopulationObjective* native_objective = objective.get();
+  NativeValueFunction value = [native_objective](const Eigen::VectorXd& point) {
+    return native_objective->value_native(
+      std::vector<double>(point.data(), point.data() + point.size()));
+  };
+  NativeGradientFunction gradient = [native_objective](const Eigen::VectorXd& point) {
+    const std::vector<double> native = native_objective->gradient_native(
+      std::vector<double>(point.data(), point.data() + point.size()));
+    Eigen::VectorXd result(static_cast<Eigen::Index>(native.size()));
+    for (std::size_t index = 0; index < native.size(); ++index) {
+      result[static_cast<Eigen::Index>(index)] = native[index];
+    }
+    return result;
+  };
+  return native_optimizer_core(
+    value, gradient, start, lower, upper, maxit, tolerance, trace);
 }

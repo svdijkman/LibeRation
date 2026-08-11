@@ -19,6 +19,10 @@ Rcpp::NumericMatrix population_objective_hessian_api(
 Rcpp::List population_objective_state_api(
     SEXP pointer, const Rcpp::NumericVector& encoded);
 Rcpp::List population_objective_telemetry_api(SEXP pointer);
+Rcpp::List population_objective_native_optimizer_api(
+    SEXP pointer, const Rcpp::NumericVector& start,
+    const Rcpp::NumericVector& lower, const Rcpp::NumericVector& upper,
+    int maxit, double tolerance, int trace);
 
 }  // namespace liberation
 

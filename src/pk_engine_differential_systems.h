@@ -1,4 +1,11 @@
 struct DdeHistory {
+  struct DenseSegment {
+    double from;
+    double to;
+    Vector before;
+    std::array<Vector, 3> derivative;
+  };
+
   struct Jump {
     double time;
     Vector before;
@@ -9,10 +16,11 @@ struct DdeHistory {
   std::vector<Vector> state;
   std::vector<double> baseline;
   std::vector<Jump> jumps;
+  std::vector<DenseSegment> dense;
 
   void reset(double at, const Vector& value, const std::vector<double>& history) {
     time.assign(1U, at); state.assign(1U, value); baseline = history;
-    jumps.clear();
+    jumps.clear(); dense.clear();
   }
   void append(double at, const Vector& value) {
     if (!time.empty() && std::abs(time.back() - at) <= 1e-12) {
@@ -22,7 +30,7 @@ struct DdeHistory {
         } else {
           Vector before = state.back();
           if (time.size() == 1U && jumps.empty() &&
-              baseline.size() == static_cast<std::size_t>(before.size())) {
+              baseline.size() >= static_cast<std::size_t>(before.size())) {
             for (Eigen::Index index = 0; index < before.size(); ++index) {
               before[index] = baseline[static_cast<std::size_t>(index)];
             }
@@ -33,6 +41,12 @@ struct DdeHistory {
       state.back() = value; return;
     }
     time.push_back(at); state.push_back(value);
+  }
+  void append_radau(double from, double to, const Vector& before,
+                    const std::array<Vector, 3>& derivative,
+                    const Vector& after) {
+    dense.push_back({from, to, before, derivative});
+    append(to, after);
   }
   const Jump* jump_at(double target) const {
     for (auto jump = jumps.rbegin(); jump != jumps.rend(); ++jump) {
@@ -51,6 +65,33 @@ struct DdeHistory {
     if (const Jump* jump = jump_at(target)) {
       return (left_limit ? jump->before : jump->after)[component];
     }
+    // At a shared continuous mesh point prefer the segment ending there.  Its
+    // stiffly accurate endpoint derivative is the DDE left limit; explicit
+    // jumps have already been handled above.
+    for (auto segment = dense.begin(); segment != dense.end(); ++segment) {
+      if (target < segment->from - 1e-12 || target > segment->to + 1e-12) continue;
+      const double width = segment->to - segment->from;
+      if (!(width > 0.0)) continue;
+      const double theta = std::clamp((target - segment->from) / width, 0.0, 1.0);
+      const double root = std::sqrt(6.0);
+      const std::array<double, 3> nodes = {
+        (4.0 - root) / 10.0, (4.0 + root) / 10.0, 1.0
+      };
+      double value = segment->before[component];
+      for (std::size_t stage = 0; stage < 3U; ++stage) {
+        const std::size_t first = (stage + 1U) % 3U;
+        const std::size_t second = (stage + 2U) % 3U;
+        const double denominator =
+          (nodes[stage] - nodes[first]) * (nodes[stage] - nodes[second]);
+        const double q2 = 1.0 / denominator;
+        const double q1 = -(nodes[first] + nodes[second]) / denominator;
+        const double q0 = nodes[first] * nodes[second] / denominator;
+        const double integral = q2 * theta * theta * theta / 3.0 +
+          q1 * theta * theta / 2.0 + q0 * theta;
+        value += width * integral * segment->derivative[stage][component];
+      }
+      return value;
+    }
     if (target >= time.back() - 1e-12) return state.back()[component];
     auto upper = std::upper_bound(time.begin(), time.end(), target);
     const std::size_t right = static_cast<std::size_t>(std::distance(time.begin(), upper));
@@ -65,7 +106,7 @@ struct DdeHistory {
 };
 
 Vector evaluate_derivatives(const ModelEngine& engine,
-                            const Rcpp::DataFrame& data,
+                            const EventDataView& data,
                             int row, int subject, double t,
                             const Vector& state,
                             const Parameters& parameters,
@@ -78,8 +119,9 @@ Vector evaluate_derivatives(const ModelEngine& engine,
     engine, data, row, subject, t, state, parameters, theta, eta, sigma) : Vector();
   std::vector<double> inputs(engine.des->input_names.size(), 0.0);
   for (std::size_t i = 0; i < engine.des->input_names.size(); ++i) {
-    const std::string& name = engine.des->input_names[i];
-    int index = indexed_name(name, "A_");
+    const CompiledInputBinding& binding = engine.des_inputs[i];
+    const std::string& name = binding.name;
+    int index = binding.state;
     if (index >= 0) {
       if (index >= state.size()) throw std::out_of_range("A() index exceeds the ODE state dimension.");
       inputs[i] = state[index];
@@ -89,15 +131,13 @@ Vector evaluate_derivatives(const ModelEngine& engine,
       inputs[i] = t;
       continue;
     }
-    auto lag = std::find(engine.dde_lag_inputs.begin(), engine.dde_lag_inputs.end(), name);
-    if (lag != engine.dde_lag_inputs.end()) {
+    if (binding.lag >= 0) {
       if (lag_values == nullptr) throw std::logic_error("DDE lag history is unavailable.");
-      inputs[i] = (*lag_values)[std::distance(engine.dde_lag_inputs.begin(), lag)];
+      inputs[i] = (*lag_values)[binding.lag];
       continue;
     }
-    auto variable = std::find(engine.dae_variables.begin(), engine.dae_variables.end(), name);
-    if (variable != engine.dae_variables.end()) {
-      inputs[i] = algebraic[std::distance(engine.dae_variables.begin(), variable)];
+    if (binding.algebraic >= 0) {
+      inputs[i] = algebraic[binding.algebraic];
       continue;
     }
     auto parameter = parameters.find(name);
@@ -105,24 +145,24 @@ Vector evaluate_derivatives(const ModelEngine& engine,
       inputs[i] = parameter->second;
       continue;
     }
-    index = indexed_name(name, "THETA_");
+    index = binding.theta;
     if (index >= 0) {
       if (index >= theta.size()) throw std::out_of_range("THETA index exceeds supplied values in DES.");
       inputs[i] = theta[index];
       continue;
     }
-    index = indexed_name(name, "ETA_");
+    index = binding.eta;
     if (index >= 0) {
       inputs[i] = eta(subject, eta_column(engine, data, row, index, eta.ncol()));
       continue;
     }
-    index = indexed_name(name, "SIGMA_");
+    index = binding.sigma;
     if (index >= 0) {
       if (index >= sigma.size()) throw std::out_of_range("SIGMA index exceeds supplied values in DES.");
       inputs[i] = sigma[index];
       continue;
     }
-    if (starts_with(name, "ERR_") || name == "F") {
+    if (binding.zero_error) {
       inputs[i] = 0.0;
       continue;
     }
@@ -278,14 +318,14 @@ int compartment_index(int cmt, int fallback, int n) {
   return index;
 }
 
-double row_optional(const Rcpp::DataFrame& data, const std::string& name,
+double row_optional(const EventDataView& data, const std::string& name,
                     int row, double fallback) {
   if (!data.containsElementNamed(name.c_str())) return fallback;
   double value = data_value(data, name, row);
   return std::isfinite(value) ? value : fallback;
 }
 
-double bioavailability(const Parameters& p, const Rcpp::DataFrame& data,
+double bioavailability(const Parameters& p, const EventDataView& data,
                        int row, int cmt) {
   const std::string name = "F" + std::to_string(cmt);
   double value = get_positive(p, {name.c_str()});
@@ -293,7 +333,7 @@ double bioavailability(const Parameters& p, const Rcpp::DataFrame& data,
   return finite_positive(value) ? value : 1.0;
 }
 
-double event_infusion_rate(const Parameters& p, const Rcpp::DataFrame& data,
+double event_infusion_rate(const Parameters& p, const EventDataView& data,
                            int row, int cmt, double amount, double rate_code) {
   if (rate_code >= 0.0) return rate_code;
   if (rate_code != -1.0 && rate_code != -2.0) {
@@ -310,7 +350,7 @@ double event_infusion_rate(const Parameters& p, const Rcpp::DataFrame& data,
   return rate_code == -1.0 ? value : amount / value;
 }
 
-double observation_scale(const Parameters& p, const Rcpp::DataFrame& data,
+double observation_scale(const Parameters& p, const EventDataView& data,
                          int row, int cmt, const Topology& topology) {
   const std::string name = "S" + std::to_string(cmt);
   double value = get_positive(p, {name.c_str()});
@@ -338,8 +378,206 @@ void remove_finished(std::vector<ActiveInfusion>& active, double time) {
   );
 }
 
+struct RadauDdeStep {
+  Vector after;
+  std::array<Vector, 3> derivative;
+  double error = std::numeric_limits<double>::infinity();
+  bool converged = false;
+};
+
+template <class Rhs>
+RadauDdeStep radau_iia5_dde_step(const Rhs& rhs, const Vector& before,
+                                 double time, double h,
+                                 const OdeControl& control,
+                                 bool ends_at_delayed_jump,
+                                 bool optimized = false) {
+  // Clean-room implementation of the published three-stage, fifth-order
+  // Radau IIA collocation formula.  It deliberately uses the full coupled
+  // Newton matrix rather than any implementation-specific RADAR5 transform.
+  const double root = std::sqrt(6.0);
+  const std::array<double, 3> c = {
+    (4.0 - root) / 10.0, (4.0 + root) / 10.0, 1.0
+  };
+  const double a[3][3] = {
+    {(88.0 - 7.0 * root) / 360.0,
+     (296.0 - 169.0 * root) / 1800.0,
+     (-2.0 + 3.0 * root) / 225.0},
+    {(296.0 + 169.0 * root) / 1800.0,
+     (88.0 + 7.0 * root) / 360.0,
+     (-2.0 - 3.0 * root) / 225.0},
+    {(16.0 - root) / 36.0,
+     (16.0 + root) / 36.0,
+     1.0 / 9.0}
+  };
+  const Eigen::Index n = before.size();
+  const Vector f0 = rhs(time, before, false);
+  std::array<Vector, 3> stage = {
+    before + c[0] * h * f0,
+    before + c[1] * h * f0,
+    before + h * f0
+  };
+  std::array<Vector, 3> derivative = {f0, f0, f0};
+  std::array<Matrix, 3> jacobian;
+  bool jacobian_ready = false;
+  Eigen::FullPivLU<Matrix> optimized_lu;
+  if (optimized) {
+    Matrix step_jacobian(n, n);
+    for (Eigen::Index column = 0; column < n; ++column) {
+      Vector perturbed = before;
+      const double delta = std::sqrt(std::numeric_limits<double>::epsilon()) *
+        std::max(1.0, std::abs(before[column]));
+      perturbed[column] += delta;
+      step_jacobian.col(column) =
+        (rhs(time, perturbed, false) - f0) / delta;
+    }
+    Matrix system = Matrix::Zero(3 * n, 3 * n);
+    for (std::size_t i = 0; i < 3U; ++i) {
+      for (std::size_t j = 0; j < 3U; ++j) {
+        system.block(static_cast<Eigen::Index>(i) * n,
+                     static_cast<Eigen::Index>(j) * n, n, n) =
+          -h * a[i][j] * step_jacobian;
+        if (i == j) {
+          system.block(static_cast<Eigen::Index>(i) * n,
+                       static_cast<Eigen::Index>(j) * n, n, n).diagonal().array() += 1.0;
+        }
+      }
+    }
+    optimized_lu.compute(system);
+    if (!optimized_lu.isInvertible()) return RadauDdeStep();
+  }
+  RadauDdeStep result;
+  for (int iteration = 0; iteration < 12; ++iteration) {
+    Vector residual(3 * n);
+    for (std::size_t j = 0; j < 3U; ++j) {
+      const bool left = ends_at_delayed_jump && j == 2U;
+      derivative[j] = rhs(time + c[j] * h, stage[j], left);
+      if (!optimized && !jacobian_ready) {
+        jacobian[j].resize(n, n);
+        for (Eigen::Index column = 0; column < n; ++column) {
+          Vector perturbed = stage[j];
+          const double delta = std::sqrt(std::numeric_limits<double>::epsilon()) *
+            std::max(1.0, std::abs(stage[j][column]));
+          perturbed[column] += delta;
+          jacobian[j].col(column) =
+            (rhs(time + c[j] * h, perturbed, left) - derivative[j]) / delta;
+        }
+      }
+    }
+    jacobian_ready = true;
+    for (std::size_t i = 0; i < 3U; ++i) {
+      Vector local = stage[i] - before;
+      for (std::size_t j = 0; j < 3U; ++j) local -= h * a[i][j] * derivative[j];
+      residual.segment(static_cast<Eigen::Index>(i) * n, n) = local;
+    }
+    double residual_error = 0.0;
+    for (std::size_t i = 0; i < 3U; ++i) {
+      residual_error = std::max(
+        residual_error,
+        scaled_error(
+          residual.segment(static_cast<Eigen::Index>(i) * n, n),
+          before, stage[i], control));
+    }
+    if (residual_error < 0.03) {
+      result.converged = true;
+      break;
+    }
+    Vector update;
+    if (optimized) {
+      update = optimized_lu.solve(-residual);
+    } else {
+      Matrix system = Matrix::Zero(3 * n, 3 * n);
+      for (std::size_t i = 0; i < 3U; ++i) {
+        for (std::size_t j = 0; j < 3U; ++j) {
+          system.block(static_cast<Eigen::Index>(i) * n,
+                       static_cast<Eigen::Index>(j) * n, n, n) =
+            -h * a[i][j] * jacobian[j];
+          if (i == j) {
+            system.block(static_cast<Eigen::Index>(i) * n,
+                         static_cast<Eigen::Index>(j) * n, n, n).diagonal().array() += 1.0;
+          }
+        }
+      }
+      Eigen::FullPivLU<Matrix> lu(system);
+      if (!lu.isInvertible()) return result;
+      update = lu.solve(-residual);
+    }
+    if (!update.allFinite()) return result;
+    double update_error = 0.0;
+    for (std::size_t i = 0; i < 3U; ++i) {
+      const Vector local = update.segment(static_cast<Eigen::Index>(i) * n, n);
+      stage[i] += local;
+      update_error = std::max(update_error,
+        scaled_error(local, before, stage[i], control));
+    }
+    if (update_error < 0.03) {
+      result.converged = true;
+      break;
+    }
+  }
+  if (!result.converged) return result;
+  for (std::size_t j = 0; j < 3U; ++j) {
+    derivative[j] = rhs(
+      time + c[j] * h, stage[j], ends_at_delayed_jump && j == 2U);
+  }
+  result.after = stage[2];  // Radau IIA is stiffly accurate.
+  result.derivative = derivative;
+
+  // An independently constructed order-three embedded formula supplies a
+  // local error estimate.  gamma is deliberately explicit so the estimator
+  // follows from the B(3) moment equations, not from vendor implementation.
+  constexpr double gamma = 0.1;
+  const std::array<double, 3> embedded = {
+    4.0 / 9.0 - root / 36.0 - gamma / 3.0 - root * gamma / 2.0,
+    4.0 / 9.0 + root / 36.0 - gamma / 3.0 + root * gamma / 2.0,
+    1.0 / 9.0 - gamma / 3.0
+  };
+  Vector lower = before + h * gamma * f0;
+  for (std::size_t stage_index = 0; stage_index < 3U; ++stage_index) {
+    lower += h * embedded[stage_index] * derivative[stage_index];
+  }
+  result.error = scaled_error(result.after - lower, before, result.after, control);
+  if (!std::isfinite(result.error)) result.converged = false;
+  return result;
+}
+
+struct PropagationCacheEntry {
+  Matrix k;
+  Vector input;
+  double interval = 0.0;
+  AffineMap map;
+};
+
+class PropagationCache {
+ public:
+  const AffineMap& get(const Matrix& k, const Vector& input, double interval) {
+    for (const PropagationCacheEntry& entry : entries_) {
+      if (entry.interval == interval && entry.k.rows() == k.rows() &&
+          entry.k.cols() == k.cols() && entry.input.size() == input.size() &&
+          (entry.k.array() == k.array()).all() &&
+          (entry.input.array() == input.array()).all()) {
+        ++hits_;
+        return entry.map;
+      }
+    }
+    if (entries_.size() >= 64U) entries_.clear();
+    entries_.push_back({k, input, interval, affine_map(k, input, interval)});
+    ++misses_;
+    return entries_.back().map;
+  }
+
+  void clear() { entries_.clear(); }
+  std::size_t hits() const { return hits_; }
+  std::size_t misses() const { return misses_; }
+
+ private:
+  std::vector<PropagationCacheEntry> entries_;
+  std::size_t hits_ = 0U;
+  std::size_t misses_ = 0U;
+};
+
 Vector propagate_to(const Matrix& k, Vector state, double from, double to,
-                    std::vector<ActiveInfusion>& active) {
+                    std::vector<ActiveInfusion>& active,
+                    PropagationCache* cache = nullptr) {
   double cursor = from;
   remove_finished(active, cursor);
   while (cursor < to - 1e-12) {
@@ -347,7 +585,13 @@ Vector propagate_to(const Matrix& k, Vector state, double from, double to,
     for (const ActiveInfusion& infusion : active) {
       if (infusion.end > cursor + 1e-12) segment_end = std::min(segment_end, infusion.end);
     }
-    state = propagate(k, infusion_input(k.rows(), active), segment_end - cursor, state);
+    const Vector input = infusion_input(k.rows(), active);
+    if (cache == nullptr) {
+      state = propagate(k, input, segment_end - cursor, state);
+    } else {
+      const AffineMap& map = cache->get(k, input, segment_end - cursor);
+      state = map.transition * state + map.offset;
+    }
     cursor = segment_end;
     remove_finished(active, cursor);
   }
@@ -355,7 +599,7 @@ Vector propagate_to(const Matrix& k, Vector state, double from, double to,
 }
 
 Vector propagate_ode_to(const ModelEngine& engine,
-                        const Rcpp::DataFrame& data,
+                        const EventDataView& data,
                         int row, int subject,
                         const Rcpp::NumericVector& theta,
                         const Rcpp::NumericMatrix& eta,
@@ -377,12 +621,13 @@ Vector propagate_ode_to(const ModelEngine& engine,
         throw std::logic_error("DDE propagation requires an initialized history.");
       }
       double time = cursor;
+      double suggested_step = engine.dde_step;
       int steps = 0;
       while (time < segment_end - 1e-12) {
         if (++steps > engine.dde_max_steps) {
           throw std::runtime_error("DDE method-of-steps exceeded max_steps.");
         }
-        double step_end = time + std::min(engine.dde_step, segment_end - time);
+        double step_end = time + std::min(suggested_step, segment_end - time);
         bool ends_at_delayed_jump = false;
         for (const auto& jump : dde_history->jumps) {
           for (const std::string& delay_name : engine.dde_lag_delays) {
@@ -401,8 +646,25 @@ Vector propagate_ode_to(const ModelEngine& engine,
           }
         }
         const double h = step_end - time;
+        std::vector<double> lag_cache_time;
+        std::vector<bool> lag_cache_left;
+        std::vector<Vector> lag_cache_value;
         auto rhs = [&](double stage_time, const Vector& value,
                        bool left_limit = false) {
+          // The minimum-delay contract keeps lagged values entirely in
+          // accepted history.  Reusing the value at an identical collocation
+          // time therefore cannot depend on the current Newton iterate and is
+          // safe for both numerical policies.
+          for (std::size_t cached = 0; cached < lag_cache_time.size(); ++cached) {
+            if (lag_cache_left[cached] == left_limit &&
+                std::abs(lag_cache_time[cached] - stage_time) <= 1e-14) {
+              Vector derivative = evaluate_derivatives(
+                engine, data, row, subject, stage_time, value, parameters,
+                theta, eta, sigma, &lag_cache_value[cached]);
+              derivative += input;
+              return derivative;
+            }
+          }
           Vector lag_values(static_cast<Eigen::Index>(engine.dde_lag_inputs.size()));
           for (std::size_t lag = 0; lag < engine.dde_lag_inputs.size(); ++lag) {
             auto delay = parameters.find(engine.dde_lag_delays[lag]);
@@ -411,16 +673,63 @@ Vector propagate_ode_to(const ModelEngine& engine,
               throw std::domain_error("DDE delay '" + engine.dde_lag_delays[lag] +
                                       "' must be finite and at least the integration step.");
             }
-            lag_values[static_cast<Eigen::Index>(lag)] = dde_history->at(
-              stage_time - delay->second, engine.dde_lag_states[lag],
-              left_limit);
+            const double target = stage_time - delay->second;
+            const int lag_state = engine.dde_lag_states[lag];
+            if (lag_state < engine.n_state ||
+                target < dde_history->time.front() - 1e-12) {
+              lag_values[static_cast<Eigen::Index>(lag)] = dde_history->at(
+                target, lag_state, left_limit);
+            } else {
+              Vector delayed_state(engine.n_state);
+              for (int component = 0; component < engine.n_state; ++component) {
+                delayed_state[component] = dde_history->at(
+                  target, component, left_limit);
+              }
+              const Vector delayed_algebraic = solve_algebraic(
+                engine, data, row, subject, target, delayed_state, parameters,
+                theta, eta, sigma);
+              const int algebraic = lag_state - engine.n_state;
+              if (algebraic < 0 || algebraic >= delayed_algebraic.size()) {
+                throw std::out_of_range(
+                  "DDE lag algebraic state is outside the DAE variable vector.");
+              }
+              lag_values[static_cast<Eigen::Index>(lag)] =
+                delayed_algebraic[algebraic];
+            }
           }
+          lag_cache_time.push_back(stage_time);
+          lag_cache_left.push_back(left_limit);
+          lag_cache_value.push_back(lag_values);
           Vector derivative = evaluate_derivatives(
             engine, data, row, subject, stage_time, value, parameters,
             theta, eta, sigma, &lag_values);
           derivative += input;
           return derivative;
         };
+        if (engine.advan == 16 || engine.advan == 17) {
+          const RadauDdeStep trial = radau_iia5_dde_step(
+            rhs, state, time, h, engine.ode_control, ends_at_delayed_jump,
+            engine.liber_optimized);
+          const double minimum = 32.0 * std::numeric_limits<double>::epsilon() *
+            std::max({1.0, std::abs(time), std::abs(segment_end)});
+          if (trial.converged && trial.error <= 1.0) {
+            const Vector before = state;
+            state = trial.after;
+            dde_history->append_radau(time, step_end, before,
+                                      trial.derivative, state);
+            time = step_end;
+          }
+          const double factor = trial.converged && trial.error == 0.0 ? 3.0 :
+            (trial.converged && std::isfinite(trial.error) ?
+              std::clamp(0.9 * std::pow(trial.error, -0.25), 0.2, 3.0) : 0.25);
+          suggested_step = std::min(engine.dde_step, h * factor);
+          if (suggested_step < minimum) {
+            throw std::runtime_error(
+              "ADVAN" + std::to_string(engine.advan) +
+              " Radau IIA DDE step size underflow.");
+          }
+          continue;
+        }
         const Vector k1 = rhs(time, state);
         const Vector k2 = rhs(time + 0.5 * h, state + 0.5 * h * k1);
         const Vector k3 = rhs(time + 0.5 * h, state + 0.5 * h * k2);
@@ -494,7 +803,7 @@ std::vector<ActiveInfusion> periodic_infusions(double time, double duration,
 }
 
 Vector steady_ode_bolus_post(
-    const ModelEngine& engine, const Rcpp::DataFrame& data,
+    const ModelEngine& engine, const EventDataView& data,
     int row, int subject, const Rcpp::NumericVector& theta,
     const Rcpp::NumericMatrix& eta, const Rcpp::NumericVector& sigma,
     const Parameters& parameters, const Vector& dose,
@@ -514,7 +823,7 @@ Vector steady_ode_bolus_post(
 }
 
 Vector steady_ode_infusion_pre(
-    const ModelEngine& engine, const Rcpp::DataFrame& data,
+    const ModelEngine& engine, const EventDataView& data,
     int row, int subject, const Rcpp::NumericVector& theta,
     const Rcpp::NumericMatrix& eta, const Rcpp::NumericVector& sigma,
     const Parameters& parameters, int compartment, double administered_rate,
@@ -537,7 +846,7 @@ Vector steady_ode_infusion_pre(
 }
 
 Rcpp::List simulate(ModelEngine& engine,
-                    const Rcpp::DataFrame& data,
+                    const EventDataView& data,
                     const Rcpp::NumericVector& theta,
                     const Rcpp::NumericMatrix& eta,
                     const Rcpp::NumericVector& sigma) {
@@ -551,16 +860,16 @@ Rcpp::List simulate(ModelEngine& engine,
     Rcpp::stop("ETA matrix has the wrong number of between-subject/occasion columns.");
   }
 
-  Rcpp::NumericVector time = data["TIME"];
-  Rcpp::NumericVector amount = data["AMT"];
-  Rcpp::NumericVector rate = data["RATE"];
-  Rcpp::NumericVector interval = data["II"];
-  Rcpp::IntegerVector evid = data["EVID"];
-  Rcpp::IntegerVector cmt = data["CMT"];
-  Rcpp::IntegerVector ss = data["SS"];
-  Rcpp::IntegerVector eta_subject_index = data[".ID_INDEX"];
-  Rcpp::IntegerVector subject_index = data.containsElementNamed(".STRUCT_ID_INDEX") ?
-    Rcpp::IntegerVector(data[".STRUCT_ID_INDEX"]) : eta_subject_index;
+  auto time = data.values("TIME");
+  auto amount = data.values("AMT");
+  auto rate = data.values("RATE");
+  auto interval = data.values("II");
+  auto evid = data.values("EVID");
+  auto cmt = data.values("CMT");
+  auto ss = data.values("SS");
+  auto eta_subject_index = data.values(".ID_INDEX");
+  auto subject_index = data.containsElementNamed(".STRUCT_ID_INDEX") ?
+    data.values(".STRUCT_ID_INDEX") : eta_subject_index;
   int n_subjects = 0;
   for (int value : eta_subject_index) n_subjects = std::max(n_subjects, value);
   if (eta.nrow() != n_subjects) Rcpp::stop("ETA matrix has the wrong number of subject rows.");
@@ -580,6 +889,7 @@ Rcpp::List simulate(ModelEngine& engine,
   int previous_subject = -1;
   double previous_time = 0.0;
   std::vector<std::string> state_names;
+  PropagationCache propagation_cache;
 
   for (int row = 0; row < n_rows; ++row) {
     const int structural_subject = subject_index[row] - 1;
@@ -590,6 +900,7 @@ Rcpp::List simulate(ModelEngine& engine,
       have_previous = false;
       previous_time = time[row];
       previous_subject = structural_subject;
+      propagation_cache.clear();
       if (engine.dde_enabled) dde_history.reset(time[row], state, engine.dde_history);
     }
     if (have_previous && !engine.direct_prediction) {
@@ -601,7 +912,11 @@ Rcpp::List simulate(ModelEngine& engine,
           , engine.dde_enabled ? &dde_history : nullptr
         );
       } else {
-        state = propagate_to(previous_k, state, previous_time, time[row], active);
+        // Exact (K, input, interval) matches reuse the same affine map.  The
+        // state multiplication and event order remain unchanged.
+        state = propagate_to(
+          previous_k, state, previous_time, time[row], active,
+          &propagation_cache);
       }
     }
 

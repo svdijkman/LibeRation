@@ -13,6 +13,28 @@ test_that("legacy model syntax compiles to serializable IR", {
   expect_equal(model$ERROR_TYPE, "combined")
   roundtrip <- unserialize(serialize(model, NULL))
   expect_equal(roundtrip$PRED, model$PRED)
+  expect_identical(roundtrip$NUMERICAL_MODE, "nonmem_compatibility")
+})
+
+test_that("numerical policy is explicit, serializable, and run-overridable", {
+  fixture <- estimation_fixture()
+  optimized <- nm_model_update(
+    fixture$model, NUMERICAL_MODE = "liber_optimized"
+  )
+  expect_identical(optimized$NUMERICAL_MODE, "liber_optimized")
+  simulated <- nm_simulate(
+    optimized, fixture$data, numerical_mode = "nonmem_compatibility"
+  )
+  expect_identical(attr(simulated, "numerical_mode"), "nonmem_compatibility")
+  fit <- nm_est(
+    fixture$model, fixture$data, method = "FO", maxit = 1L,
+    numerical_mode = "liber_optimized"
+  )
+  expect_identical(fit$numerical_mode, "liber_optimized")
+  expect_error(
+    nm_simulate(fixture$model, fixture$data, numerical_mode = "unknown"),
+    "numerical_mode"
+  )
 })
 
 test_that("model updates reuse complete nm_model validation", {

@@ -172,8 +172,14 @@
 }
 
 .nm_mu_eval_environment <- function(data, theta = numeric()) {
-  environment <- list2env(as.list(data[1L, , drop = FALSE]),
-                          parent = baseenv())
+  values <- if (is.data.frame(data)) {
+    as.list(data[1L, , drop = FALSE])
+  } else {
+    lapply(as.list(data), function(value) {
+      if (length(value)) value[[1L]] else NULL
+    })
+  }
+  environment <- list2env(values, parent = baseenv())
   environment$THETA <- function(index) theta[[as.integer(index)]]
   if (length(theta)) {
     for (index in seq_along(theta)) {
@@ -331,6 +337,33 @@
   }, numeric(1))
 }
 
+.nm_mu_compiled_ir <- function(plan, model) {
+  expressions <- plan$expressions %||% list()
+  if (!length(expressions)) return(NULL)
+  code <- vapply(seq_along(expressions), function(index) {
+    expression <- paste(deparse(
+      expressions[[index]], width.cutoff = 500L, backtick = FALSE
+    ), collapse = " ")
+    paste0("MU_NATIVE_", index, " = ", expression)
+  }, character(1))
+  variables <- unique(unlist(lapply(expressions, all.vars), use.names = FALSE))
+  variables <- variables[!grepl(
+    "^(THETA|THETA_[0-9]+|THETA[0-9]+)$", variables,
+    ignore.case = TRUE, perl = TRUE
+  )]
+  inputs <- unique(c(
+    if (nrow(model$THETAS)) paste0("THETA_", seq_len(nrow(model$THETAS))) else
+      character(),
+    variables
+  ))
+  LibeRtAD::ad_ir(paste(code, collapse = "\n"), inputs = inputs)
+}
+
+.nm_mu_subject_source <- function(context) {
+  if (!is.null(context$subject_store)) return(context$subject_store$pointer)
+  lapply(context$subjects, function(evaluator) evaluator$data_input())
+}
+
 .nm_mu_specialization <- function(context, map, enabled = TRUE) {
   plan <- .nm_mu_plan(context$model, map)
   plan$enabled <- isTRUE(enabled)
@@ -348,60 +381,43 @@
   plan$cache$system_calls <- 0L
   plan$cache$hits <- 0L
   plan$cache$misses <- 0L
-  plan$subject_data <- lapply(context$subjects, function(evaluator) {
-    evaluator$data[1L, , drop = FALSE]
-  })
+  plan$n_subjects <- context$n_subjects
+  plan$n_eta <- context$n_eta
+  plan$subject_source <- .nm_mu_subject_source(context)
   plan$eta <- if (isTRUE(plan$mapped)) as.integer(context$model$MU$ETA) else integer()
+  plan$native_ir <- NULL
+  plan$native_program <- NULL
   if (!isTRUE(enabled)) {
     plan$reason <- "MU estimator specialization was disabled"
     return(plan)
   }
   if (!isTRUE(plan$mapped)) return(plan)
+  plan$native_ir <- .nm_mu_compiled_ir(plan, context$model)
+  plan$native_program <- .liberation_mu_program_create(
+    plan$native_ir, plan$eta
+  )
   # General MU re-centring only requires evaluable expressions, not affinity.
   invisible(.nm_mu_values(plan, context$model$THETAS$Value))
   if (!isTRUE(plan$affine) || !length(plan$theta)) return(plan)
   p <- length(plan$theta)
-  plan$design <- vector("list", context$n_subjects)
-  for (subject in seq_len(context$n_subjects)) {
-    data <- plan$subject_data[[subject]]
-    design <- matrix(0, context$n_eta, p)
-    offset <- numeric(context$n_eta)
-    for (row in seq_len(nrow(context$model$MU))) {
-      eta <- context$model$MU$ETA[[row]]
-      decomposition <- plan$affine_expressions[[row]]
-      offset[[eta]] <- .nm_mu_eval_scalar(
-        decomposition$intercept, data, label = "MU intercept"
-      )
-      for (term in decomposition$terms) {
-        coefficient <- .nm_mu_eval_scalar(
-          term$coefficient, data, label = "MU coefficient"
-        )
-        column <- match(term$index, plan$theta)
-        if (is.na(column)) {
-          offset[[eta]] <- offset[[eta]] + coefficient * .nm_mu_link(
-            context$model$THETAS$Value[[term$index]], term$link
-          )
-        } else {
-          design[eta, column] <- design[eta, column] + coefficient
-        }
-      }
-    }
-    plan$design[[subject]] <- design
-    plan$offset[subject, ] <- offset
-  }
+  native_design <- .liberation_mu_affine_design(
+    plan$native_program, plan$subject_source,
+    as.numeric(context$model$THETAS$Value), as.integer(plan$theta),
+    unname(plan$links[as.character(plan$theta)]), as.integer(context$n_eta)
+  )
+  plan$offset <- native_design$offset
+  plan$design_columns <- native_design$design_columns
+  plan$design <- lapply(seq_len(context$n_subjects), function(subject) {
+    do.call(cbind, lapply(plan$design_columns, function(value) {
+      value[subject, ]
+    }))
+  })
   stacked <- do.call(rbind, plan$design)
   if (qr(stacked, tol = 1e-10)$rank < p) {
     plan$reason <- "the MU design matrix is rank deficient"
     plan$saem_eligible <- FALSE
     return(plan)
   }
-  plan$design_columns <- lapply(seq_len(p), function(column) {
-    output <- matrix(0, context$n_subjects, context$n_eta)
-    for (subject in seq_len(context$n_subjects)) {
-      output[subject, ] <- plan$design[[subject]][, column]
-    }
-    output
-  })
   plan$covariate_design <- any(vapply(
     plan$design_columns,
     function(design) {
@@ -417,29 +433,14 @@
 
 .nm_mu_values <- function(specialization, theta) {
   result <- matrix(
-    0, length(specialization$subject_data),
-    ncol(specialization$offset)
+    0, specialization$n_subjects,
+    specialization$n_eta
   )
   if (!isTRUE(specialization$mapped)) return(result)
-  if (isTRUE(specialization$active) && length(specialization$theta)) {
-    beta <- .nm_mu_beta(specialization, theta)
-    result <- specialization$offset
-    for (column in seq_along(beta)) {
-      result <- result +
-        specialization$design_columns[[column]] * beta[[column]]
-    }
-    return(result)
-  }
-  for (subject in seq_len(nrow(result))) {
-    for (row in seq_along(specialization$expressions)) {
-      result[subject, specialization$eta[[row]]] <- .nm_mu_eval_scalar(
-        specialization$expressions[[row]],
-        specialization$subject_data[[subject]], theta,
-        label = paste0("MU_", specialization$eta[[row]])
-      )
-    }
-  }
-  result
+  .liberation_mu_program_eval(
+    specialization$native_program, specialization$subject_source,
+    as.numeric(theta), as.integer(specialization$n_eta)
+  )
 }
 
 .nm_mu_recenter_eta <- function(specialization, old_parameters,
@@ -478,8 +479,8 @@
     cache$hits <- cache$hits + 1L
   } else {
     cache$misses <- cache$misses + 1L
-    covariance <- .nm_effect_covariance(
-      context$model, context$subjects[[1L]]$data, parameters$omega
+    covariance <- .nm_effect_covariance_evaluator(
+      context$model, context$subjects[[1L]], parameters$omega
     )
     covariance_pd <- tryCatch(
       .nm_positive_definite(covariance, "MU random-effect covariance"),
@@ -643,7 +644,9 @@
       specialization, state$parameters, candidate_parameters, state$eta
     )
   )
-  proposed_logp <- log_posterior(candidate)
+  proposed_state <- log_posterior(candidate)
+  proposed_logp <- proposed_state$value
+  candidate$subject_values <- proposed_state$subject_values
   current_beta <- .nm_mu_beta(specialization, state$parameters$theta)
   log_q_current <- .nm_mu_log_beta_proposal(
     current_beta, system$mean, system$hessian,
@@ -679,6 +682,9 @@
     gls_cache_hits = as.integer(specialization$cache$hits %||% 0L),
     gls_cache_misses = as.integer(specialization$cache$misses %||% 0L),
     gls_vectorized = isTRUE(specialization$active),
-    covariate_design = isTRUE(specialization$covariate_design)
+    covariate_design = isTRUE(specialization$covariate_design),
+    evaluation_backend = if (is.null(specialization$native_program)) {
+      "none"
+    } else "cpp-native-row-view"
   )
 }

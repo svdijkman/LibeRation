@@ -99,11 +99,14 @@ nm_est_stage <- function(method, ..., label = NULL) {
 #'   successful fit with failure metadata.
 #' @param audit_artifacts Generate one audit bundle for the final sequence
 #'   result. Intermediate stages remain represented in the final fit metadata.
+#' @param numerical_mode Numerical policy inherited by stages that do not set
+#'   one explicitly. See [nm_est()].
 #' @return The final `nm_fit`, augmented with sequential-estimation metadata.
 #' @export
 nm_est_sequence <- function(model, data, stages,
                             on_error = c("stop", "return"),
-                            audit_artifacts = FALSE) {
+                            audit_artifacts = FALSE,
+                            numerical_mode = NULL) {
   on_error <- match.arg(on_error)
   if (length(audit_artifacts) != 1L || is.na(audit_artifacts)) {
     .nm_stop("`audit_artifacts` must be TRUE or FALSE.")
@@ -120,6 +123,9 @@ nm_est_sequence <- function(model, data, stages,
   for (index in seq_along(specifications)) {
     specification <- specifications[[index]]
     arguments <- specification$arguments
+    if (is.null(arguments$numerical_mode)) {
+      arguments$numerical_mode <- numerical_mode
+    }
     arguments$collect_output <- index == length(specifications)
     warm_methods <- c("FOCE", "FOCEI", "LAPLACE", "SAEM")
     if (!is.null(previous) && specification$method %in% warm_methods &&

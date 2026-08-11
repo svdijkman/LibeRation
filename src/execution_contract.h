@@ -21,7 +21,12 @@ inline void require_materialized_addl(const Rcpp::DataFrame& data) {
 
 inline void require_materialized_addl(const Rcpp::List& subject_data) {
   for (R_xlen_t index = 0; index < subject_data.size(); ++index) {
-    require_materialized_addl(Rcpp::as<Rcpp::DataFrame>(subject_data[index]));
+    SEXP input = subject_data[index];
+    // Dynamic vectors and native subject-view descriptors do not carry an
+    // event table. Their canonical parent table was validated when its native
+    // store was created.
+    if (!Rf_inherits(input, "data.frame")) continue;
+    require_materialized_addl(Rcpp::as<Rcpp::DataFrame>(input));
   }
 }
 

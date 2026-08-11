@@ -2002,6 +2002,11 @@ liber_gui <- function(model = NULL, data = NULL, queue = NULL,
             n_cores = max(1L, as.integer(event$nCores %||% 1L)),
             audit_artifacts = isTRUE(event$auditArtifacts)
           )
+          if (identical(engine, "liber")) {
+            arguments$numerical_mode <- .nm_numerical_mode(
+              event$numericalMode %||% "nonmem_compatibility"
+            )
+          }
           if (isTRUE(event$useFit) && inherits(state$fit, "nm_fit")) {
             arguments$theta <- state$fit$theta
             arguments$sigma <- state$fit$sigma
@@ -2027,8 +2032,12 @@ liber_gui <- function(model = NULL, data = NULL, queue = NULL,
             )
             structure(list(), class = "liber_gui_background_started")
           } else {
-            if (!requireNamespace("LibeRties", quietly = TRUE)) {
-              .nm_stop("LibeRties is required for queued execution.")
+            if (!requireNamespace("LibeRties", quietly = TRUE) ||
+                !"engine" %in% names(formals(LibeRties::ls_job))) {
+              .nm_stop(
+                "Queued execution requires LibeRties 0.8.3 or newer; ",
+                "reinstall the current LibeRties package and restart R."
+              )
             }
             parent_version <- ensure_parent_version()
             job <- LibeRties::ls_job(
@@ -2089,8 +2098,12 @@ liber_gui <- function(model = NULL, data = NULL, queue = NULL,
             )
             structure(list(), class = "liber_gui_background_started")
           } else {
-            if (!requireNamespace("LibeRties", quietly = TRUE)) {
-              .nm_stop("LibeRties is required for queued execution.")
+            if (!requireNamespace("LibeRties", quietly = TRUE) ||
+                !"engine" %in% names(formals(LibeRties::ls_job))) {
+              .nm_stop(
+                "Queued execution requires LibeRties 0.8.3 or newer; ",
+                "reinstall the current LibeRties package and restart R."
+              )
             }
             parent_version <- ensure_parent_version()
             job <- LibeRties::ls_job(
@@ -2391,9 +2404,16 @@ liber_gui <- function(model = NULL, data = NULL, queue = NULL,
               sum(!fit$model$SIGMAS$FIX) + sum(!fit$model$OMEGAS$FIX)
             n_observations <- nrow(gof)
             c(
-              OFV = fit$objective,
-              AIC = fit$objective + 2 * n_parameters,
-              BIC = fit$objective + log(max(1, n_observations)) * n_parameters,
+              `Reported objective` = fit$objective,
+              OFV = if (.nm_fit_likelihood_comparable(fit)) {
+                fit$objective
+              } else NA_real_,
+              AIC = if (.nm_fit_likelihood_comparable(fit)) {
+                fit$objective + 2 * n_parameters
+              } else NA_real_,
+              BIC = if (.nm_fit_likelihood_comparable(fit)) {
+                fit$objective + log(max(1, n_observations)) * n_parameters
+              } else NA_real_,
               `Free parameters` = n_parameters,
               Observations = n_observations,
               `Population RMSE` = sqrt(mean((gof$DV - gof$PRED)^2, na.rm = TRUE)),

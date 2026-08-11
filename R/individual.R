@@ -77,54 +77,11 @@ nm_individual_fit <- function(model, data, theta = NULL, sigma = NULL,
       base_covariance, "Population ETA covariance"
     )$matrix)
     prior_precision <- solve(prior_covariance)
-    eta_positions <- length(theta) + seq_len(n_eta)
-    adjusted <- function(eta, gradient = FALSE, hessian = FALSE) {
-      raw <- evaluator$objective(
-        theta, eta, sigma, omega, gradient = gradient,
-        hessian = hessian, interaction = interaction
-      )
-      centered <- eta - prior_mean
-      raw$value <- as.numeric(
-        raw$value - crossprod(eta, base_precision %*% eta) +
-          crossprod(centered, prior_precision %*% centered)
-      )
-      if (gradient) {
-        raw$gradient[eta_positions] <- raw$gradient[eta_positions] -
-          2 * as.numeric(base_precision %*% eta) +
-          2 * as.numeric(prior_precision %*% centered)
-      }
-      if (hessian) {
-        raw$hessian[eta_positions, eta_positions] <-
-          raw$hessian[eta_positions, eta_positions, drop = FALSE] -
-          2 * base_precision + 2 * prior_precision
-      }
-      raw
-    }
-    objective <- function(eta) adjusted(eta, gradient = FALSE)$value
-    gradient <- function(eta) {
-      adjusted(eta, gradient = TRUE)$gradient[eta_positions]
-    }
-    optimized <- stats::optim(
-      start, objective, gradient, method = "BFGS",
-      control = list(maxit = as.integer(maxit), reltol = as.numeric(tolerance))
-    )
-    at_mode <- adjusted(
-      optimized$par, gradient = TRUE, hessian = isTRUE(exact_hessian)
-    )
-    curvature <- if (isTRUE(exact_hessian)) {
-      .nm_positive_definite(
-        at_mode$hessian[eta_positions, eta_positions, drop = FALSE],
-        "Individual ETA posterior curvature"
-      )
-    } else list(matrix = matrix(numeric(), 0L, 0L), jitter = 0)
-    mode <- list(
-      par = optimized$par, value = at_mode$value,
-      convergence = optimized$convergence,
-      hessian = curvature$matrix, jitter = curvature$jitter,
-      gradient = at_mode$gradient[eta_positions],
-      iterations = as.integer(optimized$counts[["gradient"]]),
-      evaluations = as.integer(optimized$counts[["function"]]),
-      backend = "r-bfgs-exact-cppad"
+    mode <- evaluator$eta_mode(
+      theta, sigma, omega, start = start, maxit = maxit,
+      tolerance = tolerance, interaction = interaction,
+      exact_hessian = exact_hessian, prior_mean = prior_mean,
+      base_precision = base_precision, prior_precision = prior_precision
     )
   }
 

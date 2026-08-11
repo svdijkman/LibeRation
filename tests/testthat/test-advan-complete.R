@@ -76,6 +76,119 @@ test_that("ADVAN9 maps equilibrium constraints onto the differentiable DAE path"
   expect_match(derivatives$propagation_kernel, "dae-advan9")
 })
 
+test_that("ADVAN15-18 expose differentiable DAE, DDE, and combined DDAE paths", {
+  data <- advan_event_data(c(0, .5, 1, 2, 3, 4))
+  fifteen <- nm_advan_template(15)
+  result15 <- nm_simulate(fifteen, data)
+  expect_true(all(is.finite(result15$IPRED)))
+  expect_identical(attr(result15, "solver"), "dae")
+  derivative15 <- nm_compile(fifteen)$prediction_derivatives(data)
+  expect_true(all(is.finite(derivative15$jacobian)))
+  expect_match(derivative15$propagation_kernel, "dae-advan15")
+
+  for (advan in c(16L, 18L)) {
+    model <- nm_advan_template(advan)
+    result <- nm_simulate(model, data)
+    early <- data$TIME <= 2
+    expect_equal(
+      result$A1[early], 100 * exp(-.4 * data$TIME[early]),
+      tolerance = 2e-6
+    )
+    derivatives <- nm_compile(model)$prediction_derivatives(data)
+    expect_true(all(is.finite(derivatives$jacobian)))
+    expect_match(derivatives$propagation_kernel, paste0("dde-advan", advan))
+    if (advan == 16L) {
+      expect_match(derivatives$propagation_kernel, "radau-iia5")
+    } else {
+      expect_match(derivatives$propagation_kernel, "rk4-method-of-steps")
+      expect_false(grepl("radau", derivatives$propagation_kernel, ignore.case = TRUE))
+    }
+  }
+
+  seventeen <- nm_advan_template(17)
+  expect_identical(seventeen$DDE_CONFIG$lags[[1L]]$state, 2L)
+  expect_identical(seventeen$DDE_CONFIG$lags[[1L]]$algebraic, "FREE")
+  result17 <- nm_simulate(seventeen, data)
+  early <- data$TIME <= 2
+  expect_equal(
+    result17$A1[early], 100 * exp(-.2 * data$TIME[early]),
+    tolerance = 2e-6
+  )
+  derivative17 <- nm_compile(seventeen)$prediction_derivatives(data)
+  expect_true(all(is.finite(derivative17$jacobian)))
+  expect_match(derivative17$propagation_kernel, "ddae-advan17")
+  expect_match(derivative17$propagation_kernel, "radau-iia5")
+})
+
+test_that("ADVAN16/17 Radau paths retain parameter and delay sensitivities", {
+  data <- advan_event_data(c(0, .5, 1, 2, 3, 4))
+  for (advan in c(16L, 17L)) {
+    model <- nm_advan_template(advan)
+    compiled <- nm_compile(model)$prediction_derivatives(data)
+    row <- match(3, data$TIME)
+    columns <- seq_len(nrow(model$THETAS))
+    automatic <- compiled$jacobian[row, columns]
+    finite_difference <- vapply(columns, function(column) {
+      delta <- 1e-5 * max(1, abs(model$THETAS$Value[[column]]))
+      upper <- lower <- model
+      upper$THETAS$Value[[column]] <- upper$THETAS$Value[[column]] + delta
+      lower$THETAS$Value[[column]] <- lower$THETAS$Value[[column]] - delta
+      (nm_simulate(upper, data)$IPRED[[row]] -
+         nm_simulate(lower, data)$IPRED[[row]]) / (2 * delta)
+    }, numeric(1))
+    expect_equal(
+      unname(automatic), finite_difference,
+      tolerance = if (advan == 17L) 3e-4 else 3e-5,
+      info = paste0("ADVAN", advan)
+    )
+  }
+})
+
+test_that("ADVAN15-18 enforce their structural contracts and export NONMEM blocks", {
+  expect_error(nm_model(
+    INPUT = names(advan_event_data()), ADVAN = 15,
+    PRED = "K=THETA(1);S1=1", DES = "DADT(1)=-K*A(1)",
+    THETAS = data.frame(THETA = 1, Value = .4)
+  ), "requires DAE_CONFIG")
+  expect_error(nm_model(
+    INPUT = names(advan_event_data()), ADVAN = 16,
+    PRED = "K=THETA(1);S1=1", DES = "DADT(1)=-K*A(1)",
+    THETAS = data.frame(THETA = 1, Value = .4)
+  ), "requires DDE_CONFIG")
+  expect_error(nm_model(
+    INPUT = names(advan_event_data()), ADVAN = 17,
+    PRED = "K=THETA(1);TAU1=THETA(2);S1=1",
+    DES = "DADT(1)=-K*A(1)+LAG(A(1),TAU1)",
+    THETAS = data.frame(THETA = 1:2, Value = c(.4, 2)),
+    DDE_CONFIG = nm_dde_config(step = .05),
+    EXPERIMENTAL = nm_experimental_config(TRUE)
+  ), "both DDE_CONFIG and DAE_CONFIG")
+  expect_error(nm_model(
+    INPUT = names(advan_event_data()), ADVAN = 15,
+    PRED = "K=THETA(1);TAU1=THETA(2);S1=1",
+    DES = "DADT(1)=-K*FREE+LAG(FREE,TAU1)",
+    ALG = "RES(1)=FREE-A(1)",
+    THETAS = data.frame(THETA = 1:2, Value = c(.4, 2)),
+    DDE_CONFIG = nm_dde_config(step = .05),
+    DAE_CONFIG = nm_dae_config("FREE"),
+    EXPERIMENTAL = nm_experimental_config(TRUE)
+  ), "Combined DDE_CONFIG and DAE_CONFIG requires ADVAN17")
+
+  dde <- nm_control_write(nm_advan_template(16))
+  expect_match(dde, "(?m)^;DDE$", perl = TRUE)
+  expect_match(dde, "\\$SUBROUTINES ADVAN16 TRANS1 TOL=9")
+  expect_match(dde, "AP_1_1")
+  expect_match(dde, "AD_1_1")
+  expect_false(grepl("LAG\\s*\\(", dde, perl = TRUE))
+
+  ddae <- nm_control_write(nm_advan_template(17))
+  expect_match(ddae, "EQUILIBRIUM")
+  expect_match(ddae, "\\$AESINIT")
+  expect_match(ddae, "\\$AES")
+  expect_match(ddae, "E\\(2\\)")
+  expect_match(ddae, "AD_2_1")
+})
+
 test_that("ADVAN10 implements NONMEM VM/KM Michaelis-Menten elimination", {
   model <- nm_model(
     INPUT = names(advan_event_data()), ADVAN = 10, TRANS = 1,

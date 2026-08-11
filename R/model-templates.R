@@ -91,14 +91,15 @@ nm_structural_templates <- function() {
 
 #' Create an editable standard ADVAN model template
 #'
-#' This is the public entry point for the same ADVAN 1--14 templates used by
+#' This is the public entry point for the same ADVAN 1--18 templates used by
 #' the LibeRation New Model Version workflow. Other LibeR packages can
 #' therefore create compatible starting models without copying template code.
 #'
-#' @param advan ADVAN number from 1 through 14.
+#' @param advan ADVAN number from 1 through 18.
 #' @param trans Optional TRANS number from 1 through 6. ODE ADVANs ignore this
 #'   argument and use their template default.
 #' @param n_state Optional number of states for ADVAN 6, 8, 9, 13, or 14.
+#'   ADVAN15--18 use their DAE/DDE-specific editable templates.
 #' @param problem Optional display name for the model.
 #' @return An editable [nm_model()] object.
 #' @export

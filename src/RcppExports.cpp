@@ -47,6 +47,451 @@ BEGIN_RCPP
     return rcpp_result_gen;
 END_RCPP
 }
+// liberation_stochastic_eta_context_create
+SEXP liberation_stochastic_eta_context_create(SEXP engine_pointer, const Rcpp::List& tape_pointers, const Rcpp::List& subject_data, int n_theta, int n_eta, int n_sigma, int n_omega, bool use_ode, const Rcpp::NumericVector& initial_theta, const Rcpp::NumericVector& initial_sigma, const Rcpp::NumericVector& initial_omega, double guard_radius, bool fused_values, int native_threads);
+RcppExport SEXP _LibeRation_liberation_stochastic_eta_context_create(SEXP engine_pointerSEXP, SEXP tape_pointersSEXP, SEXP subject_dataSEXP, SEXP n_thetaSEXP, SEXP n_etaSEXP, SEXP n_sigmaSEXP, SEXP n_omegaSEXP, SEXP use_odeSEXP, SEXP initial_thetaSEXP, SEXP initial_sigmaSEXP, SEXP initial_omegaSEXP, SEXP guard_radiusSEXP, SEXP fused_valuesSEXP, SEXP native_threadsSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< SEXP >::type engine_pointer(engine_pointerSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::List& >::type tape_pointers(tape_pointersSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::List& >::type subject_data(subject_dataSEXP);
+    Rcpp::traits::input_parameter< int >::type n_theta(n_thetaSEXP);
+    Rcpp::traits::input_parameter< int >::type n_eta(n_etaSEXP);
+    Rcpp::traits::input_parameter< int >::type n_sigma(n_sigmaSEXP);
+    Rcpp::traits::input_parameter< int >::type n_omega(n_omegaSEXP);
+    Rcpp::traits::input_parameter< bool >::type use_ode(use_odeSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::NumericVector& >::type initial_theta(initial_thetaSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::NumericVector& >::type initial_sigma(initial_sigmaSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::NumericVector& >::type initial_omega(initial_omegaSEXP);
+    Rcpp::traits::input_parameter< double >::type guard_radius(guard_radiusSEXP);
+    Rcpp::traits::input_parameter< bool >::type fused_values(fused_valuesSEXP);
+    Rcpp::traits::input_parameter< int >::type native_threads(native_threadsSEXP);
+    rcpp_result_gen = Rcpp::wrap(liberation_stochastic_eta_context_create(engine_pointer, tape_pointers, subject_data, n_theta, n_eta, n_sigma, n_omega, use_ode, initial_theta, initial_sigma, initial_omega, guard_radius, fused_values, native_threads));
+    return rcpp_result_gen;
+END_RCPP
+}
+// liberation_stochastic_eta_context_eval
+Rcpp::NumericVector liberation_stochastic_eta_context_eval(SEXP context_pointer, const Rcpp::NumericVector& theta, const Rcpp::NumericMatrix& eta, const Rcpp::NumericVector& sigma, const Rcpp::NumericVector& omega);
+RcppExport SEXP _LibeRation_liberation_stochastic_eta_context_eval(SEXP context_pointerSEXP, SEXP thetaSEXP, SEXP etaSEXP, SEXP sigmaSEXP, SEXP omegaSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< SEXP >::type context_pointer(context_pointerSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::NumericVector& >::type theta(thetaSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::NumericMatrix& >::type eta(etaSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::NumericVector& >::type sigma(sigmaSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::NumericVector& >::type omega(omegaSEXP);
+    rcpp_result_gen = Rcpp::wrap(liberation_stochastic_eta_context_eval(context_pointer, theta, eta, sigma, omega));
+    return rcpp_result_gen;
+END_RCPP
+}
+// liberation_stochastic_eta_context_laplace_proposal
+Rcpp::List liberation_stochastic_eta_context_laplace_proposal(SEXP context_pointer, const Rcpp::NumericVector& theta, const Rcpp::NumericMatrix& starts, const Rcpp::NumericVector& sigma, const Rcpp::NumericVector& omega, int maxit, double tolerance);
+RcppExport SEXP _LibeRation_liberation_stochastic_eta_context_laplace_proposal(SEXP context_pointerSEXP, SEXP thetaSEXP, SEXP startsSEXP, SEXP sigmaSEXP, SEXP omegaSEXP, SEXP maxitSEXP, SEXP toleranceSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< SEXP >::type context_pointer(context_pointerSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::NumericVector& >::type theta(thetaSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::NumericMatrix& >::type starts(startsSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::NumericVector& >::type sigma(sigmaSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::NumericVector& >::type omega(omegaSEXP);
+    Rcpp::traits::input_parameter< int >::type maxit(maxitSEXP);
+    Rcpp::traits::input_parameter< double >::type tolerance(toleranceSEXP);
+    rcpp_result_gen = Rcpp::wrap(liberation_stochastic_eta_context_laplace_proposal(context_pointer, theta, starts, sigma, omega, maxit, tolerance));
+    return rcpp_result_gen;
+END_RCPP
+}
+// liberation_stochastic_eta_context_random_walk
+Rcpp::List liberation_stochastic_eta_context_random_walk(SEXP context_pointer, const Rcpp::NumericVector& theta, const Rcpp::NumericMatrix& eta, const Rcpp::NumericVector& sigma, const Rcpp::NumericVector& omega, const Rcpp::List& proposal_roots, const Rcpp::NumericMatrix& normals, const Rcpp::NumericVector& log_uniforms, int mcmc_steps, double step_scale, Rcpp::Nullable<Rcpp::NumericVector> current_values);
+RcppExport SEXP _LibeRation_liberation_stochastic_eta_context_random_walk(SEXP context_pointerSEXP, SEXP thetaSEXP, SEXP etaSEXP, SEXP sigmaSEXP, SEXP omegaSEXP, SEXP proposal_rootsSEXP, SEXP normalsSEXP, SEXP log_uniformsSEXP, SEXP mcmc_stepsSEXP, SEXP step_scaleSEXP, SEXP current_valuesSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< SEXP >::type context_pointer(context_pointerSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::NumericVector& >::type theta(thetaSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::NumericMatrix& >::type eta(etaSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::NumericVector& >::type sigma(sigmaSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::NumericVector& >::type omega(omegaSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::List& >::type proposal_roots(proposal_rootsSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::NumericMatrix& >::type normals(normalsSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::NumericVector& >::type log_uniforms(log_uniformsSEXP);
+    Rcpp::traits::input_parameter< int >::type mcmc_steps(mcmc_stepsSEXP);
+    Rcpp::traits::input_parameter< double >::type step_scale(step_scaleSEXP);
+    Rcpp::traits::input_parameter< Rcpp::Nullable<Rcpp::NumericVector> >::type current_values(current_valuesSEXP);
+    rcpp_result_gen = Rcpp::wrap(liberation_stochastic_eta_context_random_walk(context_pointer, theta, eta, sigma, omega, proposal_roots, normals, log_uniforms, mcmc_steps, step_scale, current_values));
+    return rcpp_result_gen;
+END_RCPP
+}
+// liberation_stochastic_eta_context_independence
+Rcpp::List liberation_stochastic_eta_context_independence(SEXP context_pointer, const Rcpp::NumericVector& theta, const Rcpp::NumericMatrix& eta, const Rcpp::NumericVector& sigma, const Rcpp::NumericVector& omega, const Rcpp::NumericMatrix& proposal_modes, const Rcpp::List& proposal_roots, const Rcpp::List& proposal_precisions, const Rcpp::NumericMatrix& normals, const Rcpp::NumericVector& log_uniforms, int mcmc_steps, Rcpp::Nullable<Rcpp::NumericVector> current_values, double proposal_df, Rcpp::Nullable<Rcpp::NumericVector> proposal_scales);
+RcppExport SEXP _LibeRation_liberation_stochastic_eta_context_independence(SEXP context_pointerSEXP, SEXP thetaSEXP, SEXP etaSEXP, SEXP sigmaSEXP, SEXP omegaSEXP, SEXP proposal_modesSEXP, SEXP proposal_rootsSEXP, SEXP proposal_precisionsSEXP, SEXP normalsSEXP, SEXP log_uniformsSEXP, SEXP mcmc_stepsSEXP, SEXP current_valuesSEXP, SEXP proposal_dfSEXP, SEXP proposal_scalesSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< SEXP >::type context_pointer(context_pointerSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::NumericVector& >::type theta(thetaSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::NumericMatrix& >::type eta(etaSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::NumericVector& >::type sigma(sigmaSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::NumericVector& >::type omega(omegaSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::NumericMatrix& >::type proposal_modes(proposal_modesSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::List& >::type proposal_roots(proposal_rootsSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::List& >::type proposal_precisions(proposal_precisionsSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::NumericMatrix& >::type normals(normalsSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::NumericVector& >::type log_uniforms(log_uniformsSEXP);
+    Rcpp::traits::input_parameter< int >::type mcmc_steps(mcmc_stepsSEXP);
+    Rcpp::traits::input_parameter< Rcpp::Nullable<Rcpp::NumericVector> >::type current_values(current_valuesSEXP);
+    Rcpp::traits::input_parameter< double >::type proposal_df(proposal_dfSEXP);
+    Rcpp::traits::input_parameter< Rcpp::Nullable<Rcpp::NumericVector> >::type proposal_scales(proposal_scalesSEXP);
+    rcpp_result_gen = Rcpp::wrap(liberation_stochastic_eta_context_independence(context_pointer, theta, eta, sigma, omega, proposal_modes, proposal_roots, proposal_precisions, normals, log_uniforms, mcmc_steps, current_values, proposal_df, proposal_scales));
+    return rcpp_result_gen;
+END_RCPP
+}
+// liberation_stochastic_eta_context_bayes
+Rcpp::List liberation_stochastic_eta_context_bayes(SEXP context_pointer, const Rcpp::List& map_config, int n_burn, int n_sample, int n_thin, double step_scale, double eta_step, bool adapt, const std::string& outer_kernel, int adaptive_start, int adaptive_interval, double target_acceptance, double delayed_rejection_scale, const std::string& eta_kernel, int eta_refresh, int eta_maxit, double eta_tolerance, double eta_df, double eta_rescue_probability, double eta_parameter_refresh, double eta_low_acceptance, bool gibbs_omega);
+RcppExport SEXP _LibeRation_liberation_stochastic_eta_context_bayes(SEXP context_pointerSEXP, SEXP map_configSEXP, SEXP n_burnSEXP, SEXP n_sampleSEXP, SEXP n_thinSEXP, SEXP step_scaleSEXP, SEXP eta_stepSEXP, SEXP adaptSEXP, SEXP outer_kernelSEXP, SEXP adaptive_startSEXP, SEXP adaptive_intervalSEXP, SEXP target_acceptanceSEXP, SEXP delayed_rejection_scaleSEXP, SEXP eta_kernelSEXP, SEXP eta_refreshSEXP, SEXP eta_maxitSEXP, SEXP eta_toleranceSEXP, SEXP eta_dfSEXP, SEXP eta_rescue_probabilitySEXP, SEXP eta_parameter_refreshSEXP, SEXP eta_low_acceptanceSEXP, SEXP gibbs_omegaSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< SEXP >::type context_pointer(context_pointerSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::List& >::type map_config(map_configSEXP);
+    Rcpp::traits::input_parameter< int >::type n_burn(n_burnSEXP);
+    Rcpp::traits::input_parameter< int >::type n_sample(n_sampleSEXP);
+    Rcpp::traits::input_parameter< int >::type n_thin(n_thinSEXP);
+    Rcpp::traits::input_parameter< double >::type step_scale(step_scaleSEXP);
+    Rcpp::traits::input_parameter< double >::type eta_step(eta_stepSEXP);
+    Rcpp::traits::input_parameter< bool >::type adapt(adaptSEXP);
+    Rcpp::traits::input_parameter< const std::string& >::type outer_kernel(outer_kernelSEXP);
+    Rcpp::traits::input_parameter< int >::type adaptive_start(adaptive_startSEXP);
+    Rcpp::traits::input_parameter< int >::type adaptive_interval(adaptive_intervalSEXP);
+    Rcpp::traits::input_parameter< double >::type target_acceptance(target_acceptanceSEXP);
+    Rcpp::traits::input_parameter< double >::type delayed_rejection_scale(delayed_rejection_scaleSEXP);
+    Rcpp::traits::input_parameter< const std::string& >::type eta_kernel(eta_kernelSEXP);
+    Rcpp::traits::input_parameter< int >::type eta_refresh(eta_refreshSEXP);
+    Rcpp::traits::input_parameter< int >::type eta_maxit(eta_maxitSEXP);
+    Rcpp::traits::input_parameter< double >::type eta_tolerance(eta_toleranceSEXP);
+    Rcpp::traits::input_parameter< double >::type eta_df(eta_dfSEXP);
+    Rcpp::traits::input_parameter< double >::type eta_rescue_probability(eta_rescue_probabilitySEXP);
+    Rcpp::traits::input_parameter< double >::type eta_parameter_refresh(eta_parameter_refreshSEXP);
+    Rcpp::traits::input_parameter< double >::type eta_low_acceptance(eta_low_acceptanceSEXP);
+    Rcpp::traits::input_parameter< bool >::type gibbs_omega(gibbs_omegaSEXP);
+    rcpp_result_gen = Rcpp::wrap(liberation_stochastic_eta_context_bayes(context_pointer, map_config, n_burn, n_sample, n_thin, step_scale, eta_step, adapt, outer_kernel, adaptive_start, adaptive_interval, target_acceptance, delayed_rejection_scale, eta_kernel, eta_refresh, eta_maxit, eta_tolerance, eta_df, eta_rescue_probability, eta_parameter_refresh, eta_low_acceptance, gibbs_omega));
+    return rcpp_result_gen;
+END_RCPP
+}
+// liberation_gq_context_create
+SEXP liberation_gq_context_create(SEXP stochastic_context_pointer, const Rcpp::List& map_config, const Rcpp::NumericMatrix& nodes, const Rcpp::NumericVector& log_measure, const Rcpp::NumericVector& measure_sign, bool adaptive, int eta_maxit, double tolerance);
+RcppExport SEXP _LibeRation_liberation_gq_context_create(SEXP stochastic_context_pointerSEXP, SEXP map_configSEXP, SEXP nodesSEXP, SEXP log_measureSEXP, SEXP measure_signSEXP, SEXP adaptiveSEXP, SEXP eta_maxitSEXP, SEXP toleranceSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< SEXP >::type stochastic_context_pointer(stochastic_context_pointerSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::List& >::type map_config(map_configSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::NumericMatrix& >::type nodes(nodesSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::NumericVector& >::type log_measure(log_measureSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::NumericVector& >::type measure_sign(measure_signSEXP);
+    Rcpp::traits::input_parameter< bool >::type adaptive(adaptiveSEXP);
+    Rcpp::traits::input_parameter< int >::type eta_maxit(eta_maxitSEXP);
+    Rcpp::traits::input_parameter< double >::type tolerance(toleranceSEXP);
+    rcpp_result_gen = Rcpp::wrap(liberation_gq_context_create(stochastic_context_pointer, map_config, nodes, log_measure, measure_sign, adaptive, eta_maxit, tolerance));
+    return rcpp_result_gen;
+END_RCPP
+}
+// liberation_gq_context_eval
+Rcpp::List liberation_gq_context_eval(SEXP context_pointer, const Rcpp::NumericVector& encoded, bool gradient);
+RcppExport SEXP _LibeRation_liberation_gq_context_eval(SEXP context_pointerSEXP, SEXP encodedSEXP, SEXP gradientSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< SEXP >::type context_pointer(context_pointerSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::NumericVector& >::type encoded(encodedSEXP);
+    Rcpp::traits::input_parameter< bool >::type gradient(gradientSEXP);
+    rcpp_result_gen = Rcpp::wrap(liberation_gq_context_eval(context_pointer, encoded, gradient));
+    return rcpp_result_gen;
+END_RCPP
+}
+// liberation_gq_context_optimize
+Rcpp::List liberation_gq_context_optimize(SEXP context_pointer, int maxit, int trace, bool exact_refinement);
+RcppExport SEXP _LibeRation_liberation_gq_context_optimize(SEXP context_pointerSEXP, SEXP maxitSEXP, SEXP traceSEXP, SEXP exact_refinementSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< SEXP >::type context_pointer(context_pointerSEXP);
+    Rcpp::traits::input_parameter< int >::type maxit(maxitSEXP);
+    Rcpp::traits::input_parameter< int >::type trace(traceSEXP);
+    Rcpp::traits::input_parameter< bool >::type exact_refinement(exact_refinementSEXP);
+    rcpp_result_gen = Rcpp::wrap(liberation_gq_context_optimize(context_pointer, maxit, trace, exact_refinement));
+    return rcpp_result_gen;
+END_RCPP
+}
+// liberation_stochastic_eta_context_telemetry
+Rcpp::List liberation_stochastic_eta_context_telemetry(SEXP context_pointer);
+RcppExport SEXP _LibeRation_liberation_stochastic_eta_context_telemetry(SEXP context_pointerSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< SEXP >::type context_pointer(context_pointerSEXP);
+    rcpp_result_gen = Rcpp::wrap(liberation_stochastic_eta_context_telemetry(context_pointer));
+    return rcpp_result_gen;
+END_RCPP
+}
+// liberation_saem_fixed_eta_context_create
+SEXP liberation_saem_fixed_eta_context_create(const Rcpp::List& tape_pointers, const Rcpp::NumericMatrix& eta, int n_theta, int n_sigma, int n_omega);
+RcppExport SEXP _LibeRation_liberation_saem_fixed_eta_context_create(SEXP tape_pointersSEXP, SEXP etaSEXP, SEXP n_thetaSEXP, SEXP n_sigmaSEXP, SEXP n_omegaSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< const Rcpp::List& >::type tape_pointers(tape_pointersSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::NumericMatrix& >::type eta(etaSEXP);
+    Rcpp::traits::input_parameter< int >::type n_theta(n_thetaSEXP);
+    Rcpp::traits::input_parameter< int >::type n_sigma(n_sigmaSEXP);
+    Rcpp::traits::input_parameter< int >::type n_omega(n_omegaSEXP);
+    rcpp_result_gen = Rcpp::wrap(liberation_saem_fixed_eta_context_create(tape_pointers, eta, n_theta, n_sigma, n_omega));
+    return rcpp_result_gen;
+END_RCPP
+}
+// liberation_saem_fixed_eta_context_eval
+Rcpp::List liberation_saem_fixed_eta_context_eval(SEXP context_pointer, const Rcpp::NumericVector& theta, const Rcpp::NumericVector& sigma, const Rcpp::NumericVector& omega);
+RcppExport SEXP _LibeRation_liberation_saem_fixed_eta_context_eval(SEXP context_pointerSEXP, SEXP thetaSEXP, SEXP sigmaSEXP, SEXP omegaSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< SEXP >::type context_pointer(context_pointerSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::NumericVector& >::type theta(thetaSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::NumericVector& >::type sigma(sigmaSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::NumericVector& >::type omega(omegaSEXP);
+    rcpp_result_gen = Rcpp::wrap(liberation_saem_fixed_eta_context_eval(context_pointer, theta, sigma, omega));
+    return rcpp_result_gen;
+END_RCPP
+}
+// liberation_saem_fixed_eta_context_eval_aggregate
+Rcpp::List liberation_saem_fixed_eta_context_eval_aggregate(SEXP context_pointer, const Rcpp::NumericVector& theta, const Rcpp::NumericVector& sigma, const Rcpp::NumericVector& omega);
+RcppExport SEXP _LibeRation_liberation_saem_fixed_eta_context_eval_aggregate(SEXP context_pointerSEXP, SEXP thetaSEXP, SEXP sigmaSEXP, SEXP omegaSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< SEXP >::type context_pointer(context_pointerSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::NumericVector& >::type theta(thetaSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::NumericVector& >::type sigma(sigmaSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::NumericVector& >::type omega(omegaSEXP);
+    rcpp_result_gen = Rcpp::wrap(liberation_saem_fixed_eta_context_eval_aggregate(context_pointer, theta, sigma, omega));
+    return rcpp_result_gen;
+END_RCPP
+}
+// liberation_weighted_eta_context_create
+SEXP liberation_weighted_eta_context_create(SEXP engine_pointer, const Rcpp::List& tape_pointers, const Rcpp::List& subject_data, int n_theta, int n_eta, int n_sigma, int n_omega, bool use_ode, bool reduced_population_tape, int native_threads, int ode_support_tape_limit);
+RcppExport SEXP _LibeRation_liberation_weighted_eta_context_create(SEXP engine_pointerSEXP, SEXP tape_pointersSEXP, SEXP subject_dataSEXP, SEXP n_thetaSEXP, SEXP n_etaSEXP, SEXP n_sigmaSEXP, SEXP n_omegaSEXP, SEXP use_odeSEXP, SEXP reduced_population_tapeSEXP, SEXP native_threadsSEXP, SEXP ode_support_tape_limitSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< SEXP >::type engine_pointer(engine_pointerSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::List& >::type tape_pointers(tape_pointersSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::List& >::type subject_data(subject_dataSEXP);
+    Rcpp::traits::input_parameter< int >::type n_theta(n_thetaSEXP);
+    Rcpp::traits::input_parameter< int >::type n_eta(n_etaSEXP);
+    Rcpp::traits::input_parameter< int >::type n_sigma(n_sigmaSEXP);
+    Rcpp::traits::input_parameter< int >::type n_omega(n_omegaSEXP);
+    Rcpp::traits::input_parameter< bool >::type use_ode(use_odeSEXP);
+    Rcpp::traits::input_parameter< bool >::type reduced_population_tape(reduced_population_tapeSEXP);
+    Rcpp::traits::input_parameter< int >::type native_threads(native_threadsSEXP);
+    Rcpp::traits::input_parameter< int >::type ode_support_tape_limit(ode_support_tape_limitSEXP);
+    rcpp_result_gen = Rcpp::wrap(liberation_weighted_eta_context_create(engine_pointer, tape_pointers, subject_data, n_theta, n_eta, n_sigma, n_omega, use_ode, reduced_population_tape, native_threads, ode_support_tape_limit));
+    return rcpp_result_gen;
+END_RCPP
+}
+// liberation_weighted_eta_context_set
+void liberation_weighted_eta_context_set(SEXP context_pointer, const Rcpp::List& eta, const Rcpp::List& weights);
+RcppExport SEXP _LibeRation_liberation_weighted_eta_context_set(SEXP context_pointerSEXP, SEXP etaSEXP, SEXP weightsSEXP) {
+BEGIN_RCPP
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< SEXP >::type context_pointer(context_pointerSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::List& >::type eta(etaSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::List& >::type weights(weightsSEXP);
+    liberation_weighted_eta_context_set(context_pointer, eta, weights);
+    return R_NilValue;
+END_RCPP
+}
+// liberation_weighted_eta_context_set_importance
+Rcpp::List liberation_weighted_eta_context_set_importance(SEXP context_pointer, const Rcpp::NumericVector& theta, const Rcpp::NumericVector& sigma, const Rcpp::NumericVector& omega, const Rcpp::List& eta, const Rcpp::List& log_proposal);
+RcppExport SEXP _LibeRation_liberation_weighted_eta_context_set_importance(SEXP context_pointerSEXP, SEXP thetaSEXP, SEXP sigmaSEXP, SEXP omegaSEXP, SEXP etaSEXP, SEXP log_proposalSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< SEXP >::type context_pointer(context_pointerSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::NumericVector& >::type theta(thetaSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::NumericVector& >::type sigma(sigmaSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::NumericVector& >::type omega(omegaSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::List& >::type eta(etaSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::List& >::type log_proposal(log_proposalSEXP);
+    rcpp_result_gen = Rcpp::wrap(liberation_weighted_eta_context_set_importance(context_pointer, theta, sigma, omega, eta, log_proposal));
+    return rcpp_result_gen;
+END_RCPP
+}
+// liberation_weighted_eta_context_update
+void liberation_weighted_eta_context_update(SEXP context_pointer, const Rcpp::NumericMatrix& eta, double gamma, int max_support, double prune_tolerance);
+RcppExport SEXP _LibeRation_liberation_weighted_eta_context_update(SEXP context_pointerSEXP, SEXP etaSEXP, SEXP gammaSEXP, SEXP max_supportSEXP, SEXP prune_toleranceSEXP) {
+BEGIN_RCPP
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< SEXP >::type context_pointer(context_pointerSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::NumericMatrix& >::type eta(etaSEXP);
+    Rcpp::traits::input_parameter< double >::type gamma(gammaSEXP);
+    Rcpp::traits::input_parameter< int >::type max_support(max_supportSEXP);
+    Rcpp::traits::input_parameter< double >::type prune_tolerance(prune_toleranceSEXP);
+    liberation_weighted_eta_context_update(context_pointer, eta, gamma, max_support, prune_tolerance);
+    return R_NilValue;
+END_RCPP
+}
+// liberation_weighted_eta_context_eval
+Rcpp::List liberation_weighted_eta_context_eval(SEXP context_pointer, const Rcpp::NumericVector& theta, const Rcpp::NumericVector& sigma, const Rcpp::NumericVector& omega);
+RcppExport SEXP _LibeRation_liberation_weighted_eta_context_eval(SEXP context_pointerSEXP, SEXP thetaSEXP, SEXP sigmaSEXP, SEXP omegaSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< SEXP >::type context_pointer(context_pointerSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::NumericVector& >::type theta(thetaSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::NumericVector& >::type sigma(sigmaSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::NumericVector& >::type omega(omegaSEXP);
+    rcpp_result_gen = Rcpp::wrap(liberation_weighted_eta_context_eval(context_pointer, theta, sigma, omega));
+    return rcpp_result_gen;
+END_RCPP
+}
+// liberation_weighted_eta_context_mean
+Rcpp::NumericMatrix liberation_weighted_eta_context_mean(SEXP context_pointer);
+RcppExport SEXP _LibeRation_liberation_weighted_eta_context_mean(SEXP context_pointerSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< SEXP >::type context_pointer(context_pointerSEXP);
+    rcpp_result_gen = Rcpp::wrap(liberation_weighted_eta_context_mean(context_pointer));
+    return rcpp_result_gen;
+END_RCPP
+}
+// liberation_weighted_eta_context_weights
+Rcpp::NumericVector liberation_weighted_eta_context_weights(SEXP context_pointer);
+RcppExport SEXP _LibeRation_liberation_weighted_eta_context_weights(SEXP context_pointerSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< SEXP >::type context_pointer(context_pointerSEXP);
+    rcpp_result_gen = Rcpp::wrap(liberation_weighted_eta_context_weights(context_pointer));
+    return rcpp_result_gen;
+END_RCPP
+}
+// liberation_weighted_eta_context_recenter
+void liberation_weighted_eta_context_recenter(SEXP context_pointer, const Rcpp::NumericMatrix& adjustment);
+RcppExport SEXP _LibeRation_liberation_weighted_eta_context_recenter(SEXP context_pointerSEXP, SEXP adjustmentSEXP) {
+BEGIN_RCPP
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< SEXP >::type context_pointer(context_pointerSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::NumericMatrix& >::type adjustment(adjustmentSEXP);
+    liberation_weighted_eta_context_recenter(context_pointer, adjustment);
+    return R_NilValue;
+END_RCPP
+}
+// liberation_weighted_eta_context_omega
+Rcpp::NumericVector liberation_weighted_eta_context_omega(SEXP context_pointer, int n_eta_base, int iov, const Rcpp::IntegerVector& omega_rows, const Rcpp::IntegerVector& omega_cols);
+RcppExport SEXP _LibeRation_liberation_weighted_eta_context_omega(SEXP context_pointerSEXP, SEXP n_eta_baseSEXP, SEXP iovSEXP, SEXP omega_rowsSEXP, SEXP omega_colsSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< SEXP >::type context_pointer(context_pointerSEXP);
+    Rcpp::traits::input_parameter< int >::type n_eta_base(n_eta_baseSEXP);
+    Rcpp::traits::input_parameter< int >::type iov(iovSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::IntegerVector& >::type omega_rows(omega_rowsSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::IntegerVector& >::type omega_cols(omega_colsSEXP);
+    rcpp_result_gen = Rcpp::wrap(liberation_weighted_eta_context_omega(context_pointer, n_eta_base, iov, omega_rows, omega_cols));
+    return rcpp_result_gen;
+END_RCPP
+}
+// liberation_weighted_eta_context_sigma
+Rcpp::NumericVector liberation_weighted_eta_context_sigma(SEXP context_pointer, SEXP engine_pointer, const Rcpp::DataFrame& data, const Rcpp::NumericVector& theta, const Rcpp::NumericVector& sigma);
+RcppExport SEXP _LibeRation_liberation_weighted_eta_context_sigma(SEXP context_pointerSEXP, SEXP engine_pointerSEXP, SEXP dataSEXP, SEXP thetaSEXP, SEXP sigmaSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< SEXP >::type context_pointer(context_pointerSEXP);
+    Rcpp::traits::input_parameter< SEXP >::type engine_pointer(engine_pointerSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::DataFrame& >::type data(dataSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::NumericVector& >::type theta(thetaSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::NumericVector& >::type sigma(sigmaSEXP);
+    rcpp_result_gen = Rcpp::wrap(liberation_weighted_eta_context_sigma(context_pointer, engine_pointer, data, theta, sigma));
+    return rcpp_result_gen;
+END_RCPP
+}
+// liberation_weighted_eta_context_telemetry
+Rcpp::List liberation_weighted_eta_context_telemetry(SEXP context_pointer);
+RcppExport SEXP _LibeRation_liberation_weighted_eta_context_telemetry(SEXP context_pointerSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< SEXP >::type context_pointer(context_pointerSEXP);
+    rcpp_result_gen = Rcpp::wrap(liberation_weighted_eta_context_telemetry(context_pointer));
+    return rcpp_result_gen;
+END_RCPP
+}
+// liberation_saem_mstep
+Rcpp::List liberation_saem_mstep(const Rcpp::List& tape_pointers, const Rcpp::NumericMatrix& eta, const Rcpp::NumericVector& theta, const Rcpp::NumericVector& sigma, const Rcpp::NumericVector& omega, const Rcpp::IntegerVector& theta_free, const Rcpp::IntegerVector& sigma_free, const Rcpp::NumericVector& lower, const Rcpp::NumericVector& upper, const Rcpp::List& prior_config, int maxit, double tolerance, int trace, SEXP optimizer_state);
+RcppExport SEXP _LibeRation_liberation_saem_mstep(SEXP tape_pointersSEXP, SEXP etaSEXP, SEXP thetaSEXP, SEXP sigmaSEXP, SEXP omegaSEXP, SEXP theta_freeSEXP, SEXP sigma_freeSEXP, SEXP lowerSEXP, SEXP upperSEXP, SEXP prior_configSEXP, SEXP maxitSEXP, SEXP toleranceSEXP, SEXP traceSEXP, SEXP optimizer_stateSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< const Rcpp::List& >::type tape_pointers(tape_pointersSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::NumericMatrix& >::type eta(etaSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::NumericVector& >::type theta(thetaSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::NumericVector& >::type sigma(sigmaSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::NumericVector& >::type omega(omegaSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::IntegerVector& >::type theta_free(theta_freeSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::IntegerVector& >::type sigma_free(sigma_freeSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::NumericVector& >::type lower(lowerSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::NumericVector& >::type upper(upperSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::List& >::type prior_config(prior_configSEXP);
+    Rcpp::traits::input_parameter< int >::type maxit(maxitSEXP);
+    Rcpp::traits::input_parameter< double >::type tolerance(toleranceSEXP);
+    Rcpp::traits::input_parameter< int >::type trace(traceSEXP);
+    Rcpp::traits::input_parameter< SEXP >::type optimizer_state(optimizer_stateSEXP);
+    rcpp_result_gen = Rcpp::wrap(liberation_saem_mstep(tape_pointers, eta, theta, sigma, omega, theta_free, sigma_free, lower, upper, prior_config, maxit, tolerance, trace, optimizer_state));
+    return rcpp_result_gen;
+END_RCPP
+}
+// liberation_saem_weighted_mstep
+Rcpp::List liberation_saem_weighted_mstep(SEXP weighted_context, const Rcpp::NumericVector& theta, const Rcpp::NumericVector& sigma, const Rcpp::NumericVector& omega, const Rcpp::IntegerVector& theta_free, const Rcpp::IntegerVector& sigma_free, const Rcpp::NumericVector& lower, const Rcpp::NumericVector& upper, const Rcpp::List& prior_config, int maxit, double tolerance, int trace, SEXP optimizer_state);
+RcppExport SEXP _LibeRation_liberation_saem_weighted_mstep(SEXP weighted_contextSEXP, SEXP thetaSEXP, SEXP sigmaSEXP, SEXP omegaSEXP, SEXP theta_freeSEXP, SEXP sigma_freeSEXP, SEXP lowerSEXP, SEXP upperSEXP, SEXP prior_configSEXP, SEXP maxitSEXP, SEXP toleranceSEXP, SEXP traceSEXP, SEXP optimizer_stateSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< SEXP >::type weighted_context(weighted_contextSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::NumericVector& >::type theta(thetaSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::NumericVector& >::type sigma(sigmaSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::NumericVector& >::type omega(omegaSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::IntegerVector& >::type theta_free(theta_freeSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::IntegerVector& >::type sigma_free(sigma_freeSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::NumericVector& >::type lower(lowerSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::NumericVector& >::type upper(upperSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::List& >::type prior_config(prior_configSEXP);
+    Rcpp::traits::input_parameter< int >::type maxit(maxitSEXP);
+    Rcpp::traits::input_parameter< double >::type tolerance(toleranceSEXP);
+    Rcpp::traits::input_parameter< int >::type trace(traceSEXP);
+    Rcpp::traits::input_parameter< SEXP >::type optimizer_state(optimizer_stateSEXP);
+    rcpp_result_gen = Rcpp::wrap(liberation_saem_weighted_mstep(weighted_context, theta, sigma, omega, theta_free, sigma_free, lower, upper, prior_config, maxit, tolerance, trace, optimizer_state));
+    return rcpp_result_gen;
+END_RCPP
+}
+// liberation_saem_omega_sufficient
+Rcpp::NumericVector liberation_saem_omega_sufficient(const Rcpp::NumericMatrix& eta, int n_eta_base, int iov, const Rcpp::IntegerVector& omega_rows, const Rcpp::IntegerVector& omega_cols);
+RcppExport SEXP _LibeRation_liberation_saem_omega_sufficient(SEXP etaSEXP, SEXP n_eta_baseSEXP, SEXP iovSEXP, SEXP omega_rowsSEXP, SEXP omega_colsSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< const Rcpp::NumericMatrix& >::type eta(etaSEXP);
+    Rcpp::traits::input_parameter< int >::type n_eta_base(n_eta_baseSEXP);
+    Rcpp::traits::input_parameter< int >::type iov(iovSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::IntegerVector& >::type omega_rows(omega_rowsSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::IntegerVector& >::type omega_cols(omega_colsSEXP);
+    rcpp_result_gen = Rcpp::wrap(liberation_saem_omega_sufficient(eta, n_eta_base, iov, omega_rows, omega_cols));
+    return rcpp_result_gen;
+END_RCPP
+}
 // liberation_engine_create
 SEXP liberation_engine_create(const Rcpp::List& specification);
 RcppExport SEXP _LibeRation_liberation_engine_create(SEXP specificationSEXP) {
@@ -70,6 +515,227 @@ BEGIN_RCPP
     Rcpp::traits::input_parameter< const Rcpp::NumericMatrix& >::type eta(etaSEXP);
     Rcpp::traits::input_parameter< const Rcpp::NumericVector& >::type sigma(sigmaSEXP);
     rcpp_result_gen = Rcpp::wrap(liberation_engine_simulate(engine_pointer, data, theta, eta, sigma));
+    return rcpp_result_gen;
+END_RCPP
+}
+// liberation_subject_store_create
+SEXP liberation_subject_store_create(const Rcpp::DataFrame& data, const Rcpp::IntegerVector& starts, const Rcpp::IntegerVector& lengths);
+RcppExport SEXP _LibeRation_liberation_subject_store_create(SEXP dataSEXP, SEXP startsSEXP, SEXP lengthsSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< const Rcpp::DataFrame& >::type data(dataSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::IntegerVector& >::type starts(startsSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::IntegerVector& >::type lengths(lengthsSEXP);
+    rcpp_result_gen = Rcpp::wrap(liberation_subject_store_create(data, starts, lengths));
+    return rcpp_result_gen;
+END_RCPP
+}
+// liberation_subject_view_signature
+std::string liberation_subject_view_signature(SEXP data_input, const Rcpp::CharacterVector& ignored_columns, bool include_fo_layout);
+RcppExport SEXP _LibeRation_liberation_subject_view_signature(SEXP data_inputSEXP, SEXP ignored_columnsSEXP, SEXP include_fo_layoutSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< SEXP >::type data_input(data_inputSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::CharacterVector& >::type ignored_columns(ignored_columnsSEXP);
+    Rcpp::traits::input_parameter< bool >::type include_fo_layout(include_fo_layoutSEXP);
+    rcpp_result_gen = Rcpp::wrap(liberation_subject_view_signature(data_input, ignored_columns, include_fo_layout));
+    return rcpp_result_gen;
+END_RCPP
+}
+// liberation_subject_view_project
+Rcpp::List liberation_subject_view_project(SEXP data_input, const Rcpp::CharacterVector& columns, bool observed_only, bool first_only);
+RcppExport SEXP _LibeRation_liberation_subject_view_project(SEXP data_inputSEXP, SEXP columnsSEXP, SEXP observed_onlySEXP, SEXP first_onlySEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< SEXP >::type data_input(data_inputSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::CharacterVector& >::type columns(columnsSEXP);
+    Rcpp::traits::input_parameter< bool >::type observed_only(observed_onlySEXP);
+    Rcpp::traits::input_parameter< bool >::type first_only(first_onlySEXP);
+    rcpp_result_gen = Rcpp::wrap(liberation_subject_view_project(data_input, columns, observed_only, first_only));
+    return rcpp_result_gen;
+END_RCPP
+}
+// liberation_subject_effect_covariance
+Rcpp::NumericMatrix liberation_subject_effect_covariance(SEXP engine_pointer, SEXP data_input, const Rcpp::NumericVector& omega, int expanded_dimension);
+RcppExport SEXP _LibeRation_liberation_subject_effect_covariance(SEXP engine_pointerSEXP, SEXP data_inputSEXP, SEXP omegaSEXP, SEXP expanded_dimensionSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< SEXP >::type engine_pointer(engine_pointerSEXP);
+    Rcpp::traits::input_parameter< SEXP >::type data_input(data_inputSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::NumericVector& >::type omega(omegaSEXP);
+    Rcpp::traits::input_parameter< int >::type expanded_dimension(expanded_dimensionSEXP);
+    rcpp_result_gen = Rcpp::wrap(liberation_subject_effect_covariance(engine_pointer, data_input, omega, expanded_dimension));
+    return rcpp_result_gen;
+END_RCPP
+}
+// liberation_its_gaussian_covariance
+Rcpp::List liberation_its_gaussian_covariance(SEXP engine_pointer, const Rcpp::List& prediction_tapes, const Rcpp::List& subject_data, const Rcpp::NumericVector& theta, const Rcpp::NumericMatrix& modes, const Rcpp::NumericVector& sigma, const Rcpp::NumericVector& omega);
+RcppExport SEXP _LibeRation_liberation_its_gaussian_covariance(SEXP engine_pointerSEXP, SEXP prediction_tapesSEXP, SEXP subject_dataSEXP, SEXP thetaSEXP, SEXP modesSEXP, SEXP sigmaSEXP, SEXP omegaSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< SEXP >::type engine_pointer(engine_pointerSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::List& >::type prediction_tapes(prediction_tapesSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::List& >::type subject_data(subject_dataSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::NumericVector& >::type theta(thetaSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::NumericMatrix& >::type modes(modesSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::NumericVector& >::type sigma(sigmaSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::NumericVector& >::type omega(omegaSEXP);
+    rcpp_result_gen = Rcpp::wrap(liberation_its_gaussian_covariance(engine_pointer, prediction_tapes, subject_data, theta, modes, sigma, omega));
+    return rcpp_result_gen;
+END_RCPP
+}
+// liberation_subject_observation_count
+int liberation_subject_observation_count(SEXP data_input);
+RcppExport SEXP _LibeRation_liberation_subject_observation_count(SEXP data_inputSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< SEXP >::type data_input(data_inputSEXP);
+    rcpp_result_gen = Rcpp::wrap(liberation_subject_observation_count(data_input));
+    return rcpp_result_gen;
+END_RCPP
+}
+// liberation_subject_observation_counts
+Rcpp::IntegerVector liberation_subject_observation_counts(SEXP subject_source);
+RcppExport SEXP _LibeRation_liberation_subject_observation_counts(SEXP subject_sourceSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< SEXP >::type subject_source(subject_sourceSEXP);
+    rcpp_result_gen = Rcpp::wrap(liberation_subject_observation_counts(subject_source));
+    return rcpp_result_gen;
+END_RCPP
+}
+// liberation_mvn_draws
+Rcpp::NumericMatrix liberation_mvn_draws(const Rcpp::NumericVector& mean_input, const Rcpp::NumericMatrix& covariance_input, int draws);
+RcppExport SEXP _LibeRation_liberation_mvn_draws(SEXP mean_inputSEXP, SEXP covariance_inputSEXP, SEXP drawsSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< const Rcpp::NumericVector& >::type mean_input(mean_inputSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::NumericMatrix& >::type covariance_input(covariance_inputSEXP);
+    Rcpp::traits::input_parameter< int >::type draws(drawsSEXP);
+    rcpp_result_gen = Rcpp::wrap(liberation_mvn_draws(mean_input, covariance_input, draws));
+    return rcpp_result_gen;
+END_RCPP
+}
+// liberation_eta_draw_pool
+Rcpp::NumericMatrix liberation_eta_draw_pool(const Rcpp::NumericMatrix& root_input, int subjects, int replicates);
+RcppExport SEXP _LibeRation_liberation_eta_draw_pool(SEXP root_inputSEXP, SEXP subjectsSEXP, SEXP replicatesSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< const Rcpp::NumericMatrix& >::type root_input(root_inputSEXP);
+    Rcpp::traits::input_parameter< int >::type subjects(subjectsSEXP);
+    Rcpp::traits::input_parameter< int >::type replicates(replicatesSEXP);
+    rcpp_result_gen = Rcpp::wrap(liberation_eta_draw_pool(root_input, subjects, replicates));
+    return rcpp_result_gen;
+END_RCPP
+}
+// liberation_expand_addl_layout
+Rcpp::List liberation_expand_addl_layout(const Rcpp::NumericVector& time, const Rcpp::IntegerVector& evid, const Rcpp::NumericVector& amount, const Rcpp::NumericVector& interval, const Rcpp::IntegerVector& addl, const Rcpp::IntegerVector& source_row);
+RcppExport SEXP _LibeRation_liberation_expand_addl_layout(SEXP timeSEXP, SEXP evidSEXP, SEXP amountSEXP, SEXP intervalSEXP, SEXP addlSEXP, SEXP source_rowSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< const Rcpp::NumericVector& >::type time(timeSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::IntegerVector& >::type evid(evidSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::NumericVector& >::type amount(amountSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::NumericVector& >::type interval(intervalSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::IntegerVector& >::type addl(addlSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::IntegerVector& >::type source_row(source_rowSEXP);
+    rcpp_result_gen = Rcpp::wrap(liberation_expand_addl_layout(time, evid, amount, interval, addl, source_row));
+    return rcpp_result_gen;
+END_RCPP
+}
+// liberation_event_order
+Rcpp::IntegerVector liberation_event_order(const Rcpp::IntegerVector& id, const Rcpp::NumericVector& time, const Rcpp::IntegerVector& priority, const Rcpp::IntegerVector& source_row);
+RcppExport SEXP _LibeRation_liberation_event_order(SEXP idSEXP, SEXP timeSEXP, SEXP prioritySEXP, SEXP source_rowSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< const Rcpp::IntegerVector& >::type id(idSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::NumericVector& >::type time(timeSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::IntegerVector& >::type priority(prioritySEXP);
+    Rcpp::traits::input_parameter< const Rcpp::IntegerVector& >::type source_row(source_rowSEXP);
+    rcpp_result_gen = Rcpp::wrap(liberation_event_order(id, time, priority, source_row));
+    return rcpp_result_gen;
+END_RCPP
+}
+// liberation_mu_program_create
+SEXP liberation_mu_program_create(const Rcpp::List& ir, const Rcpp::IntegerVector& eta);
+RcppExport SEXP _LibeRation_liberation_mu_program_create(SEXP irSEXP, SEXP etaSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< const Rcpp::List& >::type ir(irSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::IntegerVector& >::type eta(etaSEXP);
+    rcpp_result_gen = Rcpp::wrap(liberation_mu_program_create(ir, eta));
+    return rcpp_result_gen;
+END_RCPP
+}
+// liberation_mu_program_eval
+Rcpp::NumericMatrix liberation_mu_program_eval(SEXP program_pointer, SEXP subject_source, const Rcpp::NumericVector& theta, int n_eta);
+RcppExport SEXP _LibeRation_liberation_mu_program_eval(SEXP program_pointerSEXP, SEXP subject_sourceSEXP, SEXP thetaSEXP, SEXP n_etaSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< SEXP >::type program_pointer(program_pointerSEXP);
+    Rcpp::traits::input_parameter< SEXP >::type subject_source(subject_sourceSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::NumericVector& >::type theta(thetaSEXP);
+    Rcpp::traits::input_parameter< int >::type n_eta(n_etaSEXP);
+    rcpp_result_gen = Rcpp::wrap(liberation_mu_program_eval(program_pointer, subject_source, theta, n_eta));
+    return rcpp_result_gen;
+END_RCPP
+}
+// liberation_mu_affine_design
+Rcpp::List liberation_mu_affine_design(SEXP program_pointer, SEXP subject_source, const Rcpp::NumericVector& theta, const Rcpp::IntegerVector& theta_indices, const Rcpp::CharacterVector& links, int n_eta);
+RcppExport SEXP _LibeRation_liberation_mu_affine_design(SEXP program_pointerSEXP, SEXP subject_sourceSEXP, SEXP thetaSEXP, SEXP theta_indicesSEXP, SEXP linksSEXP, SEXP n_etaSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< SEXP >::type program_pointer(program_pointerSEXP);
+    Rcpp::traits::input_parameter< SEXP >::type subject_source(subject_sourceSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::NumericVector& >::type theta(thetaSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::IntegerVector& >::type theta_indices(theta_indicesSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::CharacterVector& >::type links(linksSEXP);
+    Rcpp::traits::input_parameter< int >::type n_eta(n_etaSEXP);
+    rcpp_result_gen = Rcpp::wrap(liberation_mu_affine_design(program_pointer, subject_source, theta, theta_indices, links, n_eta));
+    return rcpp_result_gen;
+END_RCPP
+}
+// liberation_saem_sigma_sufficient
+Rcpp::NumericVector liberation_saem_sigma_sufficient(SEXP engine_pointer, const Rcpp::DataFrame& data, const Rcpp::NumericVector& theta, const Rcpp::NumericMatrix& eta, const Rcpp::NumericVector& sigma);
+RcppExport SEXP _LibeRation_liberation_saem_sigma_sufficient(SEXP engine_pointerSEXP, SEXP dataSEXP, SEXP thetaSEXP, SEXP etaSEXP, SEXP sigmaSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< SEXP >::type engine_pointer(engine_pointerSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::DataFrame& >::type data(dataSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::NumericVector& >::type theta(thetaSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::NumericMatrix& >::type eta(etaSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::NumericVector& >::type sigma(sigmaSEXP);
+    rcpp_result_gen = Rcpp::wrap(liberation_saem_sigma_sufficient(engine_pointer, data, theta, eta, sigma));
+    return rcpp_result_gen;
+END_RCPP
+}
+// liberation_engine_simulate_batch
+Rcpp::List liberation_engine_simulate_batch(SEXP engine_pointer, const Rcpp::DataFrame& data, const Rcpp::NumericVector& theta, const Rcpp::List& eta_values, const Rcpp::NumericVector& sigma);
+RcppExport SEXP _LibeRation_liberation_engine_simulate_batch(SEXP engine_pointerSEXP, SEXP dataSEXP, SEXP thetaSEXP, SEXP eta_valuesSEXP, SEXP sigmaSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< SEXP >::type engine_pointer(engine_pointerSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::DataFrame& >::type data(dataSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::NumericVector& >::type theta(thetaSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::List& >::type eta_values(eta_valuesSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::NumericVector& >::type sigma(sigmaSEXP);
+    rcpp_result_gen = Rcpp::wrap(liberation_engine_simulate_batch(engine_pointer, data, theta, eta_values, sigma));
     return rcpp_result_gen;
 END_RCPP
 }
@@ -164,17 +830,17 @@ BEGIN_RCPP
 END_RCPP
 }
 // liberation_prediction_tape_create
-SEXP liberation_prediction_tape_create(SEXP engine_pointer, const Rcpp::DataFrame& data, const Rcpp::NumericVector& theta, const Rcpp::NumericMatrix& eta, const Rcpp::NumericVector& sigma);
-RcppExport SEXP _LibeRation_liberation_prediction_tape_create(SEXP engine_pointerSEXP, SEXP dataSEXP, SEXP thetaSEXP, SEXP etaSEXP, SEXP sigmaSEXP) {
+SEXP liberation_prediction_tape_create(SEXP engine_pointer, SEXP data_input, const Rcpp::NumericVector& theta, const Rcpp::NumericMatrix& eta, const Rcpp::NumericVector& sigma);
+RcppExport SEXP _LibeRation_liberation_prediction_tape_create(SEXP engine_pointerSEXP, SEXP data_inputSEXP, SEXP thetaSEXP, SEXP etaSEXP, SEXP sigmaSEXP) {
 BEGIN_RCPP
     Rcpp::RObject rcpp_result_gen;
     Rcpp::RNGScope rcpp_rngScope_gen;
     Rcpp::traits::input_parameter< SEXP >::type engine_pointer(engine_pointerSEXP);
-    Rcpp::traits::input_parameter< const Rcpp::DataFrame& >::type data(dataSEXP);
+    Rcpp::traits::input_parameter< SEXP >::type data_input(data_inputSEXP);
     Rcpp::traits::input_parameter< const Rcpp::NumericVector& >::type theta(thetaSEXP);
     Rcpp::traits::input_parameter< const Rcpp::NumericMatrix& >::type eta(etaSEXP);
     Rcpp::traits::input_parameter< const Rcpp::NumericVector& >::type sigma(sigmaSEXP);
-    rcpp_result_gen = Rcpp::wrap(liberation_prediction_tape_create(engine_pointer, data, theta, eta, sigma));
+    rcpp_result_gen = Rcpp::wrap(liberation_prediction_tape_create(engine_pointer, data_input, theta, eta, sigma));
     return rcpp_result_gen;
 END_RCPP
 }
@@ -190,26 +856,37 @@ BEGIN_RCPP
 END_RCPP
 }
 // liberation_prediction_tape_new_dynamic
-Rcpp::NumericVector liberation_prediction_tape_new_dynamic(SEXP tape_pointer, const Rcpp::DataFrame& data);
-RcppExport SEXP _LibeRation_liberation_prediction_tape_new_dynamic(SEXP tape_pointerSEXP, SEXP dataSEXP) {
+Rcpp::NumericVector liberation_prediction_tape_new_dynamic(SEXP tape_pointer, SEXP data_input);
+RcppExport SEXP _LibeRation_liberation_prediction_tape_new_dynamic(SEXP tape_pointerSEXP, SEXP data_inputSEXP) {
 BEGIN_RCPP
     Rcpp::RObject rcpp_result_gen;
     Rcpp::RNGScope rcpp_rngScope_gen;
     Rcpp::traits::input_parameter< SEXP >::type tape_pointer(tape_pointerSEXP);
-    Rcpp::traits::input_parameter< const Rcpp::DataFrame& >::type data(dataSEXP);
-    rcpp_result_gen = Rcpp::wrap(liberation_prediction_tape_new_dynamic(tape_pointer, data));
+    Rcpp::traits::input_parameter< SEXP >::type data_input(data_inputSEXP);
+    rcpp_result_gen = Rcpp::wrap(liberation_prediction_tape_new_dynamic(tape_pointer, data_input));
     return rcpp_result_gen;
 END_RCPP
 }
+// liberation_prediction_tape_set_dynamic
+void liberation_prediction_tape_set_dynamic(SEXP tape_pointer, const Rcpp::NumericVector& values);
+RcppExport SEXP _LibeRation_liberation_prediction_tape_set_dynamic(SEXP tape_pointerSEXP, SEXP valuesSEXP) {
+BEGIN_RCPP
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< SEXP >::type tape_pointer(tape_pointerSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::NumericVector& >::type values(valuesSEXP);
+    liberation_prediction_tape_set_dynamic(tape_pointer, values);
+    return R_NilValue;
+END_RCPP
+}
 // liberation_fo_tape_new_dynamic
-Rcpp::NumericVector liberation_fo_tape_new_dynamic(SEXP tape_pointer, const Rcpp::DataFrame& data);
-RcppExport SEXP _LibeRation_liberation_fo_tape_new_dynamic(SEXP tape_pointerSEXP, SEXP dataSEXP) {
+Rcpp::NumericVector liberation_fo_tape_new_dynamic(SEXP tape_pointer, SEXP data_input);
+RcppExport SEXP _LibeRation_liberation_fo_tape_new_dynamic(SEXP tape_pointerSEXP, SEXP data_inputSEXP) {
 BEGIN_RCPP
     Rcpp::RObject rcpp_result_gen;
     Rcpp::RNGScope rcpp_rngScope_gen;
     Rcpp::traits::input_parameter< SEXP >::type tape_pointer(tape_pointerSEXP);
-    Rcpp::traits::input_parameter< const Rcpp::DataFrame& >::type data(dataSEXP);
-    rcpp_result_gen = Rcpp::wrap(liberation_fo_tape_new_dynamic(tape_pointer, data));
+    Rcpp::traits::input_parameter< SEXP >::type data_input(data_inputSEXP);
+    rcpp_result_gen = Rcpp::wrap(liberation_fo_tape_new_dynamic(tape_pointer, data_input));
     return rcpp_result_gen;
 END_RCPP
 }
@@ -252,55 +929,98 @@ BEGIN_RCPP
 END_RCPP
 }
 // liberation_fo_tape_create
-SEXP liberation_fo_tape_create(SEXP engine_pointer, SEXP prediction_tape_pointer, const Rcpp::DataFrame& data, const Rcpp::NumericVector& theta, const Rcpp::NumericVector& sigma, const Rcpp::NumericVector& omega);
-RcppExport SEXP _LibeRation_liberation_fo_tape_create(SEXP engine_pointerSEXP, SEXP prediction_tape_pointerSEXP, SEXP dataSEXP, SEXP thetaSEXP, SEXP sigmaSEXP, SEXP omegaSEXP) {
+SEXP liberation_fo_tape_create(SEXP engine_pointer, SEXP prediction_tape_pointer, SEXP data_input, const Rcpp::NumericVector& theta, const Rcpp::NumericVector& sigma, const Rcpp::NumericVector& omega, bool low_rank, double low_rank_tolerance, double low_rank_condition_tolerance);
+RcppExport SEXP _LibeRation_liberation_fo_tape_create(SEXP engine_pointerSEXP, SEXP prediction_tape_pointerSEXP, SEXP data_inputSEXP, SEXP thetaSEXP, SEXP sigmaSEXP, SEXP omegaSEXP, SEXP low_rankSEXP, SEXP low_rank_toleranceSEXP, SEXP low_rank_condition_toleranceSEXP) {
 BEGIN_RCPP
     Rcpp::RObject rcpp_result_gen;
     Rcpp::RNGScope rcpp_rngScope_gen;
     Rcpp::traits::input_parameter< SEXP >::type engine_pointer(engine_pointerSEXP);
     Rcpp::traits::input_parameter< SEXP >::type prediction_tape_pointer(prediction_tape_pointerSEXP);
-    Rcpp::traits::input_parameter< const Rcpp::DataFrame& >::type data(dataSEXP);
+    Rcpp::traits::input_parameter< SEXP >::type data_input(data_inputSEXP);
     Rcpp::traits::input_parameter< const Rcpp::NumericVector& >::type theta(thetaSEXP);
     Rcpp::traits::input_parameter< const Rcpp::NumericVector& >::type sigma(sigmaSEXP);
     Rcpp::traits::input_parameter< const Rcpp::NumericVector& >::type omega(omegaSEXP);
-    rcpp_result_gen = Rcpp::wrap(liberation_fo_tape_create(engine_pointer, prediction_tape_pointer, data, theta, sigma, omega));
+    Rcpp::traits::input_parameter< bool >::type low_rank(low_rankSEXP);
+    Rcpp::traits::input_parameter< double >::type low_rank_tolerance(low_rank_toleranceSEXP);
+    Rcpp::traits::input_parameter< double >::type low_rank_condition_tolerance(low_rank_condition_toleranceSEXP);
+    rcpp_result_gen = Rcpp::wrap(liberation_fo_tape_create(engine_pointer, prediction_tape_pointer, data_input, theta, sigma, omega, low_rank, low_rank_tolerance, low_rank_condition_tolerance));
     return rcpp_result_gen;
 END_RCPP
 }
 // liberation_curvature_tape_create
-SEXP liberation_curvature_tape_create(SEXP engine_pointer, SEXP prediction_tape_pointer, SEXP objective_tape_pointer, const Rcpp::DataFrame& data, const Rcpp::NumericVector& theta, const Rcpp::NumericVector& eta, const Rcpp::NumericVector& sigma, const Rcpp::NumericVector& omega, const std::string& approximation);
-RcppExport SEXP _LibeRation_liberation_curvature_tape_create(SEXP engine_pointerSEXP, SEXP prediction_tape_pointerSEXP, SEXP objective_tape_pointerSEXP, SEXP dataSEXP, SEXP thetaSEXP, SEXP etaSEXP, SEXP sigmaSEXP, SEXP omegaSEXP, SEXP approximationSEXP) {
+SEXP liberation_curvature_tape_create(SEXP engine_pointer, SEXP prediction_tape_pointer, SEXP objective_tape_pointer, SEXP data_input, const Rcpp::NumericVector& theta, const Rcpp::NumericVector& eta, const Rcpp::NumericVector& sigma, const Rcpp::NumericVector& omega, const std::string& approximation);
+RcppExport SEXP _LibeRation_liberation_curvature_tape_create(SEXP engine_pointerSEXP, SEXP prediction_tape_pointerSEXP, SEXP objective_tape_pointerSEXP, SEXP data_inputSEXP, SEXP thetaSEXP, SEXP etaSEXP, SEXP sigmaSEXP, SEXP omegaSEXP, SEXP approximationSEXP) {
 BEGIN_RCPP
     Rcpp::RObject rcpp_result_gen;
     Rcpp::RNGScope rcpp_rngScope_gen;
     Rcpp::traits::input_parameter< SEXP >::type engine_pointer(engine_pointerSEXP);
     Rcpp::traits::input_parameter< SEXP >::type prediction_tape_pointer(prediction_tape_pointerSEXP);
     Rcpp::traits::input_parameter< SEXP >::type objective_tape_pointer(objective_tape_pointerSEXP);
-    Rcpp::traits::input_parameter< const Rcpp::DataFrame& >::type data(dataSEXP);
+    Rcpp::traits::input_parameter< SEXP >::type data_input(data_inputSEXP);
     Rcpp::traits::input_parameter< const Rcpp::NumericVector& >::type theta(thetaSEXP);
     Rcpp::traits::input_parameter< const Rcpp::NumericVector& >::type eta(etaSEXP);
     Rcpp::traits::input_parameter< const Rcpp::NumericVector& >::type sigma(sigmaSEXP);
     Rcpp::traits::input_parameter< const Rcpp::NumericVector& >::type omega(omegaSEXP);
     Rcpp::traits::input_parameter< const std::string& >::type approximation(approximationSEXP);
-    rcpp_result_gen = Rcpp::wrap(liberation_curvature_tape_create(engine_pointer, prediction_tape_pointer, objective_tape_pointer, data, theta, eta, sigma, omega, approximation));
+    rcpp_result_gen = Rcpp::wrap(liberation_curvature_tape_create(engine_pointer, prediction_tape_pointer, objective_tape_pointer, data_input, theta, eta, sigma, omega, approximation));
     return rcpp_result_gen;
 END_RCPP
 }
 // liberation_objective_tape_create
-SEXP liberation_objective_tape_create(SEXP engine_pointer, const Rcpp::DataFrame& data, const Rcpp::NumericVector& theta, const Rcpp::NumericMatrix& eta, const Rcpp::NumericVector& sigma, const Rcpp::NumericVector& omega, bool interaction);
-RcppExport SEXP _LibeRation_liberation_objective_tape_create(SEXP engine_pointerSEXP, SEXP dataSEXP, SEXP thetaSEXP, SEXP etaSEXP, SEXP sigmaSEXP, SEXP omegaSEXP, SEXP interactionSEXP) {
+SEXP liberation_objective_tape_create(SEXP engine_pointer, SEXP data_input, const Rcpp::NumericVector& theta, const Rcpp::NumericMatrix& eta, const Rcpp::NumericVector& sigma, const Rcpp::NumericVector& omega, bool interaction);
+RcppExport SEXP _LibeRation_liberation_objective_tape_create(SEXP engine_pointerSEXP, SEXP data_inputSEXP, SEXP thetaSEXP, SEXP etaSEXP, SEXP sigmaSEXP, SEXP omegaSEXP, SEXP interactionSEXP) {
 BEGIN_RCPP
     Rcpp::RObject rcpp_result_gen;
     Rcpp::RNGScope rcpp_rngScope_gen;
     Rcpp::traits::input_parameter< SEXP >::type engine_pointer(engine_pointerSEXP);
-    Rcpp::traits::input_parameter< const Rcpp::DataFrame& >::type data(dataSEXP);
+    Rcpp::traits::input_parameter< SEXP >::type data_input(data_inputSEXP);
     Rcpp::traits::input_parameter< const Rcpp::NumericVector& >::type theta(thetaSEXP);
     Rcpp::traits::input_parameter< const Rcpp::NumericMatrix& >::type eta(etaSEXP);
     Rcpp::traits::input_parameter< const Rcpp::NumericVector& >::type sigma(sigmaSEXP);
     Rcpp::traits::input_parameter< const Rcpp::NumericVector& >::type omega(omegaSEXP);
     Rcpp::traits::input_parameter< bool >::type interaction(interactionSEXP);
-    rcpp_result_gen = Rcpp::wrap(liberation_objective_tape_create(engine_pointer, data, theta, eta, sigma, omega, interaction));
+    rcpp_result_gen = Rcpp::wrap(liberation_objective_tape_create(engine_pointer, data_input, theta, eta, sigma, omega, interaction));
     return rcpp_result_gen;
+END_RCPP
+}
+// liberation_shared_fo_objective_tape_create
+SEXP liberation_shared_fo_objective_tape_create(SEXP engine_pointer, SEXP prediction_tape_pointer, SEXP data_input, const Rcpp::NumericVector& theta, const Rcpp::NumericMatrix& eta, const Rcpp::NumericVector& sigma, const Rcpp::NumericVector& omega);
+RcppExport SEXP _LibeRation_liberation_shared_fo_objective_tape_create(SEXP engine_pointerSEXP, SEXP prediction_tape_pointerSEXP, SEXP data_inputSEXP, SEXP thetaSEXP, SEXP etaSEXP, SEXP sigmaSEXP, SEXP omegaSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< SEXP >::type engine_pointer(engine_pointerSEXP);
+    Rcpp::traits::input_parameter< SEXP >::type prediction_tape_pointer(prediction_tape_pointerSEXP);
+    Rcpp::traits::input_parameter< SEXP >::type data_input(data_inputSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::NumericVector& >::type theta(thetaSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::NumericMatrix& >::type eta(etaSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::NumericVector& >::type sigma(sigmaSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::NumericVector& >::type omega(omegaSEXP);
+    rcpp_result_gen = Rcpp::wrap(liberation_shared_fo_objective_tape_create(engine_pointer, prediction_tape_pointer, data_input, theta, eta, sigma, omega));
+    return rcpp_result_gen;
+END_RCPP
+}
+// liberation_objective_tape_new_dynamic
+Rcpp::NumericVector liberation_objective_tape_new_dynamic(SEXP tape_pointer, SEXP data_input);
+RcppExport SEXP _LibeRation_liberation_objective_tape_new_dynamic(SEXP tape_pointerSEXP, SEXP data_inputSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< SEXP >::type tape_pointer(tape_pointerSEXP);
+    Rcpp::traits::input_parameter< SEXP >::type data_input(data_inputSEXP);
+    rcpp_result_gen = Rcpp::wrap(liberation_objective_tape_new_dynamic(tape_pointer, data_input));
+    return rcpp_result_gen;
+END_RCPP
+}
+// liberation_objective_tape_set_dynamic
+void liberation_objective_tape_set_dynamic(SEXP tape_pointer, const Rcpp::NumericVector& values);
+RcppExport SEXP _LibeRation_liberation_objective_tape_set_dynamic(SEXP tape_pointerSEXP, SEXP valuesSEXP) {
+BEGIN_RCPP
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< SEXP >::type tape_pointer(tape_pointerSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::NumericVector& >::type values(valuesSEXP);
+    liberation_objective_tape_set_dynamic(tape_pointer, values);
+    return R_NilValue;
 END_RCPP
 }
 // liberation_objective_tape_eval
@@ -381,26 +1101,41 @@ BEGIN_RCPP
 END_RCPP
 }
 // liberation_objective_tape_collection_values
-Rcpp::NumericVector liberation_objective_tape_collection_values(const Rcpp::List& tape_pointers, const Rcpp::NumericMatrix& points);
-RcppExport SEXP _LibeRation_liberation_objective_tape_collection_values(SEXP tape_pointersSEXP, SEXP pointsSEXP) {
+Rcpp::NumericVector liberation_objective_tape_collection_values(const Rcpp::List& tape_pointers, const Rcpp::NumericMatrix& points, const Rcpp::List& subject_data);
+RcppExport SEXP _LibeRation_liberation_objective_tape_collection_values(SEXP tape_pointersSEXP, SEXP pointsSEXP, SEXP subject_dataSEXP) {
 BEGIN_RCPP
     Rcpp::RObject rcpp_result_gen;
     Rcpp::RNGScope rcpp_rngScope_gen;
     Rcpp::traits::input_parameter< const Rcpp::List& >::type tape_pointers(tape_pointersSEXP);
     Rcpp::traits::input_parameter< const Rcpp::NumericMatrix& >::type points(pointsSEXP);
-    rcpp_result_gen = Rcpp::wrap(liberation_objective_tape_collection_values(tape_pointers, points));
+    Rcpp::traits::input_parameter< const Rcpp::List& >::type subject_data(subject_dataSEXP);
+    rcpp_result_gen = Rcpp::wrap(liberation_objective_tape_collection_values(tape_pointers, points, subject_data));
     return rcpp_result_gen;
 END_RCPP
 }
 // liberation_objective_tape_collection_gradients
-Rcpp::NumericMatrix liberation_objective_tape_collection_gradients(const Rcpp::List& tape_pointers, const Rcpp::NumericMatrix& points);
-RcppExport SEXP _LibeRation_liberation_objective_tape_collection_gradients(SEXP tape_pointersSEXP, SEXP pointsSEXP) {
+Rcpp::NumericMatrix liberation_objective_tape_collection_gradients(const Rcpp::List& tape_pointers, const Rcpp::NumericMatrix& points, const Rcpp::List& subject_data);
+RcppExport SEXP _LibeRation_liberation_objective_tape_collection_gradients(SEXP tape_pointersSEXP, SEXP pointsSEXP, SEXP subject_dataSEXP) {
 BEGIN_RCPP
     Rcpp::RObject rcpp_result_gen;
     Rcpp::RNGScope rcpp_rngScope_gen;
     Rcpp::traits::input_parameter< const Rcpp::List& >::type tape_pointers(tape_pointersSEXP);
     Rcpp::traits::input_parameter< const Rcpp::NumericMatrix& >::type points(pointsSEXP);
-    rcpp_result_gen = Rcpp::wrap(liberation_objective_tape_collection_gradients(tape_pointers, points));
+    Rcpp::traits::input_parameter< const Rcpp::List& >::type subject_data(subject_dataSEXP);
+    rcpp_result_gen = Rcpp::wrap(liberation_objective_tape_collection_gradients(tape_pointers, points, subject_data));
+    return rcpp_result_gen;
+END_RCPP
+}
+// liberation_objective_tape_collection_value_gradients
+Rcpp::List liberation_objective_tape_collection_value_gradients(const Rcpp::List& tape_pointers, const Rcpp::NumericMatrix& points, const Rcpp::List& subject_data);
+RcppExport SEXP _LibeRation_liberation_objective_tape_collection_value_gradients(SEXP tape_pointersSEXP, SEXP pointsSEXP, SEXP subject_dataSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< const Rcpp::List& >::type tape_pointers(tape_pointersSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::NumericMatrix& >::type points(pointsSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::List& >::type subject_data(subject_dataSEXP);
+    rcpp_result_gen = Rcpp::wrap(liberation_objective_tape_collection_value_gradients(tape_pointers, points, subject_data));
     return rcpp_result_gen;
 END_RCPP
 }
@@ -451,9 +1186,29 @@ BEGIN_RCPP
     return rcpp_result_gen;
 END_RCPP
 }
+// liberation_objective_tape_eta_mode_prior
+Rcpp::List liberation_objective_tape_eta_mode_prior(SEXP tape_pointer, const Rcpp::NumericVector& point, const Rcpp::IntegerVector& eta_positions, const Rcpp::NumericVector& start, const Rcpp::NumericVector& prior_mean, const Rcpp::NumericMatrix& base_precision_input, const Rcpp::NumericMatrix& prior_precision_input, int maxit, double tolerance, bool exact_hessian);
+RcppExport SEXP _LibeRation_liberation_objective_tape_eta_mode_prior(SEXP tape_pointerSEXP, SEXP pointSEXP, SEXP eta_positionsSEXP, SEXP startSEXP, SEXP prior_meanSEXP, SEXP base_precision_inputSEXP, SEXP prior_precision_inputSEXP, SEXP maxitSEXP, SEXP toleranceSEXP, SEXP exact_hessianSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< SEXP >::type tape_pointer(tape_pointerSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::NumericVector& >::type point(pointSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::IntegerVector& >::type eta_positions(eta_positionsSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::NumericVector& >::type start(startSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::NumericVector& >::type prior_mean(prior_meanSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::NumericMatrix& >::type base_precision_input(base_precision_inputSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::NumericMatrix& >::type prior_precision_input(prior_precision_inputSEXP);
+    Rcpp::traits::input_parameter< int >::type maxit(maxitSEXP);
+    Rcpp::traits::input_parameter< double >::type tolerance(toleranceSEXP);
+    Rcpp::traits::input_parameter< bool >::type exact_hessian(exact_hessianSEXP);
+    rcpp_result_gen = Rcpp::wrap(liberation_objective_tape_eta_mode_prior(tape_pointer, point, eta_positions, start, prior_mean, base_precision_input, prior_precision_input, maxit, tolerance, exact_hessian));
+    return rcpp_result_gen;
+END_RCPP
+}
 // liberation_objective_tape_eta_modes
-Rcpp::List liberation_objective_tape_eta_modes(const Rcpp::List& tape_pointers, const Rcpp::NumericMatrix& points, const Rcpp::IntegerVector& eta_positions, const Rcpp::NumericMatrix& starts, int maxit, double tolerance, bool exact_hessian);
-RcppExport SEXP _LibeRation_liberation_objective_tape_eta_modes(SEXP tape_pointersSEXP, SEXP pointsSEXP, SEXP eta_positionsSEXP, SEXP startsSEXP, SEXP maxitSEXP, SEXP toleranceSEXP, SEXP exact_hessianSEXP) {
+Rcpp::List liberation_objective_tape_eta_modes(const Rcpp::List& tape_pointers, const Rcpp::NumericMatrix& points, const Rcpp::IntegerVector& eta_positions, const Rcpp::NumericMatrix& starts, int maxit, double tolerance, bool exact_hessian, SEXP subject_data_input, bool reuse_optimizer_state);
+RcppExport SEXP _LibeRation_liberation_objective_tape_eta_modes(SEXP tape_pointersSEXP, SEXP pointsSEXP, SEXP eta_positionsSEXP, SEXP startsSEXP, SEXP maxitSEXP, SEXP toleranceSEXP, SEXP exact_hessianSEXP, SEXP subject_data_inputSEXP, SEXP reuse_optimizer_stateSEXP) {
 BEGIN_RCPP
     Rcpp::RObject rcpp_result_gen;
     Rcpp::RNGScope rcpp_rngScope_gen;
@@ -464,7 +1219,9 @@ BEGIN_RCPP
     Rcpp::traits::input_parameter< int >::type maxit(maxitSEXP);
     Rcpp::traits::input_parameter< double >::type tolerance(toleranceSEXP);
     Rcpp::traits::input_parameter< bool >::type exact_hessian(exact_hessianSEXP);
-    rcpp_result_gen = Rcpp::wrap(liberation_objective_tape_eta_modes(tape_pointers, points, eta_positions, starts, maxit, tolerance, exact_hessian));
+    Rcpp::traits::input_parameter< SEXP >::type subject_data_input(subject_data_inputSEXP);
+    Rcpp::traits::input_parameter< bool >::type reuse_optimizer_state(reuse_optimizer_stateSEXP);
+    rcpp_result_gen = Rcpp::wrap(liberation_objective_tape_eta_modes(tape_pointers, points, eta_positions, starts, maxit, tolerance, exact_hessian, subject_data_input, reuse_optimizer_state));
     return rcpp_result_gen;
 END_RCPP
 }
@@ -481,8 +1238,8 @@ BEGIN_RCPP
 END_RCPP
 }
 // liberation_objective_tape_eta_metropolis
-Rcpp::List liberation_objective_tape_eta_metropolis(const Rcpp::List& tape_pointers, const Rcpp::NumericMatrix& points, const Rcpp::IntegerVector& eta_positions, const Rcpp::NumericMatrix& current_eta, const Rcpp::List& proposal_roots, const Rcpp::NumericMatrix& normals, const Rcpp::NumericVector& log_uniforms, int mcmc_steps, double step_scale);
-RcppExport SEXP _LibeRation_liberation_objective_tape_eta_metropolis(SEXP tape_pointersSEXP, SEXP pointsSEXP, SEXP eta_positionsSEXP, SEXP current_etaSEXP, SEXP proposal_rootsSEXP, SEXP normalsSEXP, SEXP log_uniformsSEXP, SEXP mcmc_stepsSEXP, SEXP step_scaleSEXP) {
+Rcpp::List liberation_objective_tape_eta_metropolis(const Rcpp::List& tape_pointers, const Rcpp::NumericMatrix& points, const Rcpp::IntegerVector& eta_positions, const Rcpp::NumericMatrix& current_eta, const Rcpp::List& proposal_roots, const Rcpp::NumericMatrix& normals, const Rcpp::NumericVector& log_uniforms, int mcmc_steps, double step_scale, Rcpp::Nullable<Rcpp::NumericVector> current_values_input);
+RcppExport SEXP _LibeRation_liberation_objective_tape_eta_metropolis(SEXP tape_pointersSEXP, SEXP pointsSEXP, SEXP eta_positionsSEXP, SEXP current_etaSEXP, SEXP proposal_rootsSEXP, SEXP normalsSEXP, SEXP log_uniformsSEXP, SEXP mcmc_stepsSEXP, SEXP step_scaleSEXP, SEXP current_values_inputSEXP) {
 BEGIN_RCPP
     Rcpp::RObject rcpp_result_gen;
     Rcpp::RNGScope rcpp_rngScope_gen;
@@ -495,7 +1252,119 @@ BEGIN_RCPP
     Rcpp::traits::input_parameter< const Rcpp::NumericVector& >::type log_uniforms(log_uniformsSEXP);
     Rcpp::traits::input_parameter< int >::type mcmc_steps(mcmc_stepsSEXP);
     Rcpp::traits::input_parameter< double >::type step_scale(step_scaleSEXP);
-    rcpp_result_gen = Rcpp::wrap(liberation_objective_tape_eta_metropolis(tape_pointers, points, eta_positions, current_eta, proposal_roots, normals, log_uniforms, mcmc_steps, step_scale));
+    Rcpp::traits::input_parameter< Rcpp::Nullable<Rcpp::NumericVector> >::type current_values_input(current_values_inputSEXP);
+    rcpp_result_gen = Rcpp::wrap(liberation_objective_tape_eta_metropolis(tape_pointers, points, eta_positions, current_eta, proposal_roots, normals, log_uniforms, mcmc_steps, step_scale, current_values_input));
+    return rcpp_result_gen;
+END_RCPP
+}
+// liberation_objective_tape_importance_collection
+Rcpp::List liberation_objective_tape_importance_collection(const Rcpp::List& tape_pointers, const Rcpp::NumericMatrix& base_points, const Rcpp::IntegerVector& eta_positions, const Rcpp::List& eta_samples, const Rcpp::List& log_proposals, const Rcpp::List& log_measures, const Rcpp::List& measure_signs, bool gradient, SEXP subject_data_input);
+RcppExport SEXP _LibeRation_liberation_objective_tape_importance_collection(SEXP tape_pointersSEXP, SEXP base_pointsSEXP, SEXP eta_positionsSEXP, SEXP eta_samplesSEXP, SEXP log_proposalsSEXP, SEXP log_measuresSEXP, SEXP measure_signsSEXP, SEXP gradientSEXP, SEXP subject_data_inputSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< const Rcpp::List& >::type tape_pointers(tape_pointersSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::NumericMatrix& >::type base_points(base_pointsSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::IntegerVector& >::type eta_positions(eta_positionsSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::List& >::type eta_samples(eta_samplesSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::List& >::type log_proposals(log_proposalsSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::List& >::type log_measures(log_measuresSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::List& >::type measure_signs(measure_signsSEXP);
+    Rcpp::traits::input_parameter< bool >::type gradient(gradientSEXP);
+    Rcpp::traits::input_parameter< SEXP >::type subject_data_input(subject_data_inputSEXP);
+    rcpp_result_gen = Rcpp::wrap(liberation_objective_tape_importance_collection(tape_pointers, base_points, eta_positions, eta_samples, log_proposals, log_measures, measure_signs, gradient, subject_data_input));
+    return rcpp_result_gen;
+END_RCPP
+}
+// liberation_objective_tape_eta_grid
+Rcpp::List liberation_objective_tape_eta_grid(const Rcpp::List& tape_pointers, const Rcpp::NumericMatrix& base_points, const Rcpp::IntegerVector& eta_positions, const Rcpp::NumericMatrix& eta_grid, bool gradient);
+RcppExport SEXP _LibeRation_liberation_objective_tape_eta_grid(SEXP tape_pointersSEXP, SEXP base_pointsSEXP, SEXP eta_positionsSEXP, SEXP eta_gridSEXP, SEXP gradientSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< const Rcpp::List& >::type tape_pointers(tape_pointersSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::NumericMatrix& >::type base_points(base_pointsSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::IntegerVector& >::type eta_positions(eta_positionsSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::NumericMatrix& >::type eta_grid(eta_gridSEXP);
+    Rcpp::traits::input_parameter< bool >::type gradient(gradientSEXP);
+    rcpp_result_gen = Rcpp::wrap(liberation_objective_tape_eta_grid(tape_pointers, base_points, eta_positions, eta_grid, gradient));
+    return rcpp_result_gen;
+END_RCPP
+}
+// liberation_np_weights
+Rcpp::List liberation_np_weights(const Rcpp::NumericMatrix& loglik, const Rcpp::NumericVector& initial, int maxit, double tolerance);
+RcppExport SEXP _LibeRation_liberation_np_weights(SEXP loglikSEXP, SEXP initialSEXP, SEXP maxitSEXP, SEXP toleranceSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< const Rcpp::NumericMatrix& >::type loglik(loglikSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::NumericVector& >::type initial(initialSEXP);
+    Rcpp::traits::input_parameter< int >::type maxit(maxitSEXP);
+    Rcpp::traits::input_parameter< double >::type tolerance(toleranceSEXP);
+    rcpp_result_gen = Rcpp::wrap(liberation_np_weights(loglik, initial, maxit, tolerance));
+    return rcpp_result_gen;
+END_RCPP
+}
+// liberation_np_weights_interior
+Rcpp::List liberation_np_weights_interior(const Rcpp::NumericMatrix& loglik, const Rcpp::NumericVector& initial, int maxit, double tolerance);
+RcppExport SEXP _LibeRation_liberation_np_weights_interior(SEXP loglikSEXP, SEXP initialSEXP, SEXP maxitSEXP, SEXP toleranceSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< const Rcpp::NumericMatrix& >::type loglik(loglikSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::NumericVector& >::type initial(initialSEXP);
+    Rcpp::traits::input_parameter< int >::type maxit(maxitSEXP);
+    Rcpp::traits::input_parameter< double >::type tolerance(toleranceSEXP);
+    rcpp_result_gen = Rcpp::wrap(liberation_np_weights_interior(loglik, initial, maxit, tolerance));
+    return rcpp_result_gen;
+END_RCPP
+}
+// liberation_np_responsibilities
+Rcpp::List liberation_np_responsibilities(const Rcpp::NumericMatrix& loglik, const Rcpp::NumericVector& weights);
+RcppExport SEXP _LibeRation_liberation_np_responsibilities(SEXP loglikSEXP, SEXP weightsSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< const Rcpp::NumericMatrix& >::type loglik(loglikSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::NumericVector& >::type weights(weightsSEXP);
+    rcpp_result_gen = Rcpp::wrap(liberation_np_responsibilities(loglik, weights));
+    return rcpp_result_gen;
+END_RCPP
+}
+// liberation_np_gradient_reduce
+Rcpp::NumericVector liberation_np_gradient_reduce(const Rcpp::NumericVector& gradient, const Rcpp::NumericMatrix& responsibilities);
+RcppExport SEXP _LibeRation_liberation_np_gradient_reduce(SEXP gradientSEXP, SEXP responsibilitiesSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< const Rcpp::NumericVector& >::type gradient(gradientSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::NumericMatrix& >::type responsibilities(responsibilitiesSEXP);
+    rcpp_result_gen = Rcpp::wrap(liberation_np_gradient_reduce(gradient, responsibilities));
+    return rcpp_result_gen;
+END_RCPP
+}
+// liberation_waic_components
+Rcpp::List liberation_waic_components(const Rcpp::NumericMatrix& loglik);
+RcppExport SEXP _LibeRation_liberation_waic_components(SEXP loglikSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< const Rcpp::NumericMatrix& >::type loglik(loglikSEXP);
+    rcpp_result_gen = Rcpp::wrap(liberation_waic_components(loglik));
+    return rcpp_result_gen;
+END_RCPP
+}
+// liberation_ar1_standardize
+Rcpp::NumericVector liberation_ar1_standardize(const Rcpp::LogicalVector& observed, const Rcpp::IntegerVector& groups, double rho, bool use_ar1);
+RcppExport SEXP _LibeRation_liberation_ar1_standardize(SEXP observedSEXP, SEXP groupsSEXP, SEXP rhoSEXP, SEXP use_ar1SEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< const Rcpp::LogicalVector& >::type observed(observedSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::IntegerVector& >::type groups(groupsSEXP);
+    Rcpp::traits::input_parameter< double >::type rho(rhoSEXP);
+    Rcpp::traits::input_parameter< bool >::type use_ar1(use_ar1SEXP);
+    rcpp_result_gen = Rcpp::wrap(liberation_ar1_standardize(observed, groups, rho, use_ar1));
     return rcpp_result_gen;
 END_RCPP
 }
@@ -588,12 +1457,72 @@ BEGIN_RCPP
     return rcpp_result_gen;
 END_RCPP
 }
+// liberation_population_objective_native_optimizer
+Rcpp::List liberation_population_objective_native_optimizer(SEXP pointer, const Rcpp::NumericVector& start, const Rcpp::NumericVector& lower, const Rcpp::NumericVector& upper, int maxit, double tolerance, int trace);
+RcppExport SEXP _LibeRation_liberation_population_objective_native_optimizer(SEXP pointerSEXP, SEXP startSEXP, SEXP lowerSEXP, SEXP upperSEXP, SEXP maxitSEXP, SEXP toleranceSEXP, SEXP traceSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< SEXP >::type pointer(pointerSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::NumericVector& >::type start(startSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::NumericVector& >::type lower(lowerSEXP);
+    Rcpp::traits::input_parameter< const Rcpp::NumericVector& >::type upper(upperSEXP);
+    Rcpp::traits::input_parameter< int >::type maxit(maxitSEXP);
+    Rcpp::traits::input_parameter< double >::type tolerance(toleranceSEXP);
+    Rcpp::traits::input_parameter< int >::type trace(traceSEXP);
+    rcpp_result_gen = Rcpp::wrap(liberation_population_objective_native_optimizer(pointer, start, lower, upper, maxit, tolerance, trace));
+    return rcpp_result_gen;
+END_RCPP
+}
 
 static const R_CallMethodDef CallEntries[] = {
     {"_LibeRation_liberation_native_optimizer", (DL_FUNC) &_LibeRation_liberation_native_optimizer, 8},
     {"_LibeRation_liberation_nca_profile", (DL_FUNC) &_LibeRation_liberation_nca_profile, 9},
+    {"_LibeRation_liberation_stochastic_eta_context_create", (DL_FUNC) &_LibeRation_liberation_stochastic_eta_context_create, 14},
+    {"_LibeRation_liberation_stochastic_eta_context_eval", (DL_FUNC) &_LibeRation_liberation_stochastic_eta_context_eval, 5},
+    {"_LibeRation_liberation_stochastic_eta_context_laplace_proposal", (DL_FUNC) &_LibeRation_liberation_stochastic_eta_context_laplace_proposal, 7},
+    {"_LibeRation_liberation_stochastic_eta_context_random_walk", (DL_FUNC) &_LibeRation_liberation_stochastic_eta_context_random_walk, 11},
+    {"_LibeRation_liberation_stochastic_eta_context_independence", (DL_FUNC) &_LibeRation_liberation_stochastic_eta_context_independence, 14},
+    {"_LibeRation_liberation_stochastic_eta_context_bayes", (DL_FUNC) &_LibeRation_liberation_stochastic_eta_context_bayes, 22},
+    {"_LibeRation_liberation_gq_context_create", (DL_FUNC) &_LibeRation_liberation_gq_context_create, 8},
+    {"_LibeRation_liberation_gq_context_eval", (DL_FUNC) &_LibeRation_liberation_gq_context_eval, 3},
+    {"_LibeRation_liberation_gq_context_optimize", (DL_FUNC) &_LibeRation_liberation_gq_context_optimize, 4},
+    {"_LibeRation_liberation_stochastic_eta_context_telemetry", (DL_FUNC) &_LibeRation_liberation_stochastic_eta_context_telemetry, 1},
+    {"_LibeRation_liberation_saem_fixed_eta_context_create", (DL_FUNC) &_LibeRation_liberation_saem_fixed_eta_context_create, 5},
+    {"_LibeRation_liberation_saem_fixed_eta_context_eval", (DL_FUNC) &_LibeRation_liberation_saem_fixed_eta_context_eval, 4},
+    {"_LibeRation_liberation_saem_fixed_eta_context_eval_aggregate", (DL_FUNC) &_LibeRation_liberation_saem_fixed_eta_context_eval_aggregate, 4},
+    {"_LibeRation_liberation_weighted_eta_context_create", (DL_FUNC) &_LibeRation_liberation_weighted_eta_context_create, 11},
+    {"_LibeRation_liberation_weighted_eta_context_set", (DL_FUNC) &_LibeRation_liberation_weighted_eta_context_set, 3},
+    {"_LibeRation_liberation_weighted_eta_context_set_importance", (DL_FUNC) &_LibeRation_liberation_weighted_eta_context_set_importance, 6},
+    {"_LibeRation_liberation_weighted_eta_context_update", (DL_FUNC) &_LibeRation_liberation_weighted_eta_context_update, 5},
+    {"_LibeRation_liberation_weighted_eta_context_eval", (DL_FUNC) &_LibeRation_liberation_weighted_eta_context_eval, 4},
+    {"_LibeRation_liberation_weighted_eta_context_mean", (DL_FUNC) &_LibeRation_liberation_weighted_eta_context_mean, 1},
+    {"_LibeRation_liberation_weighted_eta_context_weights", (DL_FUNC) &_LibeRation_liberation_weighted_eta_context_weights, 1},
+    {"_LibeRation_liberation_weighted_eta_context_recenter", (DL_FUNC) &_LibeRation_liberation_weighted_eta_context_recenter, 2},
+    {"_LibeRation_liberation_weighted_eta_context_omega", (DL_FUNC) &_LibeRation_liberation_weighted_eta_context_omega, 5},
+    {"_LibeRation_liberation_weighted_eta_context_sigma", (DL_FUNC) &_LibeRation_liberation_weighted_eta_context_sigma, 5},
+    {"_LibeRation_liberation_weighted_eta_context_telemetry", (DL_FUNC) &_LibeRation_liberation_weighted_eta_context_telemetry, 1},
+    {"_LibeRation_liberation_saem_mstep", (DL_FUNC) &_LibeRation_liberation_saem_mstep, 14},
+    {"_LibeRation_liberation_saem_weighted_mstep", (DL_FUNC) &_LibeRation_liberation_saem_weighted_mstep, 13},
+    {"_LibeRation_liberation_saem_omega_sufficient", (DL_FUNC) &_LibeRation_liberation_saem_omega_sufficient, 5},
     {"_LibeRation_liberation_engine_create", (DL_FUNC) &_LibeRation_liberation_engine_create, 1},
     {"_LibeRation_liberation_engine_simulate", (DL_FUNC) &_LibeRation_liberation_engine_simulate, 5},
+    {"_LibeRation_liberation_subject_store_create", (DL_FUNC) &_LibeRation_liberation_subject_store_create, 3},
+    {"_LibeRation_liberation_subject_view_signature", (DL_FUNC) &_LibeRation_liberation_subject_view_signature, 3},
+    {"_LibeRation_liberation_subject_view_project", (DL_FUNC) &_LibeRation_liberation_subject_view_project, 4},
+    {"_LibeRation_liberation_subject_effect_covariance", (DL_FUNC) &_LibeRation_liberation_subject_effect_covariance, 4},
+    {"_LibeRation_liberation_its_gaussian_covariance", (DL_FUNC) &_LibeRation_liberation_its_gaussian_covariance, 7},
+    {"_LibeRation_liberation_subject_observation_count", (DL_FUNC) &_LibeRation_liberation_subject_observation_count, 1},
+    {"_LibeRation_liberation_subject_observation_counts", (DL_FUNC) &_LibeRation_liberation_subject_observation_counts, 1},
+    {"_LibeRation_liberation_mvn_draws", (DL_FUNC) &_LibeRation_liberation_mvn_draws, 3},
+    {"_LibeRation_liberation_eta_draw_pool", (DL_FUNC) &_LibeRation_liberation_eta_draw_pool, 3},
+    {"_LibeRation_liberation_expand_addl_layout", (DL_FUNC) &_LibeRation_liberation_expand_addl_layout, 6},
+    {"_LibeRation_liberation_event_order", (DL_FUNC) &_LibeRation_liberation_event_order, 4},
+    {"_LibeRation_liberation_mu_program_create", (DL_FUNC) &_LibeRation_liberation_mu_program_create, 2},
+    {"_LibeRation_liberation_mu_program_eval", (DL_FUNC) &_LibeRation_liberation_mu_program_eval, 4},
+    {"_LibeRation_liberation_mu_affine_design", (DL_FUNC) &_LibeRation_liberation_mu_affine_design, 6},
+    {"_LibeRation_liberation_saem_sigma_sufficient", (DL_FUNC) &_LibeRation_liberation_saem_sigma_sufficient, 5},
+    {"_LibeRation_liberation_engine_simulate_batch", (DL_FUNC) &_LibeRation_liberation_engine_simulate_batch, 5},
     {"_LibeRation_liberation_engine_hmm_filter", (DL_FUNC) &_LibeRation_liberation_engine_hmm_filter, 5},
     {"_LibeRation_liberation_engine_kalman_filter", (DL_FUNC) &_LibeRation_liberation_engine_kalman_filter, 5},
     {"_LibeRation_liberation_engine_kalman_simulate", (DL_FUNC) &_LibeRation_liberation_engine_kalman_simulate, 7},
@@ -603,26 +1532,40 @@ static const R_CallMethodDef CallEntries[] = {
     {"_LibeRation_liberation_prediction_tape_create", (DL_FUNC) &_LibeRation_liberation_prediction_tape_create, 5},
     {"_LibeRation_liberation_prediction_tape_info", (DL_FUNC) &_LibeRation_liberation_prediction_tape_info, 1},
     {"_LibeRation_liberation_prediction_tape_new_dynamic", (DL_FUNC) &_LibeRation_liberation_prediction_tape_new_dynamic, 2},
+    {"_LibeRation_liberation_prediction_tape_set_dynamic", (DL_FUNC) &_LibeRation_liberation_prediction_tape_set_dynamic, 2},
     {"_LibeRation_liberation_fo_tape_new_dynamic", (DL_FUNC) &_LibeRation_liberation_fo_tape_new_dynamic, 2},
     {"_LibeRation_liberation_prediction_tape_eval", (DL_FUNC) &_LibeRation_liberation_prediction_tape_eval, 3},
     {"_LibeRation_liberation_prediction_tape_eval_subset", (DL_FUNC) &_LibeRation_liberation_prediction_tape_eval_subset, 3},
     {"_LibeRation_liberation_matrix_exp_pade", (DL_FUNC) &_LibeRation_liberation_matrix_exp_pade, 2},
-    {"_LibeRation_liberation_fo_tape_create", (DL_FUNC) &_LibeRation_liberation_fo_tape_create, 6},
+    {"_LibeRation_liberation_fo_tape_create", (DL_FUNC) &_LibeRation_liberation_fo_tape_create, 9},
     {"_LibeRation_liberation_curvature_tape_create", (DL_FUNC) &_LibeRation_liberation_curvature_tape_create, 9},
     {"_LibeRation_liberation_objective_tape_create", (DL_FUNC) &_LibeRation_liberation_objective_tape_create, 7},
+    {"_LibeRation_liberation_shared_fo_objective_tape_create", (DL_FUNC) &_LibeRation_liberation_shared_fo_objective_tape_create, 7},
+    {"_LibeRation_liberation_objective_tape_new_dynamic", (DL_FUNC) &_LibeRation_liberation_objective_tape_new_dynamic, 2},
+    {"_LibeRation_liberation_objective_tape_set_dynamic", (DL_FUNC) &_LibeRation_liberation_objective_tape_set_dynamic, 2},
     {"_LibeRation_liberation_objective_tape_eval", (DL_FUNC) &_LibeRation_liberation_objective_tape_eval, 4},
     {"_LibeRation_liberation_objective_tape_info", (DL_FUNC) &_LibeRation_liberation_objective_tape_info, 1},
     {"_LibeRation_liberation_hmc_target_eval", (DL_FUNC) &_LibeRation_liberation_hmc_target_eval, 3},
     {"_LibeRation_liberation_hmc_sample", (DL_FUNC) &_LibeRation_liberation_hmc_sample, 15},
     {"_LibeRation_liberation_objective_tape_eta_values", (DL_FUNC) &_LibeRation_liberation_objective_tape_eta_values, 4},
-    {"_LibeRation_liberation_objective_tape_collection_values", (DL_FUNC) &_LibeRation_liberation_objective_tape_collection_values, 2},
-    {"_LibeRation_liberation_objective_tape_collection_gradients", (DL_FUNC) &_LibeRation_liberation_objective_tape_collection_gradients, 2},
+    {"_LibeRation_liberation_objective_tape_collection_values", (DL_FUNC) &_LibeRation_liberation_objective_tape_collection_values, 3},
+    {"_LibeRation_liberation_objective_tape_collection_gradients", (DL_FUNC) &_LibeRation_liberation_objective_tape_collection_gradients, 3},
+    {"_LibeRation_liberation_objective_tape_collection_value_gradients", (DL_FUNC) &_LibeRation_liberation_objective_tape_collection_value_gradients, 3},
     {"_LibeRation_liberation_objective_tape_hessian_subset", (DL_FUNC) &_LibeRation_liberation_objective_tape_hessian_subset, 4},
     {"_LibeRation_liberation_nested_population_gradient", (DL_FUNC) &_LibeRation_liberation_nested_population_gradient, 6},
     {"_LibeRation_liberation_objective_tape_eta_mode", (DL_FUNC) &_LibeRation_liberation_objective_tape_eta_mode, 7},
-    {"_LibeRation_liberation_objective_tape_eta_modes", (DL_FUNC) &_LibeRation_liberation_objective_tape_eta_modes, 7},
+    {"_LibeRation_liberation_objective_tape_eta_mode_prior", (DL_FUNC) &_LibeRation_liberation_objective_tape_eta_mode_prior, 10},
+    {"_LibeRation_liberation_objective_tape_eta_modes", (DL_FUNC) &_LibeRation_liberation_objective_tape_eta_modes, 9},
     {"_LibeRation_liberation_objective_tape_point_gradients", (DL_FUNC) &_LibeRation_liberation_objective_tape_point_gradients, 2},
-    {"_LibeRation_liberation_objective_tape_eta_metropolis", (DL_FUNC) &_LibeRation_liberation_objective_tape_eta_metropolis, 9},
+    {"_LibeRation_liberation_objective_tape_eta_metropolis", (DL_FUNC) &_LibeRation_liberation_objective_tape_eta_metropolis, 10},
+    {"_LibeRation_liberation_objective_tape_importance_collection", (DL_FUNC) &_LibeRation_liberation_objective_tape_importance_collection, 9},
+    {"_LibeRation_liberation_objective_tape_eta_grid", (DL_FUNC) &_LibeRation_liberation_objective_tape_eta_grid, 5},
+    {"_LibeRation_liberation_np_weights", (DL_FUNC) &_LibeRation_liberation_np_weights, 4},
+    {"_LibeRation_liberation_np_weights_interior", (DL_FUNC) &_LibeRation_liberation_np_weights_interior, 4},
+    {"_LibeRation_liberation_np_responsibilities", (DL_FUNC) &_LibeRation_liberation_np_responsibilities, 2},
+    {"_LibeRation_liberation_np_gradient_reduce", (DL_FUNC) &_LibeRation_liberation_np_gradient_reduce, 2},
+    {"_LibeRation_liberation_waic_components", (DL_FUNC) &_LibeRation_liberation_waic_components, 1},
+    {"_LibeRation_liberation_ar1_standardize", (DL_FUNC) &_LibeRation_liberation_ar1_standardize, 4},
     {"_LibeRation_liberation_mixture_component_nll", (DL_FUNC) &_LibeRation_liberation_mixture_component_nll, 5},
     {"_LibeRation_liberation_population_objective_create", (DL_FUNC) &_LibeRation_liberation_population_objective_create, 5},
     {"_LibeRation_liberation_population_objective_value", (DL_FUNC) &_LibeRation_liberation_population_objective_value, 2},
@@ -630,6 +1573,7 @@ static const R_CallMethodDef CallEntries[] = {
     {"_LibeRation_liberation_population_objective_hessian", (DL_FUNC) &_LibeRation_liberation_population_objective_hessian, 2},
     {"_LibeRation_liberation_population_objective_state", (DL_FUNC) &_LibeRation_liberation_population_objective_state, 2},
     {"_LibeRation_liberation_population_objective_telemetry", (DL_FUNC) &_LibeRation_liberation_population_objective_telemetry, 1},
+    {"_LibeRation_liberation_population_objective_native_optimizer", (DL_FUNC) &_LibeRation_liberation_population_objective_native_optimizer, 7},
     {NULL, NULL, 0}
 };
 

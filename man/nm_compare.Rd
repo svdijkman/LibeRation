@@ -53,5 +53,9 @@ An `nm_model_comparison`.
 The returned object retains model, dataset, fit and diagnostic fingerprints
 together with all comparison rules. It is therefore safe to save as a
 durable analysis artefact, feed into automated covariate workflows, or
-summarize for the local Help AI.
+summarize for the local Help AI. AIC, BIC, and likelihood-ratio deltas are
+calculated only for fits whose reported objective is a comparable likelihood.
+BAYES, HMC, and NUTS posterior scores remain visible but are explicitly
+excluded; use \code{\link[=nm_waic]{nm_waic()}} or
+\code{\link[=nm_psis_loo]{nm_psis_loo()}} for those fits.
 }

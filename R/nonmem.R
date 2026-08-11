@@ -349,7 +349,7 @@ nm_control_read <- function(x, strict = TRUE) {
   trans_parts <- regmatches(subroutines, trans_match)[[1L]]
   advan <- if (length(advan_parts)) as.integer(advan_parts[[2L]]) else 2L
   trans <- if (length(trans_parts)) as.integer(trans_parts[[2L]]) else 2L
-  if (!advan %in% 1:14) {
+  if (!advan %in% 1:18) {
     .nm_stop("The control stream requests unsupported ADVAN", advan, ".")
   }
   input <- .nm_control_input(sections)
@@ -473,12 +473,17 @@ nm_control_read <- function(x, strict = TRUE) {
   )
   model_error <- NULL
   equilibrium_records <- intersect(
-    unique(names_present), c("AES", "AESINITIAL", "AES0")
+    unique(names_present), c("AES", "AESINITIAL", "AESINIT", "AES0")
   )
-  if (advan == 9L && length(equilibrium_records)) {
+  if (advan %in% c(9L, 15L, 17L) && length(equilibrium_records)) {
     model_error <- paste0(
-      "ADVAN9 $AES/$AESINITIAL blocks are preserved but require explicit ",
+      "ADVAN", advan, " $AES/$AESINITIAL/$AESINIT blocks are preserved but require explicit ",
       "translation to LibeRation ALG and DAE_CONFIG declarations."
+    )
+  } else if (advan %in% 16:18) {
+    model_error <- paste0(
+      "ADVAN", advan, " delay declarations are preserved but require explicit ",
+      "translation of AP_/AD_ expressions to LAG(A(i), delay) and DDE_CONFIG."
     )
   }
   model <- if (!is.null(model_error)) NULL else tryCatch({
@@ -591,6 +596,135 @@ nm_control_read <- function(x, strict = TRUE) {
   }, character(1)), collapse = "\n")
 }
 
+.nm_control_general_model_record <- function(model) {
+  if (!model$ADVAN %in% c(6L, 8L, 9L, 10L, 13L:18L)) return("")
+  compartments <- model$GRAPH$compartments %||% data.frame()
+  n_state <- as.integer(model$n_state %||% nrow(compartments))
+  if (!n_state) return("")
+  state_names <- if (nrow(compartments) == n_state &&
+                     "name" %in% names(compartments)) {
+    as.character(compartments$name)
+  } else paste0("COMP", seq_len(n_state))
+  used <- character()
+  safe_name <- function(value, fallback) {
+    base <- toupper(gsub("[^A-Za-z0-9_]", "", value))
+    if (!nzchar(base)) base <- fallback
+    candidate <- substr(base, 1L, 8L)
+    suffix <- 1L
+    while (candidate %in% used) {
+      ending <- as.character(suffix)
+      candidate <- paste0(substr(base, 1L, max(1L, 8L - nchar(ending))), ending)
+      suffix <- suffix + 1L
+    }
+    used <<- c(used, candidate)
+    candidate
+  }
+  state_names <- vapply(
+    seq_len(n_state), function(index) {
+      safe_name(state_names[[index]], paste0("COMP", index))
+    }, character(1)
+  )
+  records <- vapply(seq_len(n_state), function(index) {
+    flags <- c(
+      if (index == model$DOSECMP) "DEFDOSE",
+      if (index == model$OBSCMP) "DEFOBSERVATION"
+    )
+    paste0(
+      "COMP=(", state_names[[index]],
+      if (length(flags)) paste0(",", paste(flags, collapse = ",")) else "",
+      ")"
+    )
+  }, character(1))
+  variables <- model$DAE_CONFIG$variables %||% character()
+  if (length(variables)) {
+    records <- c(records, vapply(seq_along(variables), function(index) {
+      paste0(
+        "COMP=(", safe_name(variables[[index]], paste0("EQ", index)),
+        ",EQUILIBRIUM)"
+      )
+    }, character(1)))
+  }
+  paste(records, collapse = "\n")
+}
+
+.nm_control_system_blocks <- function(model) {
+  pk <- model$PK_SOURCE %||% model$PRED
+  des <- model$DES
+  aes <- aes_initial <- character()
+  dae_variables <- model$DAE_CONFIG$variables %||% character()
+  if (length(dae_variables)) {
+    replacements <- stats::setNames(
+      paste0("A(", model$n_state + seq_along(dae_variables), ")"),
+      dae_variables
+    )
+    replace_symbols <- function(code) {
+      for (name in names(replacements)) {
+        code <- gsub(
+          paste0("\\b", name, "\\b"), replacements[[name]], code,
+          ignore.case = TRUE, perl = TRUE
+        )
+      }
+      code
+    }
+    des <- replace_symbols(des)
+    aes_code <- replace_symbols(model$ALG %||% "")
+    for (index in seq_along(dae_variables)) {
+      aes_code <- gsub(
+        paste0("\\bRES\\s*\\(\\s*", index, "\\s*\\)"),
+        paste0("E(", model$n_state + index, ")"), aes_code,
+        ignore.case = TRUE, perl = TRUE
+      )
+    }
+    aes <- strsplit(aes_code, "\n", fixed = TRUE)[[1L]]
+    initial <- model$DAE_CONFIG$initial
+    aes_initial <- if (identical(model$ADVAN, 17L)) {
+      # ADVAN17/RADAR5 uses AESINIT as an initialization callback; direct
+      # assignment to an equilibrium A(i) is rejected by NM-TRAN.
+      "INIT = 0"
+    } else {
+      paste0(
+        "A(", model$n_state + seq_along(dae_variables), ") = ",
+        vapply(initial, .nm_control_format_value, character(1))
+      )
+    }
+  }
+  lags <- model$DDE_CONFIG$lags %||% list()
+  if (length(lags)) {
+    delays <- unique(vapply(lags, `[[`, character(1), "delay"))
+    tau_names <- paste0("TAU", seq_along(delays))
+    aliases <- tau_names != toupper(delays)
+    if (any(aliases)) {
+      pk <- paste(
+        pk,
+        paste0(tau_names[aliases], " = ", delays[aliases]),
+        sep = "\n"
+      )
+    }
+    history <- model$DDE_CONFIG$history
+    past <- character()
+    for (lag in lags) {
+      delay_index <- match(lag$delay, delays)
+      pattern <- paste0(
+        "LAG\\s*\\(\\s*A\\s*\\(\\s*", lag$state,
+        "\\s*\\)\\s*,\\s*", lag$delay, "\\s*\\)"
+      )
+      des <- gsub(
+        pattern, paste0("AD_", lag$state, "_", delay_index), des,
+        ignore.case = TRUE, perl = TRUE
+      )
+      past <- c(
+        past,
+        paste0(
+          "AP_", lag$state, "_", delay_index, " = ",
+          .nm_control_format_value(history[[lag$state]])
+        )
+      )
+    }
+    des <- paste(c(unique(past), des), collapse = "\n")
+  }
+  list(pk = pk, des = des, aes_initial = aes_initial, aes = aes)
+}
+
 #' Write a NONMEM control stream
 #'
 #' @param x An `nm_model`, `NMEngine`, or object returned by
@@ -626,18 +760,27 @@ nm_control_write <- function(x, file = NULL, data = NULL,
   input_record <- metadata$input_record %||% paste(model$INPUT, collapse = " ")
   if (is.null(data)) data <- metadata$data_record %||% metadata$data_path %||% "data.csv"
   pred_mode <- model$PRED_MODE %||% "pk"
+  system_blocks <- .nm_control_system_blocks(model)
   lines <- c(
+    if (!is.null(model$DDE_CONFIG)) ";DDE" else character(),
     paste("$PROBLEM", problem),
     paste("$INPUT", input_record),
     paste("$DATA", data)
   )
   if (!identical(pred_mode, "pred")) {
+    tolerance <- if (model$ADVAN %in% c(6L, 8L, 9L, 13L:18L)) " TOL=9" else ""
     lines <- c(
       lines,
-      paste0("$SUBROUTINES ADVAN", model$ADVAN, " TRANS", model$TRANS)
+      paste0(
+        "$SUBROUTINES ADVAN", model$ADVAN, " TRANS", model$TRANS,
+        tolerance
+      )
     )
   }
   model_record <- metadata$model_record %||% .nm_control_matrix_model_record(model)
+  if (!nzchar(trimws(model_record))) {
+    model_record <- .nm_control_general_model_record(model)
+  }
   if (!identical(pred_mode, "pred") && nzchar(trimws(model_record))) {
     lines <- c(lines, "$MODEL", paste0("  ", strsplit(model_record, "\n", fixed = TRUE)[[1L]]))
   }
@@ -662,16 +805,26 @@ nm_control_write <- function(x, file = NULL, data = NULL,
       "  ; LIBERATION_ERROR_END"
     )
   } else {
-    pk_source <- model$PK_SOURCE %||% model$PRED
+    pk_source <- system_blocks$pk
     lines <- c(
       lines, "$PK",
       paste0("  ", strsplit(pk_source, "\n", fixed = TRUE)[[1L]])
     )
-    if (nzchar(trimws(model$DES))) {
+    if (nzchar(trimws(system_blocks$des))) {
       lines <- c(
         lines, "$DES",
-        paste0("  ", strsplit(model$DES, "\n", fixed = TRUE)[[1L]])
+        paste0("  ", strsplit(system_blocks$des, "\n", fixed = TRUE)[[1L]])
       )
+    }
+    if (length(system_blocks$aes_initial)) {
+      lines <- c(
+        lines,
+        if (identical(model$ADVAN, 17L)) "$AESINIT" else "$AESINITIAL",
+        paste0("  ", system_blocks$aes_initial)
+      )
+    }
+    if (length(system_blocks$aes)) {
+      lines <- c(lines, "$AES", paste0("  ", system_blocks$aes))
     }
     if (identical(pred_mode, "pk_pred")) {
       post_source <- model$PRED_SOURCE %||% ""

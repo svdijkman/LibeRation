@@ -810,7 +810,16 @@
         liber = "LibeR", nonmem = "NONMEM via PsN", nlmixr2 = "nlmixr2",
         as.character(fit$execution_engine)
       ),
+      `Numerical policy` = switch(
+        fit$numerical_mode %||% fit$diagnostics$numerical_mode %||%
+          fit$model$NUMERICAL_MODE %||% "nonmem_compatibility",
+        nonmem_compatibility = "NONMEM compatibility",
+        liber_optimized = "LibeR optimised",
+        as.character(fit$numerical_mode %||% "")
+      ),
       Method = fit$method, Objective = fit$objective,
+      `Estimator implementation` = fit$diagnostics$estimator_identity %||%
+        fit$diagnostics$nonparametric$estimator_identity %||% "",
       `Convergence code` = fit$convergence,
       `Objective backend` = fit$diagnostics$optimizer$objective_backend %||%
         fit$diagnostics$optimizer$backend %||% "",
@@ -847,6 +856,31 @@
         length(fit$diagnostics$quadrature_cancellation_ratio)) {
         ratios <- fit$diagnostics$quadrature_cancellation_ratio
         if (any(is.finite(ratios))) min(ratios[is.finite(ratios)]) else ""
+      } else "",
+      `NUTS trajectory policy` = if (fit$method == "NUTS") {
+        paste(
+          fit$diagnostics$nuts$variant_resolved %||% "",
+          fit$diagnostics$nuts$trajectory_sampling %||% ""
+        )
+      } else "",
+      `HMC metric` = if (fit$method %in% c("HMC", "NUTS")) {
+        fit$diagnostics$nuts$metric_resolved %||%
+          fit$diagnostics$chain[[1L]]$metric %||% "diagonal"
+      } else "",
+      `Minimum E-BFMI` = if (fit$method %in% c("HMC", "NUTS") &&
+          length(fit$diagnostics$ebfmi)) {
+        values <- fit$diagnostics$ebfmi
+        if (any(is.finite(values))) min(values[is.finite(values)]) else ""
+      } else "",
+      `Low E-BFMI chains (< 0.3)` = if (fit$method %in% c("HMC", "NUTS") &&
+          length(fit$diagnostics$low_ebfmi_chains)) {
+        paste(fit$diagnostics$low_ebfmi_chains, collapse = ", ")
+      } else "",
+      `Nonparametric weight solver` = if (fit$method %in% c("NPML", "NPAG")) {
+        fit$diagnostics$nonparametric$weight_solver %||% ""
+      } else "",
+      `SAEM retained Q support` = if (fit$method == "SAEM") {
+        fit$diagnostics$stochastic_approximation$retained_latent_support %||% ""
       } else "",
       `MU estimator specialization` = mu_status,
       `Model fit time` = .liber_gui_duration(timing$model_fit_seconds),
@@ -2106,7 +2140,7 @@ renderLiberWorkbench <- function(expr, env = parent.frame(), quoted = FALSE) {
   } else {
     as.integer(event$n_state %||% edited$n_state)
   }
-  if (edited$ADVAN %in% c(6L, 8L, 9L, 13L, 14L) &&
+  if (edited$ADVAN %in% c(6L, 8L, 9L, 13L:18L) &&
       requested_states != edited$n_state) {
     .nm_stop(
       "The compartment count is derived from $DES. Define DADT(1) through DADT(",
@@ -2135,6 +2169,9 @@ renderLiberWorkbench <- function(expr, env = parent.frame(), quoted = FALSE) {
     covariance_seed = as.integer(event$covarianceSeed %||%
       event$methodSeed %||% 20260713L)
   )
+  if (!is.null(event$numericalMode)) {
+    arguments$numerical_mode <- .nm_numerical_mode(event$numericalMode)
+  }
   if (identical(method, "IMP")) {
     arguments$n_imp <- as.integer(event$nImp %||% 200L)
     arguments$seed <- as.integer(event$methodSeed %||% 20260713L)
@@ -2162,6 +2199,7 @@ renderLiberWorkbench <- function(expr, env = parent.frame(), quoted = FALSE) {
     arguments$target_acceptance <- as.numeric(event$targetAcceptance %||% 0.8)
     arguments$max_depth <- as.integer(event$maxTreeDepth %||% 10L)
     arguments$n_leapfrog <- as.integer(event$nLeapfrog %||% 10L)
+    arguments$hmc_metric <- as.character(event$hmcMetric %||% "auto")
     arguments$seed <- as.integer(event$methodSeed %||% 20260719L)
   } else if (method %in% c("NPML", "NPAG")) {
     arguments$np_points <- as.integer(event$npPoints %||% 25L)
@@ -2309,9 +2347,52 @@ renderLiberWorkbench <- function(expr, env = parent.frame(), quoted = FALSE) {
       des = "DADT(1) = -(K10 + K12) * A(1) + K21 * A(2)\nDADT(2) = K12 * A(1) - K21 * A(2)",
       eta = 2L
     ),
+    `15` = list(
+      trans = 1L, values = c(0.4, 1, 20),
+      pred = paste(
+        "K = THETA(1) * exp(ETA(1))", "BIND = THETA(2)",
+        "V = THETA(3)", "S1 = V", sep = "\n"
+      ),
+      des = "DADT(1) = -K * FREE", eta = 1L,
+      alg = "RES(1) = FREE - A(1) / (1 + BIND)",
+      dae = nm_dae_config("FREE", initial = 0), solver = "dae"
+    ),
+    `16` = list(
+      trans = 1L, values = c(0.4, 0.08, 2, 20),
+      pred = paste(
+        "K = THETA(1) * exp(ETA(1))", "FB = THETA(2)",
+        "TAU1 = THETA(3)", "V = THETA(4)", "S1 = V", sep = "\n"
+      ),
+      des = "DADT(1) = -K * A(1) + FB * LAG(A(1), TAU1)", eta = 1L,
+      dde = nm_dde_config(history = 0, step = 0.05, minimum_delay = 0.05),
+      solver = "dde"
+    ),
+    `17` = list(
+      trans = 1L, values = c(0.4, 0.08, 2, 1, 20),
+      pred = paste(
+        "K = THETA(1) * exp(ETA(1))", "FB = THETA(2)",
+        "TAU1 = THETA(3)", "BIND = THETA(4)",
+        "V = THETA(5)", "S1 = V", sep = "\n"
+      ),
+      des = "DADT(1) = -K * FREE + FB * LAG(FREE, TAU1)", eta = 1L,
+      alg = "RES(1) = FREE - A(1) / (1 + BIND)",
+      dde = nm_dde_config(history = 0, step = 0.05, minimum_delay = 0.05),
+      dae = nm_dae_config("FREE", initial = 0), solver = "dde"
+    ),
+    `18` = list(
+      trans = 1L, values = c(0.4, 0.08, 2, 20),
+      pred = paste(
+        "K = THETA(1) * exp(ETA(1))", "FB = THETA(2)",
+        "TAU1 = THETA(3)", "V = THETA(4)", "S1 = V", sep = "\n"
+      ),
+      des = "DADT(1) = -K * A(1) + FB * LAG(A(1), TAU1)", eta = 1L,
+      dde = nm_dde_config(history = 0, step = 0.05, minimum_delay = 0.05),
+      solver = "dde"
+    ),
     .nm_stop("No GUI template is available for ADVAN", advan, ".")
   )
-  ode_advan <- c(6L, 8L, 9L, 13L, 14L)
+  ode_advan <- c(6L, 8L, 9L, 13L:18L)
+  resizable_ode_advan <- c(6L, 8L, 9L, 13L, 14L)
   if (!is.null(trans) && !advan %in% ode_advan) {
     trans <- as.integer(trans)
     if (length(trans) != 1L || is.na(trans) || !trans %in% 1:6) {
@@ -2319,7 +2400,7 @@ renderLiberWorkbench <- function(expr, env = parent.frame(), quoted = FALSE) {
     }
     specification$trans <- trans
   }
-  if (advan %in% ode_advan && !is.null(n_state)) {
+  if (advan %in% resizable_ode_advan && !is.null(n_state)) {
     n_state <- as.integer(n_state)
     if (length(n_state) != 1L || is.na(n_state) || n_state < 1L || n_state > 20L) {
       .nm_stop("ODE templates support between 1 and 20 compartments.")
@@ -2348,7 +2429,17 @@ renderLiberWorkbench <- function(expr, env = parent.frame(), quoted = FALSE) {
     THETAS = theta(specification$values),
     OMEGAS = omega(specification$omega %||% rep(0.1, specification$eta)),
     SIGMAS = specification$sigma %||% sigma,
-    GRAPH = specification$graph %||% NULL
+    GRAPH = specification$graph %||% NULL,
+    ALG = specification$alg %||% "",
+    DDE_CONFIG = specification$dde %||% NULL,
+    DAE_CONFIG = specification$dae %||% NULL,
+    SOLVER = specification$solver %||% "auto",
+    EXPERIMENTAL = if (!is.null(specification$dde) ||
+                           !is.null(specification$dae)) {
+      nm_experimental_config(
+        enabled = TRUE, label = paste0("ADVAN", advan, " template")
+      )
+    } else NULL
   )
   problem <- trimws(as.character(problem %||% ""))
   attr(model, "name") <- if (nzchar(problem)) problem else paste0("ADVAN", advan, " model")

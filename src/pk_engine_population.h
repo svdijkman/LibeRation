@@ -4,10 +4,34 @@ struct EtaEvaluation {
   bool finite = false;
 };
 
+struct EtaPriorAdjustment {
+  Vector mean;
+  Matrix base_precision;
+  Matrix prior_precision;
+};
+
+inline void apply_eta_prior_adjustment(
+    EtaEvaluation& evaluation, const Vector& eta,
+    const EtaPriorAdjustment* adjustment, bool gradient) {
+  if (!adjustment || !evaluation.finite) return;
+  const Vector centered = eta - adjustment->mean;
+  evaluation.value += centered.dot(adjustment->prior_precision * centered) -
+    eta.dot(adjustment->base_precision * eta);
+  if (gradient) {
+    evaluation.gradient += 2.0 * (
+      adjustment->prior_precision * centered -
+      adjustment->base_precision * eta);
+  }
+  evaluation.finite = std::isfinite(evaluation.value) &&
+    (!gradient || evaluation.gradient.allFinite());
+}
+
 EtaEvaluation objective_eta_evaluate(
     ObjectiveTape& tape, const std::vector<double>& point,
-    const std::vector<std::size_t>& positions, bool gradient = true) {
-  std::ostringstream messages;
+    const std::vector<std::size_t>& positions, bool gradient = true,
+    std::ostream* message_stream = nullptr) {
+  std::ostringstream local_messages;
+  std::ostream& messages = message_stream ? *message_stream : local_messages;
   const std::vector<double> value = tape.fun.Forward(0, point, messages);
   EtaEvaluation result;
   // An invalid line-search trial must be rejected by the optimizer, not used
@@ -33,16 +57,44 @@ EtaEvaluation objective_eta_evaluate(
   return result;
 }
 
+// Complete a value-only Forward(0) evaluation with Reverse(1) without replaying
+// the same zero-order sweep.  Line searches deliberately avoid reverse work on
+// rejected trials; accepted trials leave the tape at the candidate point, so
+// their gradient can be recovered directly and exactly from that state.
+EtaEvaluation objective_eta_reverse_current(
+    ObjectiveTape& tape, double value,
+    const std::vector<std::size_t>& positions) {
+  EtaEvaluation result;
+  if (!std::isfinite(value)) return result;
+  require_unchanged_path(tape.fun, "conditional objective gradient");
+  result.value = value;
+  result.finite = true;
+  result.gradient = Vector::Zero(static_cast<Eigen::Index>(positions.size()));
+  if (positions.empty()) return result;
+  const std::vector<double> full = tape.fun.Reverse(
+    1, std::vector<double>(1U, 1.0));
+  for (std::size_t i = 0; i < positions.size(); ++i) {
+    result.gradient[static_cast<Eigen::Index>(i)] = full[positions[i]];
+    if (!std::isfinite(result.gradient[static_cast<Eigen::Index>(i)])) {
+      result.finite = false;
+    }
+  }
+  return result;
+}
+
 Matrix objective_eta_hessian(
     ObjectiveTape& tape, const std::vector<double>& point,
-    const std::vector<std::size_t>& positions) {
+    const std::vector<std::size_t>& positions,
+    bool zero_order_forward = true) {
   const std::size_t domain = tape.domain_names.size();
   const std::size_t dimension = positions.size();
   Matrix hessian = Matrix::Zero(
     static_cast<Eigen::Index>(dimension), static_cast<Eigen::Index>(dimension));
   std::ostringstream messages;
-  tape.fun.Forward(0, point, messages);
-  require_unchanged_path(tape.fun, "conditional objective Hessian");
+  if (zero_order_forward) {
+    tape.fun.Forward(0, point, messages);
+    require_unchanged_path(tape.fun, "conditional objective Hessian");
+  }
   const std::vector<double> weight(1, 1.0);
   std::vector<double> direction(domain, 0.0);
   for (std::size_t column = 0; column < dimension; ++column) {
@@ -58,11 +110,79 @@ Matrix objective_eta_hessian(
   return 0.5 * (hessian + hessian.transpose()).eval();
 }
 
+inline std::size_t eta_optimizer_state_key(const ObjectiveTape& tape,
+                                           Eigen::Index dimension) {
+  std::size_t seed = std::hash<Eigen::Index>{}(dimension);
+  for (double value : tape.dynamic_values) {
+    const std::size_t current = std::hash<double>{}(value);
+    seed ^= current + static_cast<std::size_t>(0x9e3779b9U) +
+      (seed << 6U) + (seed >> 2U);
+  }
+  return seed;
+}
+
+inline Matrix eta_optimizer_initial_inverse(ObjectiveTape& tape,
+                                            Eigen::Index dimension,
+                                            bool reuse,
+                                            bool& reused) {
+  reused = false;
+  if (!reuse || dimension == 0) return Matrix::Identity(dimension, dimension);
+  const std::size_t key = eta_optimizer_state_key(tape, dimension);
+  const auto found = tape.eta_optimizer_states.find(key);
+  if (found == tape.eta_optimizer_states.end()) {
+    return Matrix::Identity(dimension, dimension);
+  }
+  for (const ObjectiveTape::EtaOptimizerState& state : found->second) {
+    if (state.dynamic_values == tape.dynamic_values &&
+        state.inverse_hessian.rows() == dimension &&
+        state.inverse_hessian.cols() == dimension &&
+        state.inverse_hessian.allFinite()) {
+      const Matrix symmetric =
+        0.5 * (state.inverse_hessian + state.inverse_hessian.transpose());
+      Eigen::LDLT<Matrix> factor(symmetric);
+      if (factor.info() == Eigen::Success && factor.isPositive()) {
+        reused = true;
+        ++tape.eta_optimizer_state_hits;
+        return symmetric;
+      }
+    }
+  }
+  return Matrix::Identity(dimension, dimension);
+}
+
+inline void eta_optimizer_store_inverse(ObjectiveTape& tape,
+                                        const Matrix& inverse,
+                                        bool reuse) {
+  if (!reuse || !inverse.size() || !inverse.allFinite()) return;
+  const Matrix symmetric = 0.5 * (inverse + inverse.transpose()).eval();
+  Eigen::LDLT<Matrix> factor(symmetric);
+  if (factor.info() != Eigen::Success || !factor.isPositive()) return;
+  const std::size_t key = eta_optimizer_state_key(tape, inverse.rows());
+  if (tape.eta_optimizer_states.size() > 2048U &&
+      tape.eta_optimizer_states.find(key) == tape.eta_optimizer_states.end()) {
+    tape.eta_optimizer_states.clear();
+  }
+  std::vector<ObjectiveTape::EtaOptimizerState>& states =
+    tape.eta_optimizer_states[key];
+  for (ObjectiveTape::EtaOptimizerState& state : states) {
+    if (state.dynamic_values == tape.dynamic_values) {
+      state.inverse_hessian = symmetric;
+      ++tape.eta_optimizer_state_updates;
+      return;
+    }
+  }
+  states.push_back(ObjectiveTape::EtaOptimizerState{
+    tape.dynamic_values, symmetric});
+  ++tape.eta_optimizer_state_updates;
+}
+
 Rcpp::List objective_eta_mode(
     ObjectiveTape& tape, std::vector<double> point,
     const std::vector<std::size_t>& positions,
     const Rcpp::NumericVector& start, int maxit, double tolerance,
-    bool exact_hessian) {
+    bool exact_hessian,
+    const EtaPriorAdjustment* prior_adjustment = nullptr,
+    bool reuse_optimizer_state = false) {
   const Eigen::Index dimension = static_cast<Eigen::Index>(positions.size());
   if (start.size() != dimension) {
     throw std::invalid_argument("ETA starting point has the wrong length.");
@@ -76,11 +196,14 @@ Rcpp::List objective_eta_mode(
     point[positions[static_cast<std::size_t>(i)]] = eta[i];
   }
   EtaEvaluation current = objective_eta_evaluate(tape, point, positions, true);
+  apply_eta_prior_adjustment(current, eta, prior_adjustment, true);
   int evaluations = 1;
   int gradient_evaluations = 1;
   int convergence = current.finite ? 1 : 52;
   int iterations = 0;
-  Matrix inverse = Matrix::Identity(dimension, dimension);
+  bool optimizer_state_reused = false;
+  Matrix inverse = eta_optimizer_initial_inverse(
+    tape, dimension, reuse_optimizer_state, optimizer_state_reused);
   const Matrix identity = Matrix::Identity(dimension, dimension);
   // Require a gradient-based stop so that warm starts do not change the
   // conditional objective through an early relative-function-value stop.
@@ -104,6 +227,8 @@ Rcpp::List objective_eta_mode(
     Vector candidate_eta(dimension);
     std::vector<double> candidate_point;
     bool accepted = false;
+    double accepted_objective_value =
+      std::numeric_limits<double>::quiet_NaN();
     for (int line_search = 0; line_search < 32; ++line_search) {
       candidate_eta = eta + step_scale * direction;
       candidate_point = point;
@@ -111,10 +236,14 @@ Rcpp::List objective_eta_mode(
         candidate_point[positions[static_cast<std::size_t>(i)]] = candidate_eta[i];
       }
       candidate = objective_eta_evaluate(tape, candidate_point, positions, false);
+      const double objective_value = candidate.value;
+      apply_eta_prior_adjustment(
+        candidate, candidate_eta, prior_adjustment, false);
       ++evaluations;
       if (candidate.finite &&
           candidate.value <= current.value + 1e-4 * step_scale * directional) {
         accepted = true;
+        accepted_objective_value = objective_value;
         break;
       }
       step_scale *= 0.5;
@@ -123,8 +252,10 @@ Rcpp::List objective_eta_mode(
       convergence = 52;
       break;
     }
-    candidate = objective_eta_evaluate(tape, candidate_point, positions, true);
-    ++evaluations;
+    candidate = objective_eta_reverse_current(
+      tape, accepted_objective_value, positions);
+    apply_eta_prior_adjustment(
+      candidate, candidate_eta, prior_adjustment, true);
     ++gradient_evaluations;
     if (!candidate.finite) {
       convergence = 52;
@@ -157,8 +288,17 @@ Rcpp::List objective_eta_mode(
       current.gradient.lpNorm<Eigen::Infinity>() <= 10.0 * gradient_tolerance) {
     convergence = 0;
   }
-  Matrix hessian = exact_hessian ? objective_eta_hessian(tape, point, positions) :
+  Matrix hessian = exact_hessian ?
+    objective_eta_hessian(tape, point, positions, false) :
     Matrix::Zero(0, 0);
+  if (exact_hessian && prior_adjustment) {
+    hessian += 2.0 * (
+      prior_adjustment->prior_precision - prior_adjustment->base_precision);
+    hessian = 0.5 * (hessian + hessian.transpose()).eval();
+  }
+  if (current.finite && convergence == 0) {
+    eta_optimizer_store_inverse(tape, inverse, reuse_optimizer_state);
+  }
   Rcpp::NumericVector par(dimension);
   Rcpp::NumericVector gradient(dimension);
   for (Eigen::Index i = 0; i < dimension; ++i) {
@@ -173,7 +313,8 @@ Rcpp::List objective_eta_mode(
     Rcpp::Named("gradient") = gradient,
     Rcpp::Named("iterations") = iterations,
     Rcpp::Named("evaluations") = evaluations,
-    Rcpp::Named("gradient_evaluations") = gradient_evaluations
+    Rcpp::Named("gradient_evaluations") = gradient_evaluations,
+    Rcpp::Named("optimizer_state_reused") = optimizer_state_reused
   );
 }
 
@@ -193,6 +334,74 @@ struct PopulationPrior {
   double rate = std::numeric_limits<double>::quiet_NaN();
 };
 
+struct PopulationMuConfig {
+  bool active = false;
+  std::vector<int> theta;
+  std::vector<std::string> links;
+  std::vector<Matrix> design_columns;
+
+  PopulationMuConfig() = default;
+
+  PopulationMuConfig(
+      const Rcpp::List& config, int subjects, int n_eta) {
+    active = config.containsElementNamed("active") &&
+      Rcpp::as<bool>(config["active"]);
+    if (!active) return;
+    theta = Rcpp::as<std::vector<int>>(config["theta"]);
+    links = Rcpp::as<std::vector<std::string>>(config["links"]);
+    const Rcpp::List source = config["design_columns"];
+    if (theta.empty() || theta.size() != links.size() ||
+        source.size() != static_cast<int>(theta.size())) {
+      throw std::invalid_argument(
+        "Compiled population MU configuration is inconsistent.");
+    }
+    design_columns.reserve(theta.size());
+    for (std::size_t column = 0; column < theta.size(); ++column) {
+      if (theta[column] < 1) {
+        throw std::invalid_argument(
+          "A compiled population MU THETA index is invalid.");
+      }
+      --theta[column];
+      if (links[column] != "identity" && links[column] != "log") {
+        throw std::invalid_argument("A compiled population MU link is invalid.");
+      }
+      Rcpp::NumericMatrix input = source[static_cast<int>(column)];
+      if (input.nrow() != subjects || input.ncol() != n_eta) {
+        throw std::invalid_argument(
+          "A compiled population MU design has invalid dimensions.");
+      }
+      Matrix design(subjects, n_eta);
+      for (int row = 0; row < subjects; ++row) {
+        for (int effect = 0; effect < n_eta; ++effect) {
+          design(row, effect) = input(row, effect);
+        }
+      }
+      design_columns.push_back(std::move(design));
+    }
+  }
+
+  Vector beta(const PopulationParameters& parameters) const {
+    Vector result(static_cast<Eigen::Index>(theta.size()));
+    for (std::size_t column = 0; column < theta.size(); ++column) {
+      const double value = parameters.theta[static_cast<std::size_t>(theta[column])];
+      if (links[column] == "log" && !(value > 0.0)) {
+        throw std::domain_error("A log-linked MU THETA is not positive.");
+      }
+      result[static_cast<Eigen::Index>(column)] =
+        links[column] == "log" ? std::log(value) : value;
+    }
+    return result;
+  }
+
+  void recenter(Matrix& eta, const Vector& previous, const Vector& current) const {
+    for (std::size_t column = 0; column < design_columns.size(); ++column) {
+      eta += design_columns[column] *
+        (previous[static_cast<Eigen::Index>(column)] -
+         current[static_cast<Eigen::Index>(column)]);
+    }
+  }
+};
+
 // Persistent population objective used by R's mature L-BFGS-B/BFGS driver.
 // The R callbacks around this object only transfer one encoded parameter
 // vector. Parameter decoding, conditional modes, curvature, priors, AD
@@ -204,6 +413,7 @@ class PopulationObjective {
       const Rcpp::List& primary_tape_pointers,
       const Rcpp::List& curvature_tape_pointers,
       const Rcpp::List& config) {
+    retained_config_ = config;
     Rcpp::XPtr<ModelEngine> engine(engine_pointer);
     engine_ = engine.get();
     approximation_ = Rcpp::as<std::string>(config["approximation"]);
@@ -227,6 +437,17 @@ class PopulationObjective {
     tolerance_ = Rcpp::as<double>(config["tolerance"]);
     use_ode_ = Rcpp::as<bool>(config["use_ode"]);
     fo_population_batch_requested_ = Rcpp::as<bool>(config["fo_population_batch"]);
+    fo_population_scalar_ =
+      config.containsElementNamed("fo_population_scalar") &&
+      Rcpp::as<bool>(config["fo_population_scalar"]);
+    fo_low_rank_ =
+      config.containsElementNamed("fo_low_rank") &&
+      Rcpp::as<bool>(config["fo_low_rank"]);
+    fo_low_rank_tolerance_ = config.containsElementNamed("fo_low_rank_tolerance") ?
+      Rcpp::as<double>(config["fo_low_rank_tolerance"]) : 1e-9;
+    fo_low_rank_condition_tolerance_ =
+      config.containsElementNamed("fo_low_rank_condition_tolerance") ?
+      Rcpp::as<double>(config["fo_low_rank_condition_tolerance"]) : 1e-12;
     fo_population_max_operations_ =
       Rcpp::as<double>(config["fo_population_max_operations"]);
     guard_radius_ = Rcpp::as<double>(config["guard_radius"]);
@@ -234,7 +455,11 @@ class PopulationObjective {
     if (eta_maxit_ < 1 || tolerance_ <= 0.0 || !std::isfinite(tolerance_) ||
         guard_radius_ <= 0.0 || !std::isfinite(guard_radius_) ||
         fo_population_max_operations_ <= 0.0 ||
-        !std::isfinite(fo_population_max_operations_)) {
+        !std::isfinite(fo_population_max_operations_) ||
+        fo_low_rank_tolerance_ < 0.0 ||
+        !std::isfinite(fo_low_rank_tolerance_) ||
+        fo_low_rank_condition_tolerance_ <= 0.0 ||
+        !std::isfinite(fo_low_rank_condition_tolerance_)) {
       throw std::invalid_argument("Compiled population controls are invalid.");
     }
     if (omega_rows_.size() != omega_base_.size() ||
@@ -269,9 +494,28 @@ class PopulationObjective {
 
     const int subjects = subject_data.size();
     if (subjects < 1) throw std::invalid_argument("Population data have no subjects.");
+    if (config.containsElementNamed("subject_store") &&
+        !Rf_isNull(config["subject_store"])) {
+      Rcpp::XPtr<NativeSubjectStore> store(config["subject_store"]);
+      if (static_cast<int>(store->starts.size()) != subjects) {
+        throw std::invalid_argument(
+          "The native subject store does not match the population tapes.");
+      }
+    }
     subject_data_.reserve(static_cast<std::size_t>(subjects));
+    subject_dynamic_.reserve(static_cast<std::size_t>(subjects));
+    subject_uses_dynamic_.reserve(static_cast<std::size_t>(subjects));
     for (int subject = 0; subject < subjects; ++subject) {
-      subject_data_.push_back(subject_data[subject]);
+      SEXP input = subject_data[subject];
+      const bool dynamic = Rf_isNumeric(input) && !Rf_inherits(input, "data.frame");
+      subject_uses_dynamic_.push_back(dynamic);
+      if (dynamic) {
+        subject_data_.push_back(R_NilValue);
+        subject_dynamic_.push_back(Rcpp::as<std::vector<double>>(input));
+      } else {
+        subject_data_.push_back(input);
+        subject_dynamic_.push_back(std::vector<double>());
+      }
     }
     starts_ = Matrix::Zero(subjects, n_eta_);
     if (config.containsElementNamed("eta_start")) {
@@ -288,6 +532,14 @@ class PopulationObjective {
           starts_(subject, effect) = value;
         }
       }
+    }
+    if (config.containsElementNamed("mu") && !Rf_isNull(config["mu"])) {
+      mu_ = PopulationMuConfig(
+        Rcpp::as<Rcpp::List>(config["mu"]), subjects, n_eta_);
+    }
+    if (mu_.active && !is_fo()) {
+      mu_anchor_ = mu_.beta(decode(start_));
+      mu_anchor_valid_ = true;
     }
     primary_.resize(static_cast<std::size_t>(subjects), nullptr);
     curvature_.resize(static_cast<std::size_t>(subjects), nullptr);
@@ -337,8 +589,11 @@ class PopulationObjective {
   }
 
   double value(const Rcpp::NumericVector& encoded) {
+    return value_native(Rcpp::as<std::vector<double>>(encoded));
+  }
+
+  double value_native(const std::vector<double>& point) {
     ++value_requests_;
-    const std::vector<double> point = Rcpp::as<std::vector<double>>(encoded);
     if (same_key(point)) {
       ++value_cache_hits_;
       return cache_value_;
@@ -348,20 +603,23 @@ class PopulationObjective {
   }
 
   Rcpp::NumericVector gradient(const Rcpp::NumericVector& encoded) {
+    return Rcpp::wrap(gradient_native(Rcpp::as<std::vector<double>>(encoded)));
+  }
+
+  std::vector<double> gradient_native(const std::vector<double>& point) {
     ++gradient_requests_;
-    const std::vector<double> point = Rcpp::as<std::vector<double>>(encoded);
     const bool reused_value = same_key(point);
     if (!reused_value) evaluate_value(point);
     else ++shared_state_hits_;
     if (cache_gradient_valid_) {
       ++gradient_cache_hits_;
-      return Rcpp::wrap(cache_gradient_);
+      return cache_gradient_;
     }
     if (!std::isfinite(cache_value_) || cache_value_ >= penalty()) {
       throw std::runtime_error("Cannot differentiate a failed population objective.");
     }
     evaluate_gradient();
-    return Rcpp::wrap(cache_gradient_);
+    return cache_gradient_;
   }
 
   Rcpp::NumericMatrix hessian(const Rcpp::NumericVector& encoded) {
@@ -404,8 +662,7 @@ class PopulationObjective {
       const std::vector<double> native_point = fo_point(cache_parameters_);
       for (std::size_t subject = 0; subject < primary_.size(); ++subject) {
         ObjectiveTape& objective = *primary_[subject];
-        Rcpp::DataFrame data(subject_data_[subject]);
-        set_fo_dynamic(objective, data);
+        set_subject_dynamic(objective, static_cast<int>(subject));
         ++fo_dynamic_updates_;
         const Vector gradient = tape_gradient(
           objective, native_point, "FO exact population Hessian");
@@ -460,6 +717,9 @@ class PopulationObjective {
   Rcpp::List state(const Rcpp::NumericVector& encoded) {
     const std::vector<double> point = Rcpp::as<std::vector<double>>(encoded);
     if (!same_key(point)) evaluate_value(point);
+    if (is_fo() && fo_population_ && fo_population_scalar_) {
+      refresh_fo_subject_values();
+    }
     Rcpp::NumericMatrix eta(starts_.rows(), starts_.cols());
     for (Eigen::Index row = 0; row < starts_.rows(); ++row) {
       for (Eigen::Index column = 0; column < starts_.cols(); ++column) {
@@ -496,6 +756,25 @@ class PopulationObjective {
   }
 
   Rcpp::List telemetry() const {
+    int low_rank_subjects = 0;
+    int low_rank_fallbacks = 0;
+    std::string low_rank_fallback_reason;
+    double low_rank_max_relative_difference = 0.0;
+    if (is_fo()) {
+      for (ObjectiveTape* tape : primary_) {
+        if (!tape) continue;
+        if (tape->fo_low_rank) ++low_rank_subjects;
+        if (tape->fo_low_rank_fallback) {
+          ++low_rank_fallbacks;
+          if (low_rank_fallback_reason.empty()) {
+            low_rank_fallback_reason = tape->fo_low_rank_reason;
+          }
+        }
+        low_rank_max_relative_difference = std::max(
+          low_rank_max_relative_difference,
+          tape->fo_low_rank_relative_difference);
+      }
+    }
     return Rcpp::List::create(
       Rcpp::Named("backend") = fo_population_ ?
         "persistent-cpp-batched-fo-population-objective" :
@@ -511,6 +790,8 @@ class PopulationObjective {
       Rcpp::Named("mode_iterations") = mode_iterations_,
       Rcpp::Named("mode_evaluations") = mode_evaluations_,
       Rcpp::Named("mode_recoveries") = mode_recoveries_,
+      Rcpp::Named("mu_mode_recenters") = mu_mode_recenters_,
+      Rcpp::Named("mu_mode_recentering") = static_cast<bool>(mu_.active),
       Rcpp::Named("tape_records") = tape_records_,
       Rcpp::Named("tape_retapes") = tape_retapes_,
       Rcpp::Named("ode_owned_tapes") = use_ode_,
@@ -518,6 +799,15 @@ class PopulationObjective {
       Rcpp::Named("fo_shared_subject_tapes") = is_fo() ?
         static_cast<int>(primary_.size()) - fo_unique_subject_tapes_ : 0,
       Rcpp::Named("fo_population_batched") = static_cast<bool>(fo_population_),
+      Rcpp::Named("fo_population_scalar") =
+        static_cast<bool>(fo_population_ && fo_population_scalar_),
+      Rcpp::Named("fo_low_rank_subjects") = low_rank_subjects,
+      Rcpp::Named("fo_dense_subjects") = is_fo() ?
+        static_cast<int>(primary_.size()) - low_rank_subjects : 0,
+      Rcpp::Named("fo_low_rank_fallbacks") = low_rank_fallbacks,
+      Rcpp::Named("fo_low_rank_fallback_reason") = low_rank_fallback_reason,
+      Rcpp::Named("fo_low_rank_max_relative_difference") =
+        low_rank_max_relative_difference,
       Rcpp::Named("fo_population_operations") = fo_population_ ?
         static_cast<double>(fo_population_->fun.size_op()) : 0.0,
       Rcpp::Named("fo_population_fallbacks") = fo_population_fallbacks_,
@@ -536,6 +826,10 @@ class PopulationObjective {
   bool omega_full_ = false;
   bool use_ode_ = false;
   bool fo_population_batch_requested_ = true;
+  bool fo_population_scalar_ = false;
+  bool fo_low_rank_ = false;
+  double fo_low_rank_tolerance_ = 1e-9;
+  double fo_low_rank_condition_tolerance_ = 1e-12;
   double fo_population_max_operations_ = 2e6;
   int n_eta_ = 0;
   int n_eta_base_ = 0;
@@ -543,7 +837,13 @@ class PopulationObjective {
   double tolerance_ = 1e-7;
   double guard_radius_ = 0.5;
   std::vector<PopulationPrior> priors_;
+  PopulationMuConfig mu_;
+  Vector mu_anchor_;
+  bool mu_anchor_valid_ = false;
   std::vector<SEXP> subject_data_;
+  std::vector<std::vector<double>> subject_dynamic_;
+  std::vector<bool> subject_uses_dynamic_;
+  Rcpp::List retained_config_;
   std::vector<ObjectiveTape*> primary_, curvature_;
   std::vector<std::unique_ptr<PredictionTape>> owned_prediction_;
   std::vector<std::unique_ptr<ObjectiveTape>> owned_primary_, owned_curvature_;
@@ -570,6 +870,7 @@ class PopulationObjective {
   long long mode_iterations_ = 0;
   long long mode_evaluations_ = 0;
   int mode_recoveries_ = 0;
+  int mu_mode_recenters_ = 0;
   int tape_records_ = 0;
   int tape_retapes_ = 0;
   int fo_unique_subject_tapes_ = 0;
@@ -1063,11 +1364,55 @@ class PopulationObjective {
     return result;
   }
 
+  EventDataView subject_data_view(int subject) const {
+    const std::size_t index = static_cast<std::size_t>(subject);
+    if (index >= subject_data_.size()) {
+      throw std::out_of_range("Subject data view is outside the population store.");
+    }
+    if (retained_config_.containsElementNamed("subject_store") &&
+        !Rf_isNull(retained_config_["subject_store"])) {
+      Rcpp::XPtr<NativeSubjectStore> store(retained_config_["subject_store"]);
+      return store->view(subject);
+    }
+    if (!subject_uses_dynamic_[index] && subject_data_[index] != R_NilValue) {
+      return event_data_view(subject_data_[index]);
+    }
+    if (!retained_config_.containsElementNamed("subject_materializer") ||
+        Rf_isNull(retained_config_["subject_materializer"])) {
+      throw std::logic_error(
+        "A subject-data view requires its shared-store materializer.");
+    }
+    Rcpp::Function materializer(retained_config_["subject_materializer"]);
+    Rcpp::RObject materialized = materializer(subject + 1);
+    return event_data_view(materialized);
+  }
+
+  std::vector<double> subject_dynamic_values(
+      ObjectiveTape& tape, int subject) const {
+    const std::size_t index = static_cast<std::size_t>(subject);
+    if (index >= subject_dynamic_.size()) {
+      throw std::out_of_range("Subject dynamic data are outside the population store.");
+    }
+    if (subject_uses_dynamic_[index]) {
+      if (subject_dynamic_[index].size() != tape.fun.size_dyn_ind()) {
+        throw std::invalid_argument(
+          "Subject dynamic data do not match the recorded population tape.");
+      }
+      return subject_dynamic_[index];
+    }
+    return fo_dynamic_values(tape, subject_data_view(subject));
+  }
+
+  void set_subject_dynamic(ObjectiveTape& tape, int subject) {
+    const std::vector<double> values = subject_dynamic_values(tape, subject);
+    set_tape_dynamic_values(tape, values, "Population subject tape");
+  }
+
   std::vector<double> fo_population_dynamic_values() {
     std::vector<double> result;
     for (std::size_t subject = 0; subject < primary_.size(); ++subject) {
-      Rcpp::DataFrame data(subject_data_[subject]);
-      const std::vector<double> values = fo_dynamic_values(*primary_[subject], data);
+      const std::vector<double> values = subject_dynamic_values(
+        *primary_[subject], static_cast<int>(subject));
       result.insert(result.end(), values.begin(), values.end());
     }
     fo_dynamic_updates_ += static_cast<long long>(primary_.size());
@@ -1093,7 +1438,8 @@ class PopulationObjective {
     if (dynamic.empty()) CppAD::Independent(independent);
     else CppAD::Independent(independent, dynamic);
 
-    std::vector<CppAD::AD<double>> dependent(primary_.size());
+    std::vector<CppAD::AD<double>> dependent(
+      fo_population_scalar_ ? 1U : primary_.size(), CppAD::AD<double>(0.0));
     std::size_t cursor = 0;
     std::ostringstream messages;
     for (std::size_t subject = 0; subject < primary_.size(); ++subject) {
@@ -1117,7 +1463,8 @@ class PopulationObjective {
       if (value.size() != 1U) {
         throw std::logic_error("An FO subject tape did not return one objective value.");
       }
-      dependent[subject] = value[0];
+      if (fo_population_scalar_) dependent[0] += value[0];
+      else dependent[subject] = value[0];
       cursor += count;
     }
     if (cursor != dynamic.size()) {
@@ -1135,28 +1482,33 @@ class PopulationObjective {
   void evaluate_fo_population(const PopulationParameters& parameters,
                               double prior) {
     if (!fo_population_) throw std::logic_error("FO population tape is unavailable.");
-    const std::vector<double> dynamic_values = fo_population_dynamic_values();
-    if (dynamic_values.size() != fo_population_->fun.size_dyn_ind()) {
+    if (fo_population_->dynamic_values.size() !=
+        fo_population_->fun.size_dyn_ind()) {
       throw std::logic_error("FO population dynamic data have the wrong length.");
     }
-    if (!dynamic_values.empty()) fo_population_->fun.new_dynamic(dynamic_values);
-    fo_population_->dynamic_values = dynamic_values;
     const std::vector<double> point = fo_point(parameters);
     std::ostringstream messages;
     const std::vector<double> values = fo_population_->fun.Forward(0, point, messages);
     require_unchanged_path(fo_population_->fun, "batched FO population objective");
-    if (values.size() != primary_.size()) {
+    const std::size_t expected = fo_population_scalar_ ? 1U : primary_.size();
+    if (values.size() != expected) {
       throw std::logic_error("Batched FO population output has the wrong length.");
     }
     cache_points_.assign(primary_.size(), point);
-    cache_subject_values_ = values;
     double total = prior;
-    for (double value : values) {
-      if (!std::isfinite(value)) {
-        total = penalty();
-        break;
+    if (fo_population_scalar_) {
+      cache_subject_values_.assign(
+        primary_.size(), std::numeric_limits<double>::quiet_NaN());
+      total = std::isfinite(values[0]) ? total + values[0] : penalty();
+    } else {
+      cache_subject_values_ = values;
+      for (double value : values) {
+        if (!std::isfinite(value)) {
+          total = penalty();
+          break;
+        }
+        total += value;
       }
-      total += value;
     }
     cache_value_ = std::isfinite(total) ? total : penalty();
     cache_valid_ = true;
@@ -1183,7 +1535,7 @@ class PopulationObjective {
 
   void record_subject(int subject, const PopulationParameters& parameters,
                       const Vector& eta, bool retape) {
-    Rcpp::DataFrame data(subject_data_[static_cast<std::size_t>(subject)]);
+    const EventDataView data = subject_data_view(subject);
     Rcpp::NumericVector theta = Rcpp::wrap(parameters.theta);
     Rcpp::NumericVector sigma = Rcpp::wrap(parameters.sigma);
     Rcpp::NumericVector omega = Rcpp::wrap(parameters.omega);
@@ -1198,7 +1550,9 @@ class PopulationObjective {
       owned_prediction_[index] = record_prediction_tape(
         *engine_, data, theta, eta_matrix, sigma);
       owned_primary_[index] = record_fo_tape(
-        *engine_, *owned_prediction_[index], data, theta, sigma, omega);
+        *engine_, *owned_prediction_[index], data, theta, sigma, omega,
+        fo_low_rank_, fo_low_rank_tolerance_,
+        fo_low_rank_condition_tolerance_);
     } else {
       owned_primary_[index] = record_objective_tape(
         *engine_, data, theta, eta_matrix, sigma, omega, interaction());
@@ -1212,6 +1566,8 @@ class PopulationObjective {
     }
     primary_[index] = owned_primary_[index].get();
     curvature_[index] = has_curvature() ? owned_curvature_[index].get() : nullptr;
+    subject_dynamic_[index] = primary_[index]->dynamic_values;
+    subject_uses_dynamic_[index] = true;
     anchors_[index] = anchor_point(parameters, eta);
     ++tape_records_;
     if (retape) ++tape_retapes_;
@@ -1224,7 +1580,7 @@ class PopulationObjective {
       record_subject(subject, parameters, eta, retape);
       return;
     }
-    Rcpp::DataFrame data(subject_data_[static_cast<std::size_t>(subject)]);
+    const EventDataView data = subject_data_view(subject);
     Rcpp::NumericVector theta = Rcpp::wrap(parameters.theta);
     Rcpp::NumericVector sigma = Rcpp::wrap(parameters.sigma);
     Rcpp::NumericVector omega = Rcpp::wrap(parameters.omega);
@@ -1236,6 +1592,8 @@ class PopulationObjective {
     owned_primary_[index] = record_objective_tape(
       *engine_, data, theta, eta_matrix, sigma, omega, interaction());
     primary_[index] = owned_primary_[index].get();
+    subject_dynamic_[index] = primary_[index]->dynamic_values;
+    subject_uses_dynamic_[index] = true;
     anchors_[index] = anchor_point(parameters, eta);
     ++tape_records_;
     if (retape) ++tape_retapes_;
@@ -1415,7 +1773,18 @@ class PopulationObjective {
     cache_valid_ = false;
     cache_gradient_valid_ = false;
     cache_key_ = encoded;
-    cache_parameters_ = decode(encoded);
+    PopulationParameters next_parameters = decode(encoded);
+    if (mu_.active && !is_fo()) {
+      const Vector next_anchor = mu_.beta(next_parameters);
+      if (mu_anchor_valid_ &&
+          (next_anchor - mu_anchor_).cwiseAbs().maxCoeff() > 0.0) {
+        mu_.recenter(starts_, mu_anchor_, next_anchor);
+        ++mu_mode_recenters_;
+      }
+      mu_anchor_ = next_anchor;
+      mu_anchor_valid_ = true;
+    }
+    cache_parameters_ = std::move(next_parameters);
     ++parameter_evaluations_;
     const int subjects = static_cast<int>(primary_.size());
     cache_points_.assign(static_cast<std::size_t>(subjects), std::vector<double>());
@@ -1444,8 +1813,8 @@ class PopulationObjective {
       const std::vector<double> point = fo_point(cache_parameters_);
       for (int subject = 0; subject < subjects; ++subject) {
         if (use_ode_) ensure_tape(subject, cache_parameters_, zero_eta);
-        Rcpp::DataFrame data(subject_data_[static_cast<std::size_t>(subject)]);
-        set_fo_dynamic(*primary_[static_cast<std::size_t>(subject)], data);
+        set_subject_dynamic(
+          *primary_[static_cast<std::size_t>(subject)], subject);
         ++fo_dynamic_updates_;
         const double current = guarded_tape_value(
           subject, cache_parameters_, zero_eta, false, point);
@@ -1542,24 +1911,36 @@ class PopulationObjective {
     }
 
     if (is_fo() && fo_population_) {
-      // The population tape has one output per subject.  Form its Jacobian and
-      // add rows in subject order so the fused route retains the deterministic
-      // summation order of the established subject-tape implementation.  With
-      // far fewer population parameters than subjects CppAD uses a small
-      // number of forward sweeps here, rather than one reverse sweep per
-      // subject.
       const std::vector<double> point = fo_point(cache_parameters_);
-      const std::vector<double> derivative = fo_population_->fun.Jacobian(point);
+      std::vector<double> derivative;
+      if (fo_population_scalar_) {
+        std::ostringstream messages;
+        fo_population_->fun.Forward(0, point, messages);
+        derivative = fo_population_->fun.Reverse(1, std::vector<double>(1, 1.0));
+      } else {
+        // Compatibility policy: retain one output per subject and add rows in
+        // subject order, matching the established accumulation route.
+        derivative = fo_population_->fun.Jacobian(point);
+      }
       require_unchanged_path(fo_population_->fun, "batched FO population gradient");
       Vector native = Vector::Zero(n_native);
-      if (derivative.size() != primary_.size() * static_cast<std::size_t>(n_native)) {
+      const std::size_t expected = fo_population_scalar_ ?
+        static_cast<std::size_t>(n_native) :
+        primary_.size() * static_cast<std::size_t>(n_native);
+      if (derivative.size() != expected) {
         throw std::logic_error("Batched FO population gradient has the wrong length.");
       }
-      for (std::size_t subject = 0; subject < primary_.size(); ++subject) {
+      if (fo_population_scalar_) {
         for (int index = 0; index < n_native; ++index) {
-          native[index] += derivative[
-            subject * static_cast<std::size_t>(n_native) +
-            static_cast<std::size_t>(index)];
+          native[index] = derivative[static_cast<std::size_t>(index)];
+        }
+      } else {
+        for (std::size_t subject = 0; subject < primary_.size(); ++subject) {
+          for (int index = 0; index < n_native; ++index) {
+            native[index] += derivative[
+              subject * static_cast<std::size_t>(n_native) +
+              static_cast<std::size_t>(index)];
+          }
         }
       }
       native += native_prior;
@@ -1569,8 +1950,7 @@ class PopulationObjective {
       for (std::size_t subject = 0; subject < primary_.size(); ++subject) {
         ObjectiveTape& objective = *primary_[subject];
         if (is_fo()) {
-          Rcpp::DataFrame data(subject_data_[subject]);
-          set_fo_dynamic(objective, data);
+          set_subject_dynamic(objective, static_cast<int>(subject));
           ++fo_dynamic_updates_;
         }
         std::ostringstream messages;
@@ -1668,5 +2048,28 @@ class PopulationObjective {
       }
     }
     cache_gradient_valid_ = true;
+  }
+
+  void refresh_fo_subject_values() {
+    if (!is_fo() || !fo_population_ || !fo_population_scalar_) return;
+    if (cache_subject_values_.size() == primary_.size() &&
+        std::all_of(
+          cache_subject_values_.begin(), cache_subject_values_.end(),
+          [](double value) { return std::isfinite(value); })) return;
+    const std::vector<double> point = fo_point(cache_parameters_);
+    cache_subject_values_.assign(
+      primary_.size(), std::numeric_limits<double>::infinity());
+    for (std::size_t subject = 0; subject < primary_.size(); ++subject) {
+      ObjectiveTape& objective = *primary_[subject];
+      set_subject_dynamic(objective, static_cast<int>(subject));
+      ++fo_dynamic_updates_;
+      std::ostringstream messages;
+      const std::vector<double> value = objective.fun.Forward(0, point, messages);
+      require_unchanged_path(objective.fun, "FO subject-state refresh");
+      if (value.size() != 1U || !std::isfinite(value[0])) {
+        throw std::runtime_error("An FO subject value could not be refreshed.");
+      }
+      cache_subject_values_[subject] = value[0];
+    }
   }
 };

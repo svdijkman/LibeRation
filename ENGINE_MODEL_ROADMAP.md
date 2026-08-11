@@ -145,6 +145,8 @@ adds a reusable engine abstraction rather than a one-off model implementation.
   forward filtering, retrospective smoothing, and Viterbi decoding.
 - [x] Fixed-step method-of-steps DDEs with parameterized delays,
   differentiable history interpolation, and automatic tape-path guards.
+- [x] Clean-room adaptive Radau IIA order-five collocation, dense history, and
+  CppAD stage sensitivities for NONMEM-compatible ADVAN16/17 only.
 - [x] Exact factorial HMM enumeration with joint decoding and per-chain
   filtered/smoothed/Viterbi marginal output.
 - [x] Joint discrete-regime/nonlinear-continuous switching state-space models

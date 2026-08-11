@@ -3,6 +3,7 @@
 
 #include <Rcpp.h>
 #include <LibeRtAD/eigen_r.hpp>
+#include "native_optimizer_api.h"
 
 #include <algorithm>
 #include <cmath>
@@ -10,35 +11,6 @@
 #include <vector>
 
 namespace {
-
-double optimizer_value(const Rcpp::Function& function,
-                       const Eigen::VectorXd& point,
-                       const Eigen::VectorXd& scale) {
-  Rcpp::NumericVector native(point.size());
-  for (Eigen::Index i = 0; i < point.size(); ++i) native[i] = point[i] * scale[i];
-  Rcpp::NumericVector value = function(native);
-  if (value.size() != 1 || !std::isfinite(value[0])) return 1e100;
-  return value[0];
-}
-
-Eigen::VectorXd optimizer_gradient(const Rcpp::Function& function,
-                                   const Eigen::VectorXd& point,
-                                   const Eigen::VectorXd& scale) {
-  Rcpp::NumericVector native(point.size());
-  for (Eigen::Index i = 0; i < point.size(); ++i) native[i] = point[i] * scale[i];
-  Rcpp::NumericVector source = function(native);
-  if (source.size() != point.size()) {
-    Rcpp::stop("The native optimizer gradient has the wrong length.");
-  }
-  Eigen::VectorXd result(point.size());
-  for (Eigen::Index i = 0; i < point.size(); ++i) {
-    result[i] = source[i] * scale[i];
-    if (!std::isfinite(result[i])) {
-      Rcpp::stop("The native optimizer gradient is not finite.");
-    }
-  }
-  return result;
-}
 
 Eigen::VectorXd projected_gradient(const Eigen::VectorXd& point,
                                    const Eigen::VectorXd& gradient,
@@ -57,15 +29,17 @@ Eigen::VectorXd projected_gradient(const Eigen::VectorXd& point,
 
 }  // namespace
 
-// A scaled, box-constrained BFGS implementation keeps all line-search and
-// convergence bookkeeping in compiled code while accepting the population
-// objective/gradient closures used by the R estimation layer.
-// [[Rcpp::export(name = ".liberation_native_optimizer")]]
-Rcpp::List liberation_native_optimizer(
-    const Rcpp::Function& objective, const Rcpp::Function& gradient,
+namespace liberation {
+
+Rcpp::List native_optimizer_core(
+    const NativeValueFunction& objective,
+    const NativeGradientFunction& gradient,
     const Rcpp::NumericVector& start, const Rcpp::NumericVector& lower,
-    const Rcpp::NumericVector& upper, int maxit = 200,
-    double tolerance = 1e-6, int trace = 0) {
+    const Rcpp::NumericVector& upper, int maxit,
+    double tolerance, int trace) {
+
+// A scaled, box-constrained BFGS implementation keeps all line-search and
+// convergence bookkeeping in compiled code.
   const Eigen::Index dimension = start.size();
   if (lower.size() != dimension || upper.size() != dimension || maxit < 1 ||
       !std::isfinite(tolerance) || tolerance <= 0.0) {
@@ -81,8 +55,27 @@ Rcpp::List liberation_native_optimizer(
       Rcpp::stop("Native optimizer start is outside its bounds.");
     }
   }
-  double value = optimizer_value(objective, point, scale);
-  Eigen::VectorXd derivative = optimizer_gradient(gradient, point, scale);
+  auto native_point = [&scale](const Eigen::VectorXd& scaled) {
+    return scaled.cwiseProduct(scale);
+  };
+  auto scaled_value = [&objective, &native_point](const Eigen::VectorXd& scaled) {
+    const double result = objective(native_point(scaled));
+    return std::isfinite(result) ? result : 1e100;
+  };
+  auto scaled_gradient = [&gradient, &native_point, &scale](
+      const Eigen::VectorXd& scaled) {
+    Eigen::VectorXd result = gradient(native_point(scaled));
+    if (result.size() != scaled.size()) {
+      Rcpp::stop("The native optimizer gradient has the wrong length.");
+    }
+    result = result.cwiseProduct(scale);
+    if (!result.allFinite()) {
+      Rcpp::stop("The native optimizer gradient is not finite.");
+    }
+    return result;
+  };
+  double value = scaled_value(point);
+  Eigen::VectorXd derivative = scaled_gradient(point);
   int function_evaluations = 1;
   int gradient_evaluations = 1;
   int convergence = 1;
@@ -139,7 +132,7 @@ Rcpp::List liberation_native_optimizer(
     for (int line_search = 0; line_search < 40 && step > 1e-16; ++line_search) {
       candidate = point + step * direction;
       candidate = candidate.cwiseMax(low).cwiseMin(high);
-      candidate_value = optimizer_value(objective, candidate, scale);
+      candidate_value = scaled_value(candidate);
       ++function_evaluations;
       if (std::isfinite(candidate_value) &&
           candidate_value <= value + 1e-4 * step * directional) {
@@ -154,7 +147,7 @@ Rcpp::List liberation_native_optimizer(
       iterations = iteration;
       break;
     }
-    Eigen::VectorXd candidate_derivative = optimizer_gradient(gradient, candidate, scale);
+    Eigen::VectorXd candidate_derivative = scaled_gradient(candidate);
     ++gradient_evaluations;
     const Eigen::VectorXd displacement = candidate - point;
     const Eigen::VectorXd change = candidate_derivative - derivative;
@@ -210,3 +203,31 @@ Rcpp::List liberation_native_optimizer(
       Rcpp::Named("step") = trace_step));
 }
 
+}  // namespace liberation
+
+// A compatibility adapter for arbitrary R objectives. The optimized
+// PopulationObjective path below bypasses these callbacks entirely.
+// [[Rcpp::export(name = ".liberation_native_optimizer")]]
+Rcpp::List liberation_native_optimizer(
+    const Rcpp::Function& objective, const Rcpp::Function& gradient,
+    const Rcpp::NumericVector& start, const Rcpp::NumericVector& lower,
+    const Rcpp::NumericVector& upper, int maxit = 200,
+    double tolerance = 1e-6, int trace = 0) {
+  liberation::NativeValueFunction value = [&objective](const Eigen::VectorXd& point) {
+    Rcpp::NumericVector input(point.size());
+    for (Eigen::Index index = 0; index < point.size(); ++index) input[index] = point[index];
+    Rcpp::NumericVector output = objective(input);
+    return output.size() == 1 ? output[0] : 1e100;
+  };
+  liberation::NativeGradientFunction derivative = [&gradient](
+      const Eigen::VectorXd& point) {
+    Rcpp::NumericVector input(point.size());
+    for (Eigen::Index index = 0; index < point.size(); ++index) input[index] = point[index];
+    Rcpp::NumericVector output = gradient(input);
+    Eigen::VectorXd result(output.size());
+    for (R_xlen_t index = 0; index < output.size(); ++index) result[index] = output[index];
+    return result;
+  };
+  return liberation::native_optimizer_core(
+    value, derivative, start, lower, upper, maxit, tolerance, trace);
+}

@@ -18,7 +18,8 @@ nm_simulate(
   censor = FALSE,
   seed = NULL,
   n_cores = 1L,
-  audit_artifacts = FALSE
+  audit_artifacts = FALSE,
+  numerical_mode = NULL
 )
 }
 \arguments{
@@ -54,6 +55,10 @@ distributed across persistent PSOCK workers on Windows, Linux, and macOS.}
 \item{audit_artifacts}{Generate an opt-in NONMEM-style audit bundle containing
 a listing, control-stream representation, and simulation table. The bundle
 is materialized when the result is saved as a workspace run.}
+
+\item{numerical_mode}{Numerical policy. `"nonmem_compatibility"` is the
+conservative default used for paired NONMEM work; `"liber_optimized"`
+enables validated LibeR-specific solver accelerations.}
 }
 \value{
 Input records augmented with `IPRED`, compartment amounts, and—when

@@ -16,10 +16,11 @@ LibeRation 0.9 is a research beta. Install the exact
 use `liber_support_matrix("LibeRation")` to distinguish externally validated,
 internally verified, and experimental workflows.
 
-Implemented model paths include ADVAN1-14: analytical compartment kernels,
+Implemented model paths include the complete NONMEM 7.6 ADVAN1-18 catalogue: analytical compartment kernels,
 arbitrary linear matrix propagation (ADVAN5/7), explicit and stiff general
 ODEs (ADVAN6/8/9/13/14), Michaelis--Menten elimination (ADVAN10), and
-equilibrium DAE constraints (ADVAN9), plus infusions and analytical/nonlinear periodic
+equilibrium DAE constraints (ADVAN9/15), delay differential equations
+(ADVAN16/18), and combined delayed equilibrium systems (ADVAN17), plus infusions and analytical/nonlinear periodic
 steady state, correlated OMEGA, IOV, priors, mixtures, BLQ likelihoods,
 explicit NONMEM-compatible MU referencing,
 compiled user-defined likelihoods plus declarative continuous, categorical,
@@ -31,10 +32,15 @@ continuous-time HMMs, exact linear and nonlinear EKF/UKF/particle state-space
 models, ARMA residual processes, continuous-discrete SDEs, generalized
 nested/crossed random effects, and time-varying covariates. Estimation methods
 include FO, FOCE, FOCEI, Laplace,
-ITS, adaptive Gaussian quadrature (GQ) with automatic tensor/Smolyak sparse
-grids, IMP, SAEM, and Bayesian estimation.
-Bayesian workflows include random-walk BAYES, static HMC, and adaptive NUTS;
-discrete nonparametric population distributions are available through
+ITS, finite adaptive Gaussian quadrature (GQ) with automatic tensor/Smolyak
+sparse grids, importance-sampling Monte-Carlo EM (IMP), canonical
+auxiliary-function SAEM, and Bayesian estimation.
+Bayesian workflows include random-walk BAYES, static HMC, and adaptive NUTS.
+Optimized NUTS uses multinomial progressive trajectory selection, generalized
+U-turn checks, Stan-style three-stage warmup, robust initialization, and
+windowed regularized diagonal, dense, or population/subject block metrics.
+Energy traces and E-BFMI complement divergence and tree-depth diagnostics.
+Discrete nonparametric population distributions are available through
 fixed-support NPML and adaptive-grid NPAG.
 Affine MU equations are exploited directly by SAEM and BAYES fixed-effect
 blocks; IMP uses the same mapping to re-centre conditional-mode proposals.
@@ -49,9 +55,11 @@ resampling, stratified subject/cluster and parametric bootstrap, Bayesian
 posterior predictive checks, WAIC, PSIS-LOO, and durable fingerprinted model
 comparisons with explicit nested-model rules.
 
-Paired NONMEM reference validation currently covers ADVAN1-13. ADVAN14 is
-internally verified against its stiff-system reference but remains explicitly
-pending external comparison with NONMEM 7.4 or newer.
+Paired NONMEM 7.6 prediction validation covers ADVAN1-15 and ADVAN18. The
+reference installation does not license the optional RADAR5NM runtime required
+by ADVAN16/17, so those two direct rows remain explicitly `not-run`; their
+delay dynamics pass independent NONMEM ADVAN18 equivalence controls, and the
+ADVAN17 equilibrium component is covered directly through ADVAN15.
 
 The model editor exposes three definition routes:
 
@@ -119,9 +127,23 @@ grid above that. The grid can be selected explicitly with
 `gq_grid = "tensor"` or `gq_grid = "smolyak"`; assess convergence by increasing
 `gq_order` or `gq_level`, respectively.
 
+`method = "ITS"`, `"IMP"`, and `"SAEM"` implement their defining iterative
+expectation/maximization recurrences. The `nonmem_compatibility` numerical
+policy uses NONMEM-aligned method semantics and control interpretation;
+`liber_optimized` changes computational policy and proposal efficiency without
+substituting a different estimator target. Exact replication of proprietary
+random-number streams or undocumented stopping rules is not claimed.
+SAEM replicate selection uses a shared-seed marginal importance score, and the
+fit records whether its finite schedule is canonical, accelerated, f-SAEM, or
+support-pruned. Reported Bayesian posterior objectives are explicitly marked as
+not likelihood-comparable; use WAIC or PSIS-LOO instead of AIC/BIC for them.
+
 `method = "HMC"` and `method = "NUTS"` sample the exact joint CppAD target
-and retain divergence, acceptance, R-hat, and effective-sample-size
-diagnostics. `method = "NPML"` estimates weights on a fixed ETA support;
+and retain divergence, acceptance, energy/E-BFMI, R-hat, and
+effective-sample-size diagnostics. Optimized NUTS defaults to multinomial
+trajectory selection with three-stage adaptation; unit, diagonal, dense, and
+population/subject block metrics are selectable. `method = "NPML"` estimates
+weights on a fixed ETA support;
 `method = "NPAG"` expands and prunes the support grid. Bootstrap is the
 recommended uncertainty procedure for the nonparametric methods.
 
@@ -149,6 +171,10 @@ QSP reaction conservation, and immutable hybrid components against independent
 analytic, convergence, finite-difference, metamorphic, and Monte Carlo
 references. These remain experimental research interfaces; the validated
 claims apply to the named canonical contracts, not every nonlinear system.
+ADVAN16/17 use a clean-room Radau IIA order-five collocation solver matching
+their NONMEM solver family; ADVAN18 and general DDEs remain on the RK4 path.
+The mathematical provenance and compatibility boundary are documented in
+[`docs/CLEAN-ROOM-RADAU-DDE.md`](../docs/CLEAN-ROOM-RADAU-DDE.md).
 The companion
 [`validation/edge-families`](../validation/edge-families/README.md) campaign
 adds multiplicative/nonlinear SDE simulation, particle convergence,

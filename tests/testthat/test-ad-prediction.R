@@ -132,6 +132,33 @@ test_that("subjects with the same topology share a dynamic-covariate tape", {
   expect_false(isTRUE(all.equal(evaluate(first), evaluate(second))))
 })
 
+test_that("public prediction plans reuse dynamic data and exact derivatives", {
+  model <- nm_model(
+    INPUT = c("ID", "TIME", "EVID", "AMT", "WT"), ADVAN = 1,
+    DOSECMP = 1, OBSCMP = 1,
+    PRED = "CL=THETA(1)*(WT/70)^0.75;V=THETA(2);S1=V",
+    ERROR = "Y=F", THETAS = theta_table_ad(c(2, 20))
+  )
+  data <- data.frame(
+    ID = 1L, TIME = c(0, 1, 4), EVID = c(1, 0, 0),
+    AMT = c(100, 0, 0), WT = 70
+  )
+  plan <- nm_prediction_plan(model, data)
+  first <- nm_prediction_plan_evaluate(plan)
+  changed <- data
+  changed$WT <- 90
+  second <- nm_prediction_plan_evaluate(plan, changed)
+  reference <- nm_prediction_derivatives(model, changed)
+
+  expect_s3_class(plan, "nm_prediction_plan")
+  expect_equal(second$value, reference$value, tolerance = 2e-12)
+  expect_equal(second$jacobian, reference$jacobian, tolerance = 2e-11)
+  expect_false(isTRUE(all.equal(first$value, second$value)))
+  expect_equal(second$plan_telemetry$evaluations, 2L)
+  expect_equal(second$plan_telemetry$dynamic_updates, 2L)
+  expect_equal(second$plan_telemetry$retapes, 0L)
+})
+
 test_that("specialized affine propagation covers steady-state infusions", {
   previous <- getOption("LibeRation.specialized_advan")
   on.exit(options(LibeRation.specialized_advan = previous), add = TRUE)

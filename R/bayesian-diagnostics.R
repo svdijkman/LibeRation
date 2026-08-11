@@ -69,6 +69,7 @@ nm_log_lik <- function(fit, draws = NULL, marginal = TRUE,
     dimnames = list(paste0("draw_", indices),
                     paste0("subject_", unique(context$data$ID)))
   )
+  observation_counts <- .nm_context_observation_counts(context)
   set.seed(as.integer(seed))
   for (draw_index in seq_along(indices)) {
     draw <- .nm_bayes_draw(
@@ -76,8 +77,8 @@ nm_log_lik <- function(fit, draws = NULL, marginal = TRUE,
     )
     for (subject in seq_len(context$n_subjects)) {
       evaluator <- context$subjects[[subject]]
-      covariance <- .nm_effect_covariance(
-        context$model, evaluator$data, draw$omega
+      covariance <- .nm_effect_covariance_evaluator(
+        context$model, evaluator, draw$omega
       )
       positive <- .nm_positive_definite(
         covariance, "Bayesian random-effect covariance"
@@ -104,8 +105,7 @@ nm_log_lik <- function(fit, draws = NULL, marginal = TRUE,
       observation_constant <- if (!identical(
         context$model$LIK_CONFIG$error, "likelihood"
       )) {
-        sum(evaluator$data$EVID == 0L & evaluator$data$MDV == 0L &
-              is.finite(evaluator$data$DV)) * log(2 * pi)
+        observation_counts[[subject]] * log(2 * pi)
       } else 0
       conditional <- -0.5 * (joint - prior + observation_constant)
       result[draw_index, subject] <- if (isTRUE(marginal) && context$n_eta) {
@@ -135,9 +135,10 @@ nm_waic <- function(fit, log_lik = NULL, ...) {
   if (nrow(log_lik) < 2L || ncol(log_lik) < 1L || any(!is.finite(log_lik))) {
     .nm_stop("WAIC requires a finite log-likelihood matrix with at least two draws.")
   }
-  lppd <- apply(log_lik, 2L, .nm_log_mean_exp)
-  p_waic <- apply(log_lik, 2L, stats::var)
-  elpd <- lppd - p_waic
+  components <- .liberation_waic_components(log_lik)
+  lppd <- components$lppd
+  p_waic <- components$p_waic
+  elpd <- components$elpd
   pointwise <- data.frame(
     unit = colnames(log_lik) %||% paste0("unit_", seq_len(ncol(log_lik))),
     lppd = lppd, p_waic = p_waic, elpd_waic = elpd,

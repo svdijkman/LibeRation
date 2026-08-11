@@ -497,7 +497,9 @@ nm_mu <- function(eta, expression, parameter = NULL,
 .nm_compile_des_ir <- function(des, pred_ir, n_theta, n_eta, covariates,
                                dde_config = NULL,
                                algebraic_variables = character()) {
-  lagged <- .nm_rewrite_dde_lags(paste(des, collapse = "\n"), dde_config)
+  lagged <- .nm_rewrite_dde_lags(
+    paste(des, collapse = "\n"), dde_config, algebraic_variables
+  )
   rewritten <- .nm_rewrite_ode_indexing(lagged$code)
   parsed <- tryCatch(
     parse(text = rewritten),
@@ -520,10 +522,20 @@ nm_mu <- function(eta, expression, parameter = NULL,
   }
   n_state <- max(derivative_index)
   if (length(lagged$lags)) {
+    for (index in seq_along(lagged$lags)) {
+      algebraic <- lagged$lags[[index]]$algebraic
+      if (!is.null(algebraic)) {
+        lagged$lags[[index]]$state <- n_state + match(
+          algebraic, algebraic_variables
+        )
+      }
+    }
     lag_states <- vapply(lagged$lags, `[[`, integer(1), "state")
     lag_delays <- vapply(lagged$lags, `[[`, character(1), "delay")
-    if (any(lag_states < 1L | lag_states > n_state)) {
-      .nm_stop("A DDE LAG() state index exceeds the DES state dimension.")
+    if (anyNA(lag_states) || any(
+      lag_states < 1L | lag_states > n_state + length(algebraic_variables)
+    )) {
+      .nm_stop("A DDE LAG() state index exceeds the differential/algebraic state dimension.")
     }
     missing_delay <- setdiff(lag_delays, pred_ir$output_names)
     if (length(missing_delay)) {
@@ -560,7 +572,7 @@ nm_mu <- function(eta, expression, parameter = NULL,
 }
 
 .nm_ode_control <- function(control = NULL, advan) {
-  implicit <- advan %in% c(8L, 9L, 13L, 14L)
+  implicit <- advan %in% c(8L, 9L, 13L, 14L, 15L, 17L)
   defaults <- list(
     rtol = if (implicit) 1e-7 else 1e-8,
     atol = if (implicit) 1e-9 else 1e-10,
@@ -727,17 +739,19 @@ nm_mu <- function(eta, expression, parameter = NULL,
 #'   compiled block may use `DV`, `F`/`PRED`/`IPRED`, model assignments,
 #'   parameters, numeric input columns, and the Markov helpers `PREV_DV`,
 #'   `PREV_TIME`, `DT`, and `FIRST`.
-#' @param DES ODE derivative code for ADVAN6/8/9/13/14. ADVAN10 supplies its
-#'   standard Michaelis--Menten equation automatically from `VM` and `KM`
-#'   assignments in `PRED`.
+#' @param DES Differential-system code for ADVAN6/8/9/13--18. ADVAN10 supplies
+#'   its standard Michaelis--Menten equation automatically from `VM` and `KM`
+#'   assignments in `PRED`. ADVAN15 is the DAE route, ADVAN16/18 are DDE
+#'   routes, and ADVAN17 combines DDE history with algebraic constraints.
 #' @param ALG Algebraic residual equations for an experimental index-1 DAE.
 #' @param THETAS,OMEGAS,SIGMAS Parameter tables.
 #' @param COVARIATES Dataset covariates exposed to `PRED`.
 #' @param USE_ODE Whether an ODE solver is explicitly requested.
 #' @param ODE_CONTROL Named list with `rtol`, `atol`, `max_steps`, and optional
 #'   `initial_step`. ADVAN6 and ADVAN10 use adaptive Dormand-Prince 5(4).
-#'   ADVAN8/9/13/14 use an A-stable adaptive implicit trapezoidal method;
-#'   ADVAN9 additionally accepts equilibrium constraints through `ALG`.
+#'   ADVAN8/9/13--15 use an A-stable adaptive implicit trapezoidal method;
+#'   ADVAN9/15 accept equilibrium constraints through `ALG`. ADVAN16--18 use
+#'   the differentiable method-of-steps engine when `DDE_CONFIG` is present.
 #' @param IOV Number of trailing inter-occasion ETAs.
 #' @param LIK_CONFIG Reserved likelihood configuration.
 #' @param HMM_CONFIG Optional finite-state hidden Markov configuration created
@@ -777,6 +791,10 @@ nm_mu <- function(eta, expression, parameter = NULL,
 #'   [nm_outcome()] or [nm_outcomes()]. When `ERROR` is omitted, LibeRation
 #'   generates an editable normalized likelihood block. The declaration is
 #'   also used for stochastic outcome simulation and family diagnostics.
+#' @param NUMERICAL_MODE Default numerical policy for this model.
+#'   `"nonmem_compatibility"` retains the conservative validated path;
+#'   `"liber_optimized"` enables LibeR-specific solver accelerations. A run
+#'   can override this through [nm_est()] or [nm_simulate()].
 #' @param SOLVER `auto`, `advan`, `matrix`, `ode`, `dde`, `dae`, or the
 #'   automatically selected `direct` route for `PRED_MODE = "pred"`.
 #' @param ERROR_TYPE Standard residual-error form, or `auto`.
@@ -827,14 +845,16 @@ nm_model <- function(INPUT,
                      PRED_SOURCE = NULL,
                      EXPERIMENTAL = NULL,
                      OUTCOMES = NULL,
+                     NUMERICAL_MODE = c("nonmem_compatibility", "liber_optimized"),
                      SOLVER = c("auto", "advan", "matrix", "ode", "dde", "dae", "direct"),
                      ERROR_TYPE = c("auto", "none", "additive", "proportional", "combined", "exponential", "power", "likelihood"),
                      GRAPH = NULL,
                      LAYOUT = NULL,
                      LANGUAGE = c("R", "C++")) {
   error_was_missing <- missing(ERROR)
+  numerical_mode <- .nm_numerical_mode(NUMERICAL_MODE[[1L]])
   advan <- as.integer(ADVAN)
-  supported <- 1:14
+  supported <- 1:18
   if (length(advan) != 1L || is.na(advan) || !advan %in% supported) {
     .nm_stop("ADVAN must be one of: ", paste(supported, collapse = ", "), ".")
   }
@@ -882,14 +902,28 @@ nm_model <- function(INPUT,
   if (identical(pred_mode, "pred") && length(des_components)) {
     .nm_stop("Direct $PRED models cannot use COMPONENTS with scope = 'des'.")
   }
-  if (!is.null(dde_config) && !is.null(dae_config)) {
-    .nm_stop("A model cannot currently combine DDE_CONFIG and DAE_CONFIG.")
+  if (!is.null(dde_config) && !is.null(dae_config) && advan != 17L) {
+    .nm_stop(
+      "Combined DDE_CONFIG and DAE_CONFIG requires ADVAN17."
+    )
   }
-  if (!is.null(dde_config) && !advan %in% c(6L, 13L)) {
-    .nm_stop("DDE models require ADVAN6 or ADVAN13.")
+  if (!is.null(dde_config) &&
+      !advan %in% c(6L, 9L, 13L, 14L, 16L, 17L, 18L)) {
+    .nm_stop(
+      "DDE models require ADVAN6, ADVAN9, or ADVAN13 through ADVAN18."
+    )
   }
-  if (!is.null(dae_config) && !advan %in% c(6L, 9L, 13L)) {
-    .nm_stop("DAE models require ADVAN6, ADVAN9, or ADVAN13.")
+  if (!is.null(dae_config) && !advan %in% c(6L, 9L, 13L, 15L, 17L)) {
+    .nm_stop("DAE models require ADVAN6, ADVAN9, ADVAN13, ADVAN15, or ADVAN17.")
+  }
+  if (advan %in% c(16L, 18L) && is.null(dde_config)) {
+    .nm_stop("ADVAN", advan, " requires DDE_CONFIG.")
+  }
+  if (advan == 15L && is.null(dae_config)) {
+    .nm_stop("ADVAN15 requires DAE_CONFIG.")
+  }
+  if (advan == 17L && (is.null(dde_config) || is.null(dae_config))) {
+    .nm_stop("ADVAN17 requires both DDE_CONFIG and DAE_CONFIG.")
   }
   if (!identical(pred_mode, "pred") && advan %in% c(5L, 7L) &&
       !inherits(GRAPH, "nm_matrix_model")) {
@@ -992,7 +1026,7 @@ nm_model <- function(INPUT,
   if (!error_type %in% c("none", "likelihood") && nrow(sigma) == 0L) {
     .nm_stop("Residual error type '", error_type, "' requires SIGMAS.")
   }
-  general_ode <- c(6L, 8L, 9L, 13L, 14L)
+  general_ode <- c(6L, 8L, 9L, 13L:18L)
   if (!identical(pred_mode, "pred") && advan %in% general_ode &&
       !nzchar(trimws(DES))) {
     .nm_stop("ADVAN", advan, " requires a DES block.")
@@ -1093,9 +1127,14 @@ nm_model <- function(INPUT,
   } else NULL
   if (!is.null(dde_config)) {
     history <- dde_config$history
-    if (length(history) == 1L) history <- rep(history, des_info$n_state)
-    if (length(history) != des_info$n_state) {
-      .nm_stop("DDE history must be scalar or contain one value per DES state.")
+    history_size <- des_info$n_state + length(dae_config$variables %||% character())
+    if (length(history) == 1L) history <- rep(history, history_size)
+    if (length(history) != history_size) {
+      .nm_stop(
+        "DDE history must be scalar or contain one value per differential",
+        if (history_size > des_info$n_state) " and algebraic" else "",
+        " state."
+      )
     }
     dde_config$history <- history
     dde_config$lags <- des_info$lags
@@ -1193,6 +1232,7 @@ nm_model <- function(INPUT,
       MU = mu,
       EXPERIMENTAL = experimental,
       OUTCOMES = outcomes,
+      NUMERICAL_MODE = numerical_mode,
       outcome_error_generated = !is.null(outcomes) && isTRUE(error_was_missing),
       SOLVER = solver,
       ERROR_TYPE = error_type,
@@ -1360,7 +1400,8 @@ print.nm_model <- function(x, ...) {
 nm_support_matrix <- function() {
   feature <- c("ADVAN1", "ADVAN2", "ADVAN3", "ADVAN4", "ADVAN5", "ADVAN6",
                "ADVAN7", "ADVAN8", "ADVAN9", "ADVAN10", "ADVAN11",
-               "ADVAN12", "ADVAN13", "ADVAN14",
+               "ADVAN12", "ADVAN13", "ADVAN14", "ADVAN15",
+               "ADVAN16", "ADVAN17", "ADVAN18",
                "matrix exponential", "steady-state bolus", "steady-state infusion",
                "nonlinear ODE steady state",
                "FO", "FOCE", "FOCEI", "LAPLACE", "ITS", "GQ", "IMP", "SAEM", "BAYES",

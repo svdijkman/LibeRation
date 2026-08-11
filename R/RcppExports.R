@@ -9,12 +9,184 @@
     .Call(`_LibeRation_liberation_nca_profile`, time_input, concentration_input, method, dose, tau, route, terminal_indices, partial_start, partial_end)
 }
 
+.liberation_stochastic_eta_context_create <- function(engine_pointer, tape_pointers, subject_data, n_theta, n_eta, n_sigma, n_omega, use_ode, initial_theta, initial_sigma, initial_omega, guard_radius, fused_values, native_threads) {
+    .Call(`_LibeRation_liberation_stochastic_eta_context_create`, engine_pointer, tape_pointers, subject_data, n_theta, n_eta, n_sigma, n_omega, use_ode, initial_theta, initial_sigma, initial_omega, guard_radius, fused_values, native_threads)
+}
+
+.liberation_stochastic_eta_context_eval <- function(context_pointer, theta, eta, sigma, omega) {
+    .Call(`_LibeRation_liberation_stochastic_eta_context_eval`, context_pointer, theta, eta, sigma, omega)
+}
+
+.liberation_stochastic_eta_context_laplace_proposal <- function(context_pointer, theta, starts, sigma, omega, maxit, tolerance) {
+    .Call(`_LibeRation_liberation_stochastic_eta_context_laplace_proposal`, context_pointer, theta, starts, sigma, omega, maxit, tolerance)
+}
+
+.liberation_stochastic_eta_context_random_walk <- function(context_pointer, theta, eta, sigma, omega, proposal_roots, normals, log_uniforms, mcmc_steps, step_scale, current_values = NULL) {
+    .Call(`_LibeRation_liberation_stochastic_eta_context_random_walk`, context_pointer, theta, eta, sigma, omega, proposal_roots, normals, log_uniforms, mcmc_steps, step_scale, current_values)
+}
+
+.liberation_stochastic_eta_context_independence <- function(context_pointer, theta, eta, sigma, omega, proposal_modes, proposal_roots, proposal_precisions, normals, log_uniforms, mcmc_steps, current_values = NULL, proposal_df = 1e300, proposal_scales = NULL) {
+    .Call(`_LibeRation_liberation_stochastic_eta_context_independence`, context_pointer, theta, eta, sigma, omega, proposal_modes, proposal_roots, proposal_precisions, normals, log_uniforms, mcmc_steps, current_values, proposal_df, proposal_scales)
+}
+
+.liberation_stochastic_eta_context_bayes <- function(context_pointer, map_config, n_burn, n_sample, n_thin, step_scale, eta_step, adapt, outer_kernel, adaptive_start, adaptive_interval, target_acceptance, delayed_rejection_scale, eta_kernel, eta_refresh, eta_maxit, eta_tolerance, eta_df, eta_rescue_probability, eta_parameter_refresh, eta_low_acceptance, gibbs_omega) {
+    .Call(`_LibeRation_liberation_stochastic_eta_context_bayes`, context_pointer, map_config, n_burn, n_sample, n_thin, step_scale, eta_step, adapt, outer_kernel, adaptive_start, adaptive_interval, target_acceptance, delayed_rejection_scale, eta_kernel, eta_refresh, eta_maxit, eta_tolerance, eta_df, eta_rescue_probability, eta_parameter_refresh, eta_low_acceptance, gibbs_omega)
+}
+
+.liberation_gq_context_create <- function(stochastic_context_pointer, map_config, nodes, log_measure, measure_sign, adaptive, eta_maxit, tolerance) {
+    .Call(`_LibeRation_liberation_gq_context_create`, stochastic_context_pointer, map_config, nodes, log_measure, measure_sign, adaptive, eta_maxit, tolerance)
+}
+
+.liberation_gq_context_eval <- function(context_pointer, encoded, gradient = TRUE) {
+    .Call(`_LibeRation_liberation_gq_context_eval`, context_pointer, encoded, gradient)
+}
+
+.liberation_gq_context_optimize <- function(context_pointer, maxit, trace = 0L, exact_refinement = TRUE) {
+    .Call(`_LibeRation_liberation_gq_context_optimize`, context_pointer, maxit, trace, exact_refinement)
+}
+
+.liberation_stochastic_eta_context_telemetry <- function(context_pointer) {
+    .Call(`_LibeRation_liberation_stochastic_eta_context_telemetry`, context_pointer)
+}
+
+.liberation_saem_fixed_eta_context_create <- function(tape_pointers, eta, n_theta, n_sigma, n_omega) {
+    .Call(`_LibeRation_liberation_saem_fixed_eta_context_create`, tape_pointers, eta, n_theta, n_sigma, n_omega)
+}
+
+.liberation_saem_fixed_eta_context_eval <- function(context_pointer, theta, sigma, omega) {
+    .Call(`_LibeRation_liberation_saem_fixed_eta_context_eval`, context_pointer, theta, sigma, omega)
+}
+
+.liberation_saem_fixed_eta_context_eval_aggregate <- function(context_pointer, theta, sigma, omega) {
+    .Call(`_LibeRation_liberation_saem_fixed_eta_context_eval_aggregate`, context_pointer, theta, sigma, omega)
+}
+
+.liberation_weighted_eta_context_create <- function(engine_pointer, tape_pointers, subject_data, n_theta, n_eta, n_sigma, n_omega, use_ode = FALSE, reduced_population_tape = FALSE, native_threads = 1L, ode_support_tape_limit = 4096L) {
+    .Call(`_LibeRation_liberation_weighted_eta_context_create`, engine_pointer, tape_pointers, subject_data, n_theta, n_eta, n_sigma, n_omega, use_ode, reduced_population_tape, native_threads, ode_support_tape_limit)
+}
+
+.liberation_weighted_eta_context_set <- function(context_pointer, eta, weights) {
+    invisible(.Call(`_LibeRation_liberation_weighted_eta_context_set`, context_pointer, eta, weights))
+}
+
+.liberation_weighted_eta_context_set_importance <- function(context_pointer, theta, sigma, omega, eta, log_proposal) {
+    .Call(`_LibeRation_liberation_weighted_eta_context_set_importance`, context_pointer, theta, sigma, omega, eta, log_proposal)
+}
+
+.liberation_weighted_eta_context_update <- function(context_pointer, eta, gamma, max_support = 0L, prune_tolerance = 0.0) {
+    invisible(.Call(`_LibeRation_liberation_weighted_eta_context_update`, context_pointer, eta, gamma, max_support, prune_tolerance))
+}
+
+.liberation_weighted_eta_context_eval <- function(context_pointer, theta, sigma, omega) {
+    .Call(`_LibeRation_liberation_weighted_eta_context_eval`, context_pointer, theta, sigma, omega)
+}
+
+.liberation_weighted_eta_context_mean <- function(context_pointer) {
+    .Call(`_LibeRation_liberation_weighted_eta_context_mean`, context_pointer)
+}
+
+.liberation_weighted_eta_context_weights <- function(context_pointer) {
+    .Call(`_LibeRation_liberation_weighted_eta_context_weights`, context_pointer)
+}
+
+.liberation_weighted_eta_context_recenter <- function(context_pointer, adjustment) {
+    invisible(.Call(`_LibeRation_liberation_weighted_eta_context_recenter`, context_pointer, adjustment))
+}
+
+.liberation_weighted_eta_context_omega <- function(context_pointer, n_eta_base, iov, omega_rows, omega_cols) {
+    .Call(`_LibeRation_liberation_weighted_eta_context_omega`, context_pointer, n_eta_base, iov, omega_rows, omega_cols)
+}
+
+.liberation_weighted_eta_context_sigma <- function(context_pointer, engine_pointer, data, theta, sigma) {
+    .Call(`_LibeRation_liberation_weighted_eta_context_sigma`, context_pointer, engine_pointer, data, theta, sigma)
+}
+
+.liberation_weighted_eta_context_telemetry <- function(context_pointer) {
+    .Call(`_LibeRation_liberation_weighted_eta_context_telemetry`, context_pointer)
+}
+
+.liberation_saem_mstep <- function(tape_pointers, eta, theta, sigma, omega, theta_free, sigma_free, lower, upper, prior_config, maxit = 20L, tolerance = 1e-6, trace = 0L, optimizer_state = NULL) {
+    .Call(`_LibeRation_liberation_saem_mstep`, tape_pointers, eta, theta, sigma, omega, theta_free, sigma_free, lower, upper, prior_config, maxit, tolerance, trace, optimizer_state)
+}
+
+.liberation_saem_weighted_mstep <- function(weighted_context, theta, sigma, omega, theta_free, sigma_free, lower, upper, prior_config, maxit = 20L, tolerance = 1e-6, trace = 0L, optimizer_state = NULL) {
+    .Call(`_LibeRation_liberation_saem_weighted_mstep`, weighted_context, theta, sigma, omega, theta_free, sigma_free, lower, upper, prior_config, maxit, tolerance, trace, optimizer_state)
+}
+
+.liberation_saem_omega_sufficient <- function(eta, n_eta_base, iov, omega_rows, omega_cols) {
+    .Call(`_LibeRation_liberation_saem_omega_sufficient`, eta, n_eta_base, iov, omega_rows, omega_cols)
+}
+
 .liberation_engine_create <- function(specification) {
     .Call(`_LibeRation_liberation_engine_create`, specification)
 }
 
 .liberation_engine_simulate <- function(engine_pointer, data, theta, eta, sigma) {
     .Call(`_LibeRation_liberation_engine_simulate`, engine_pointer, data, theta, eta, sigma)
+}
+
+.liberation_subject_store_create <- function(data, starts, lengths) {
+    .Call(`_LibeRation_liberation_subject_store_create`, data, starts, lengths)
+}
+
+.liberation_subject_view_signature <- function(data_input, ignored_columns, include_fo_layout = FALSE) {
+    .Call(`_LibeRation_liberation_subject_view_signature`, data_input, ignored_columns, include_fo_layout)
+}
+
+.liberation_subject_view_project <- function(data_input, columns, observed_only = FALSE, first_only = FALSE) {
+    .Call(`_LibeRation_liberation_subject_view_project`, data_input, columns, observed_only, first_only)
+}
+
+.liberation_subject_effect_covariance <- function(engine_pointer, data_input, omega, expanded_dimension) {
+    .Call(`_LibeRation_liberation_subject_effect_covariance`, engine_pointer, data_input, omega, expanded_dimension)
+}
+
+.liberation_its_gaussian_covariance <- function(engine_pointer, prediction_tapes, subject_data, theta, modes, sigma, omega) {
+    .Call(`_LibeRation_liberation_its_gaussian_covariance`, engine_pointer, prediction_tapes, subject_data, theta, modes, sigma, omega)
+}
+
+.liberation_subject_observation_count <- function(data_input) {
+    .Call(`_LibeRation_liberation_subject_observation_count`, data_input)
+}
+
+.liberation_subject_observation_counts <- function(subject_source) {
+    .Call(`_LibeRation_liberation_subject_observation_counts`, subject_source)
+}
+
+.liberation_mvn_draws <- function(mean_input, covariance_input, draws) {
+    .Call(`_LibeRation_liberation_mvn_draws`, mean_input, covariance_input, draws)
+}
+
+.liberation_eta_draw_pool <- function(root_input, subjects, replicates) {
+    .Call(`_LibeRation_liberation_eta_draw_pool`, root_input, subjects, replicates)
+}
+
+.liberation_expand_addl_layout <- function(time, evid, amount, interval, addl, source_row) {
+    .Call(`_LibeRation_liberation_expand_addl_layout`, time, evid, amount, interval, addl, source_row)
+}
+
+.liberation_event_order <- function(id, time, priority, source_row) {
+    .Call(`_LibeRation_liberation_event_order`, id, time, priority, source_row)
+}
+
+.liberation_mu_program_create <- function(ir, eta) {
+    .Call(`_LibeRation_liberation_mu_program_create`, ir, eta)
+}
+
+.liberation_mu_program_eval <- function(program_pointer, subject_source, theta, n_eta) {
+    .Call(`_LibeRation_liberation_mu_program_eval`, program_pointer, subject_source, theta, n_eta)
+}
+
+.liberation_mu_affine_design <- function(program_pointer, subject_source, theta, theta_indices, links, n_eta) {
+    .Call(`_LibeRation_liberation_mu_affine_design`, program_pointer, subject_source, theta, theta_indices, links, n_eta)
+}
+
+.liberation_saem_sigma_sufficient <- function(engine_pointer, data, theta, eta, sigma) {
+    .Call(`_LibeRation_liberation_saem_sigma_sufficient`, engine_pointer, data, theta, eta, sigma)
+}
+
+.liberation_engine_simulate_batch <- function(engine_pointer, data, theta, eta_values, sigma) {
+    .Call(`_LibeRation_liberation_engine_simulate_batch`, engine_pointer, data, theta, eta_values, sigma)
 }
 
 .liberation_engine_hmm_filter <- function(engine_pointer, data, theta, eta, sigma) {
@@ -41,20 +213,24 @@
     .Call(`_LibeRation_liberation_advan_matrix`, advan, parameters)
 }
 
-.liberation_prediction_tape_create <- function(engine_pointer, data, theta, eta, sigma) {
-    .Call(`_LibeRation_liberation_prediction_tape_create`, engine_pointer, data, theta, eta, sigma)
+.liberation_prediction_tape_create <- function(engine_pointer, data_input, theta, eta, sigma) {
+    .Call(`_LibeRation_liberation_prediction_tape_create`, engine_pointer, data_input, theta, eta, sigma)
 }
 
 .liberation_prediction_tape_info <- function(tape_pointer) {
     .Call(`_LibeRation_liberation_prediction_tape_info`, tape_pointer)
 }
 
-.liberation_prediction_tape_new_dynamic <- function(tape_pointer, data) {
-    .Call(`_LibeRation_liberation_prediction_tape_new_dynamic`, tape_pointer, data)
+.liberation_prediction_tape_new_dynamic <- function(tape_pointer, data_input) {
+    .Call(`_LibeRation_liberation_prediction_tape_new_dynamic`, tape_pointer, data_input)
 }
 
-.liberation_fo_tape_new_dynamic <- function(tape_pointer, data) {
-    .Call(`_LibeRation_liberation_fo_tape_new_dynamic`, tape_pointer, data)
+.liberation_prediction_tape_set_dynamic <- function(tape_pointer, values) {
+    invisible(.Call(`_LibeRation_liberation_prediction_tape_set_dynamic`, tape_pointer, values))
+}
+
+.liberation_fo_tape_new_dynamic <- function(tape_pointer, data_input) {
+    .Call(`_LibeRation_liberation_fo_tape_new_dynamic`, tape_pointer, data_input)
 }
 
 .liberation_prediction_tape_eval <- function(tape_pointer, point, jacobian = TRUE) {
@@ -69,16 +245,28 @@
     .Call(`_LibeRation_liberation_matrix_exp_pade`, matrix, dt)
 }
 
-.liberation_fo_tape_create <- function(engine_pointer, prediction_tape_pointer, data, theta, sigma, omega) {
-    .Call(`_LibeRation_liberation_fo_tape_create`, engine_pointer, prediction_tape_pointer, data, theta, sigma, omega)
+.liberation_fo_tape_create <- function(engine_pointer, prediction_tape_pointer, data_input, theta, sigma, omega, low_rank = FALSE, low_rank_tolerance = 1e-9, low_rank_condition_tolerance = 1e-12) {
+    .Call(`_LibeRation_liberation_fo_tape_create`, engine_pointer, prediction_tape_pointer, data_input, theta, sigma, omega, low_rank, low_rank_tolerance, low_rank_condition_tolerance)
 }
 
-.liberation_curvature_tape_create <- function(engine_pointer, prediction_tape_pointer, objective_tape_pointer, data, theta, eta, sigma, omega, approximation) {
-    .Call(`_LibeRation_liberation_curvature_tape_create`, engine_pointer, prediction_tape_pointer, objective_tape_pointer, data, theta, eta, sigma, omega, approximation)
+.liberation_curvature_tape_create <- function(engine_pointer, prediction_tape_pointer, objective_tape_pointer, data_input, theta, eta, sigma, omega, approximation) {
+    .Call(`_LibeRation_liberation_curvature_tape_create`, engine_pointer, prediction_tape_pointer, objective_tape_pointer, data_input, theta, eta, sigma, omega, approximation)
 }
 
-.liberation_objective_tape_create <- function(engine_pointer, data, theta, eta, sigma, omega, interaction = TRUE) {
-    .Call(`_LibeRation_liberation_objective_tape_create`, engine_pointer, data, theta, eta, sigma, omega, interaction)
+.liberation_objective_tape_create <- function(engine_pointer, data_input, theta, eta, sigma, omega, interaction = TRUE) {
+    .Call(`_LibeRation_liberation_objective_tape_create`, engine_pointer, data_input, theta, eta, sigma, omega, interaction)
+}
+
+.liberation_shared_fo_objective_tape_create <- function(engine_pointer, prediction_tape_pointer, data_input, theta, eta, sigma, omega) {
+    .Call(`_LibeRation_liberation_shared_fo_objective_tape_create`, engine_pointer, prediction_tape_pointer, data_input, theta, eta, sigma, omega)
+}
+
+.liberation_objective_tape_new_dynamic <- function(tape_pointer, data_input) {
+    .Call(`_LibeRation_liberation_objective_tape_new_dynamic`, tape_pointer, data_input)
+}
+
+.liberation_objective_tape_set_dynamic <- function(tape_pointer, values) {
+    invisible(.Call(`_LibeRation_liberation_objective_tape_set_dynamic`, tape_pointer, values))
 }
 
 .liberation_objective_tape_eval <- function(tape_pointer, point, gradient = TRUE, hessian = FALSE) {
@@ -101,12 +289,16 @@
     .Call(`_LibeRation_liberation_objective_tape_eta_values`, tape_pointer, point, eta_positions, eta)
 }
 
-.liberation_objective_tape_collection_values <- function(tape_pointers, points) {
-    .Call(`_LibeRation_liberation_objective_tape_collection_values`, tape_pointers, points)
+.liberation_objective_tape_collection_values <- function(tape_pointers, points, subject_data) {
+    .Call(`_LibeRation_liberation_objective_tape_collection_values`, tape_pointers, points, subject_data)
 }
 
-.liberation_objective_tape_collection_gradients <- function(tape_pointers, points) {
-    .Call(`_LibeRation_liberation_objective_tape_collection_gradients`, tape_pointers, points)
+.liberation_objective_tape_collection_gradients <- function(tape_pointers, points, subject_data) {
+    .Call(`_LibeRation_liberation_objective_tape_collection_gradients`, tape_pointers, points, subject_data)
+}
+
+.liberation_objective_tape_collection_value_gradients <- function(tape_pointers, points, subject_data) {
+    .Call(`_LibeRation_liberation_objective_tape_collection_value_gradients`, tape_pointers, points, subject_data)
 }
 
 .liberation_objective_tape_hessian_subset <- function(tape_pointer, point, row_positions, column_positions) {
@@ -121,16 +313,52 @@
     .Call(`_LibeRation_liberation_objective_tape_eta_mode`, tape_pointer, point, eta_positions, start, maxit, tolerance, exact_hessian)
 }
 
-.liberation_objective_tape_eta_modes <- function(tape_pointers, points, eta_positions, starts, maxit = 100L, tolerance = 1e-7, exact_hessian = TRUE) {
-    .Call(`_LibeRation_liberation_objective_tape_eta_modes`, tape_pointers, points, eta_positions, starts, maxit, tolerance, exact_hessian)
+.liberation_objective_tape_eta_mode_prior <- function(tape_pointer, point, eta_positions, start, prior_mean, base_precision_input, prior_precision_input, maxit = 100L, tolerance = 1e-7, exact_hessian = TRUE) {
+    .Call(`_LibeRation_liberation_objective_tape_eta_mode_prior`, tape_pointer, point, eta_positions, start, prior_mean, base_precision_input, prior_precision_input, maxit, tolerance, exact_hessian)
+}
+
+.liberation_objective_tape_eta_modes <- function(tape_pointers, points, eta_positions, starts, maxit = 100L, tolerance = 1e-7, exact_hessian = TRUE, subject_data_input = NULL, reuse_optimizer_state = FALSE) {
+    .Call(`_LibeRation_liberation_objective_tape_eta_modes`, tape_pointers, points, eta_positions, starts, maxit, tolerance, exact_hessian, subject_data_input, reuse_optimizer_state)
 }
 
 .liberation_objective_tape_point_gradients <- function(tape_pointer, points) {
     .Call(`_LibeRation_liberation_objective_tape_point_gradients`, tape_pointer, points)
 }
 
-.liberation_objective_tape_eta_metropolis <- function(tape_pointers, points, eta_positions, current_eta, proposal_roots, normals, log_uniforms, mcmc_steps, step_scale = 0.5) {
-    .Call(`_LibeRation_liberation_objective_tape_eta_metropolis`, tape_pointers, points, eta_positions, current_eta, proposal_roots, normals, log_uniforms, mcmc_steps, step_scale)
+.liberation_objective_tape_eta_metropolis <- function(tape_pointers, points, eta_positions, current_eta, proposal_roots, normals, log_uniforms, mcmc_steps, step_scale = 0.5, current_values_input = NULL) {
+    .Call(`_LibeRation_liberation_objective_tape_eta_metropolis`, tape_pointers, points, eta_positions, current_eta, proposal_roots, normals, log_uniforms, mcmc_steps, step_scale, current_values_input)
+}
+
+.liberation_objective_tape_importance_collection <- function(tape_pointers, base_points, eta_positions, eta_samples, log_proposals, log_measures, measure_signs, gradient = TRUE, subject_data_input = NULL) {
+    .Call(`_LibeRation_liberation_objective_tape_importance_collection`, tape_pointers, base_points, eta_positions, eta_samples, log_proposals, log_measures, measure_signs, gradient, subject_data_input)
+}
+
+.liberation_objective_tape_eta_grid <- function(tape_pointers, base_points, eta_positions, eta_grid, gradient = FALSE) {
+    .Call(`_LibeRation_liberation_objective_tape_eta_grid`, tape_pointers, base_points, eta_positions, eta_grid, gradient)
+}
+
+.liberation_np_weights <- function(loglik, initial, maxit = 1000L, tolerance = 1e-8) {
+    .Call(`_LibeRation_liberation_np_weights`, loglik, initial, maxit, tolerance)
+}
+
+.liberation_np_weights_interior <- function(loglik, initial, maxit = 1000L, tolerance = 1e-8) {
+    .Call(`_LibeRation_liberation_np_weights_interior`, loglik, initial, maxit, tolerance)
+}
+
+.liberation_np_responsibilities <- function(loglik, weights) {
+    .Call(`_LibeRation_liberation_np_responsibilities`, loglik, weights)
+}
+
+.liberation_np_gradient_reduce <- function(gradient, responsibilities) {
+    .Call(`_LibeRation_liberation_np_gradient_reduce`, gradient, responsibilities)
+}
+
+.liberation_waic_components <- function(loglik) {
+    .Call(`_LibeRation_liberation_waic_components`, loglik)
+}
+
+.liberation_ar1_standardize <- function(observed, groups, rho, use_ar1) {
+    .Call(`_LibeRation_liberation_ar1_standardize`, observed, groups, rho, use_ar1)
 }
 
 .liberation_mixture_component_nll <- function(engine_pointer, data, theta, eta, sigma) {
@@ -159,5 +387,9 @@
 
 .liberation_population_objective_telemetry <- function(pointer) {
     .Call(`_LibeRation_liberation_population_objective_telemetry`, pointer)
+}
+
+.liberation_population_objective_native_optimizer <- function(pointer, start, lower, upper, maxit = 200L, tolerance = 1e-6, trace = 0L) {
+    .Call(`_LibeRation_liberation_population_objective_native_optimizer`, pointer, start, lower, upper, maxit, tolerance, trace)
 }
 
