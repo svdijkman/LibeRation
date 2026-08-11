@@ -122,7 +122,11 @@ test_that("persistent stochastic context preserves the random-walk kernel", {
     stats::rnorm(context$n_subjects * steps * context$n_eta),
     context$n_subjects * steps, context$n_eta
   )
-  log_uniforms <- log(stats::runif(context$n_subjects * steps))
+  # Use a decision threshold away from random near-boundary draws.  The
+  # proposal objective is evaluated through two equivalent compiled paths;
+  # platform libm differences must not turn this kernel-equivalence test into
+  # a test of a chance accept/reject tie.
+  log_uniforms <- numeric(context$n_subjects * steps)
   current <- .nm_objective_collection(context$subjects, parameters, eta)
   reference <- .nm_saem_metropolis_chunk(
     context$subjects, parameters, eta, roots, normals, log_uniforms,
@@ -143,6 +147,8 @@ test_that("persistent stochastic context preserves the random-walk kernel", {
   expect_equal(observed$eta, reference$eta, tolerance = 0)
   expect_equal(observed$value, reference$value, tolerance = 2e-12)
   expect_identical(observed$accepted, reference$accepted)
+  expect_gt(observed$accepted, 0L)
+  expect_lt(observed$accepted, context$n_subjects * steps)
   expect_equal(observed$current_evaluations, 0L)
   expect_equal(observed$current_cache_hits, context$n_subjects)
 })

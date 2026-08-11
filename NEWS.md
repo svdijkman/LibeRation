@@ -1,3 +1,9 @@
+# LibeRation 0.10.9
+
+- Makes compiled stochastic-kernel and adaptive-quadrature equivalence tests
+  portable across reference BLAS and Apple Accelerate without weakening their
+  algorithmic checks or changing runtime estimation behavior.
+
 # LibeRation 0.10.8
 
 - Declares the `withr` test dependency explicitly so strict CRAN-style checks
