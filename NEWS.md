@@ -1,3 +1,9 @@
+# LibeRation 0.10.10
+
+- Splits estimator, likelihood, event, ADVAN, and diagnostic sources along
+  logical boundaries without changing estimator behaviour or numerical policy.
+- Updates the packaged compatibility manifest for ecosystem beta.21.
+
 # LibeRation 0.10.9
 
 - Makes compiled stochastic-kernel and adaptive-quadrature equivalence tests

@@ -44,11 +44,23 @@ using Vector = Eigen::VectorXd;
 // CppAD/Eigen template definitions remain visible without duplication.
 // The population-objective R boundary is separately compiled in
 // population_objective_api.cpp.
-#include "pk_engine_event_advan.h"
+#include "pk_engine_support.h"
+#include "pk_engine_advan_topology.h"
+#include "pk_engine_model_engine.h"
+#include "pk_engine_event_data.h"
+#include "pk_engine_model_evaluation.h"
 #include "pk_engine_differential_systems.h"
 #include "pk_engine_ad_propagation.h"
-#include "pk_engine_likelihood.h"
+#include "pk_engine_objective_tape.h"
+#include "pk_engine_residual_models.h"
+#include "pk_engine_fo_marginal.h"
+#include "pk_engine_conditional.h"
 #include "pk_engine_population.h"
+#include "pk_engine_stochastic_support.h"
+#include "pk_engine_stochastic_eta_context.h"
+#include "pk_engine_quadrature.h"
+#include "pk_engine_saem_context.h"
+#include "pk_engine_weighted_eta_context.h"
 #include "pk_engine_saem.h"
 #include "pk_engine_state_space.h"
 
